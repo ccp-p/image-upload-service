@@ -129,16 +129,19 @@ func (vm *VersionManager) renameFileWithHash(filePath string) (*FileInfo, error)
         OriginalPath: sourcePath,
         HashedPath:   newPath,
         Hash:         hash,
-        Renamed:      true, // 总是标记为已重命名，因为我们需要生成hash版本
+        Renamed:      true,
     }
     
-    // 如果目标文件已存在且内容相同，跳过复制
+    // 检查目标文件是否已存在且内容相同
     if fileExists(newPath) {
         existingHash, err := vm.calculateFileHash(newPath)
         if err == nil && existingHash == hash {
-            fmt.Printf("  ⏭️  Hash文件已存在: %s\n", newFilename)
+            fmt.Printf("  ⏭️  Hash文件已存在且内容相同: %s\n", newFilename)
             return info, nil
         }
+        // 如果hash不同，删除旧文件
+        fmt.Printf("  🗑️  删除旧的hash文件: %s\n", newFilename)
+        os.Remove(newPath)
     }
     
     // 总是复制源文件到新路径（保留原始文件）
@@ -146,7 +149,7 @@ func (vm *VersionManager) renameFileWithHash(filePath string) (*FileInfo, error)
         return nil, fmt.Errorf("复制文件失败: %v", err)
     }
     
-    fmt.Printf("  📋 已生成带hash文件: %s (保留原文件: %s)\n", newFilename, cleanFilename)
+    fmt.Printf("  ✅ 已生成带hash文件: %s (保留原文件: %s)\n", newFilename, cleanFilename)
     
     return info, nil
 }
@@ -200,7 +203,7 @@ func (vm *VersionManager) collectImagesFromCSS(cssPath string) ([]ImageReference
     return images, nil
 }
 
-// updateCSSImageReferences 更新CSS文件中的图片引用 - 简化版本
+// updateCSSImageReferences 更新CSS文件中的图片引用 - 只更新指定的CSS文件
 func (vm *VersionManager) updateCSSImageReferences(cssPath string, imageMap map[string]string) error {
     content, err := os.ReadFile(cssPath)
     if err != nil {
@@ -255,6 +258,7 @@ func (vm *VersionManager) updateCSSImageReferences(cssPath string, imageMap map[
     
     return nil
 }
+
 // updateHTMLReferences 更新HTML中的资源引用
 func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[string]map[string]string) error {
     content, err := os.ReadFile(htmlPath)
@@ -455,7 +459,7 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
     jsPaths := []string{
         filepath.Join(htmlDir, htmlBasename+".js"),
         filepath.Join(htmlDir, "js", htmlBasename+".js"),
-        filepath.Join(htmlDir, "scripts", "js", htmlBasename+".js"), // 新增这个路径
+        filepath.Join(htmlDir, "scripts", "js", htmlBasename+".js"),
     }
     
     jsFound := false
@@ -473,9 +477,6 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
         oldFilename := filepath.Base(actualJsPath)
         cleanFilename := vm.removeHashFromFilename(oldFilename)
         
-        fmt.Printf("  📝 原始文件名: %s\n", oldFilename)
-        fmt.Printf("  📝 清理后文件名: %s\n", cleanFilename)
-        
         info, err := vm.renameFileWithHash(actualJsPath)
         if err != nil {
             fmt.Printf("  ❌ 处理JS失败: %v\n", err)
@@ -484,16 +485,11 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
         
         newFilename := filepath.Base(info.HashedPath)
         
-        fmt.Printf("  📝 新文件名: %s\n", newFilename)
-        fmt.Printf("  📝 Hash值: %s\n", info.Hash[:8])
-        
         // 同时记录原始文件名和清理后文件名的映射
         resources["js"][oldFilename] = newFilename
         resources["js"][cleanFilename] = newFilename
         
         fmt.Printf("  ✅ JS处理完成: %s -> %s (hash: %s)\n", cleanFilename, newFilename, info.Hash[:8])
-        fmt.Printf("  📋 映射记录: [%s] -> %s\n", oldFilename, newFilename)
-        fmt.Printf("  📋 映射记录: [%s] -> %s\n", cleanFilename, newFilename)
         
         relPath, _ := filepath.Rel(vm.config.RootDir, info.OriginalPath)
         vm.versionMap[relPath] = info.Hash
@@ -526,9 +522,18 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
         oldCssFilename := filepath.Base(actualCssPath)
         cleanCssFilename := vm.removeHashFromFilename(oldCssFilename)
         
+        // 确保使用原始CSS文件（无hash版本）
+        cssDir := filepath.Dir(actualCssPath)
+        originalCssPath := filepath.Join(cssDir, cleanCssFilename)
+        if !fileExists(originalCssPath) {
+            originalCssPath = actualCssPath
+        }
+        
+        fmt.Printf("  📝 原始CSS文件: %s\n", cleanCssFilename)
+        
         // 2.1 收集CSS中的图片
         fmt.Println("  📸 收集CSS中引用的图片...")
-        images, err := vm.collectImagesFromCSS(actualCssPath)
+        images, err := vm.collectImagesFromCSS(originalCssPath)
         if err != nil {
             fmt.Printf("  ⚠️  读取CSS失败: %v\n", err)
             continue
@@ -559,36 +564,79 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
                 newImageFilename := filepath.Base(info.HashedPath)
                 imageMap[image.OriginalPath] = newImageFilename
                 
-                fmt.Printf("    ✅ %s -> %s\n", oldImageFilename, newImageFilename)
+                fmt.Printf("    ✅ 图片: %s -> %s\n", oldImageFilename, newImageFilename)
                 
                 relPath, _ := filepath.Rel(vm.config.RootDir, image.AbsolutePath)
                 vm.versionMap[relPath] = info.Hash
             }
-            
-            // 2.3 更新CSS中的图片引用
-            fmt.Println("  🔄 更新CSS中的图片引用...")
-            if err := vm.updateCSSImageReferences(actualCssPath, imageMap); err != nil {
-                fmt.Printf("  ⚠️  更新CSS引用失败: %v\n", err)
-            }
         }
         
-        // 2.4 重命名CSS文件（基于更新后的内容）
-        info, err := vm.renameFileWithHash(actualCssPath)
+        // 2.3 先复制原始CSS文件生成hash版本
+        fmt.Println("  🔄 生成带hash的CSS文件...")
+        
+        // 计算原始CSS的hash
+        originalHash, err := vm.calculateFileHash(originalCssPath)
         if err != nil {
-            fmt.Printf("  ❌ 处理CSS失败: %v\n", err)
+            fmt.Printf("  ❌ 计算CSS hash失败: %v\n", err)
             continue
         }
         
-        newCssFilename := filepath.Base(info.HashedPath)
+        hashedCssFilename := vm.addHashToFilename(cleanCssFilename, originalHash)
+        hashedCssPath := filepath.Join(cssDir, hashedCssFilename)
+        
+        // 先复制原始CSS文件
+        if err := copyFile(originalCssPath, hashedCssPath); err != nil {
+            fmt.Printf("  ❌ 复制CSS文件失败: %v\n", err)
+            continue
+        }
+        
+        fmt.Printf("  ✅ 已复制CSS到: %s\n", hashedCssFilename)
+        
+        // 2.4 只更新hash版本CSS中的图片引用（不修改原始CSS）
+        if len(imageMap) > 0 {
+            fmt.Println("  🔄 更新hash版本CSS中的图片引用...")
+            if err := vm.updateCSSImageReferences(hashedCssPath, imageMap); err != nil {
+                fmt.Printf("  ⚠️  更新CSS引用失败: %v\n", err)
+            } else {
+                fmt.Printf("  ✅ Hash版本CSS已更新图片引用\n")
+                fmt.Printf("  📝 原始CSS保持不变: %s\n", cleanCssFilename)
+            }
+            
+            // 重新计算更新后的CSS文件的hash
+            newHash, err := vm.calculateFileHash(hashedCssPath)
+            if err == nil && newHash != originalHash {
+                // 如果hash改变了，需要重命名
+                finalCssFilename := vm.addHashToFilename(cleanCssFilename, newHash)
+                finalCssPath := filepath.Join(cssDir, finalCssFilename)
+                
+                if finalCssPath != hashedCssPath {
+                    fmt.Printf("  🔄 CSS内容变化，重新计算hash: %s -> %s\n", originalHash[:8], newHash[:8])
+                    
+                    // 删除旧的hash文件，重命名为新hash
+                    if err := os.Rename(hashedCssPath, finalCssPath); err != nil {
+                        // 如果重命名失败，尝试复制后删除
+                        copyFile(hashedCssPath, finalCssPath)
+                        os.Remove(hashedCssPath)
+                    }
+                    
+                    hashedCssPath = finalCssPath
+                    hashedCssFilename = finalCssFilename
+                    originalHash = newHash
+                    
+                    fmt.Printf("  ✅ CSS已重命名为: %s\n", finalCssFilename)
+                }
+            }
+        }
         
         // 同时记录原始文件名和清理后文件名的映射
-        resources["css"][oldCssFilename] = newCssFilename
-        resources["css"][cleanCssFilename] = newCssFilename
+        resources["css"][oldCssFilename] = hashedCssFilename
+        resources["css"][cleanCssFilename] = hashedCssFilename
         
-        fmt.Printf("  ✅ CSS处理完成: %s -> %s (hash: %s)\n", cleanCssFilename, newCssFilename, info.Hash[:8])
+        fmt.Printf("  ✅ CSS处理完成: %s -> %s (hash: %s)\n", cleanCssFilename, hashedCssFilename, originalHash[:8])
+        fmt.Printf("  📋 CSS映射: [%s] -> %s\n", cleanCssFilename, hashedCssFilename)
         
-        relPath, _ := filepath.Rel(vm.config.RootDir, info.OriginalPath)
-        vm.versionMap[relPath] = info.Hash
+        relPath, _ := filepath.Rel(vm.config.RootDir, originalCssPath)
+        vm.versionMap[relPath] = originalHash
         break
     }
     
@@ -600,26 +648,6 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
     fmt.Println("\n🔄 更新HTML中的资源引用...")
     fmt.Printf("  📋 CSS映射 (%d 项): %v\n", len(resources["css"]), resources["css"])
     fmt.Printf("  📋 JS映射 (%d 项): %v\n", len(resources["js"]), resources["js"])
-    
-    // 读取HTML内容进行调试
-    htmlContent, _ := os.ReadFile(htmlPath)
-    htmlStr := string(htmlContent)
-    
-    // 检查HTML中的script标签
-    fmt.Println("\n  🔍 HTML中的script标签:")
-    scriptRe := regexp.MustCompile(`<script[^>]*src\s*=\s*['"][^'"]*['"][^>]*>`)
-    scriptMatches := scriptRe.FindAllString(htmlStr, -1)
-    for i, match := range scriptMatches {
-        fmt.Printf("    [%d] %s\n", i+1, match)
-    }
-    
-    // 检查HTML中的link标签
-    fmt.Println("\n  🔍 HTML中的link标签:")
-    linkRe := regexp.MustCompile(`<link[^>]*href\s*=\s*['"][^'"]*['"][^>]*>`)
-    linkMatches := linkRe.FindAllString(htmlStr, -1)
-    for i, match := range linkMatches {
-        fmt.Printf("    [%d] %s\n", i+1, match)
-    }
     
     if err := vm.updateHTMLReferences(htmlPath, resources); err != nil {
         return fmt.Errorf("更新HTML失败: %v", err)
