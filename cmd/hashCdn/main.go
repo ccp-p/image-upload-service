@@ -1103,7 +1103,7 @@ func loadConfig(configPath string) (*Config, error) {
 
 func main() {
     configPath := flag.String("config", "version.config.json", "配置文件路径")
-    htmlFile := flag.String("file", "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\xdrNormal.html", "单个HTML文件路径")
+    htmlFile := flag.String("file", "D:\\self_project\\go_project\\image-upload-service\\test\\index.html", "单个HTML文件路径")
     scanAll := flag.Bool("all", false, "扫描所有HTML文件")
     cdnDomain := flag.String("cdn", "", "CDN域名")
     
