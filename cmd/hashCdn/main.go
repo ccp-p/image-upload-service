@@ -443,7 +443,7 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
         }
     }
     
-    // 收集JS文件（只收集components目录下的JS，主JS会单独处理）
+    // 收集JS文件（只收集组件目录下的JS，主JS会单独处理）
     jsRe := regexp.MustCompile(`<script[^>]*src\s*=\s*['"]([^'"]+\.js)['"]`)
     jsMatches := jsRe.FindAllStringSubmatch(contentStr, -1)
     for _, match := range jsMatches {
@@ -651,15 +651,12 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
     
     // 处理CSS引用（包括组件）
     if cssMap, ok := resources["css"]; ok {
-        for originalRelPath, newFilename := range cssMap {
-            // 规范化路径 - 统一使用正斜杠
-            cleanPath := strings.TrimPrefix(originalRelPath, "./")
-            cleanPath = strings.ReplaceAll(cleanPath, "\\", "/")
+        for originalRelPath, newHashedPath := range cssMap {
+            // originalRelPath 已经是规范化的路径（去掉了 ./ 前缀）
+            fmt.Printf("  🔍 匹配CSS: %s -> %s\n", originalRelPath, newHashedPath)
             
             // 移除可能的hash
-            cleanPath = vm.removeHashFromFilename(cleanPath)
-            
-            fmt.Printf("  🔍 尝试匹配CSS: %s (原始: %s)\n", cleanPath, originalRelPath)
+            cleanPath := vm.removeHashFromFilename(originalRelPath)
             
             // 转义特殊字符，同时匹配反斜杠和正斜杠
             escapedPath := regexp.QuoteMeta(cleanPath)
@@ -684,24 +681,17 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
                             oldPath := submatches[2]
                             suffix := submatches[3]
                             
-                            // 保留原路径的目录部分，只替换文件名（统一使用正斜杠）
-                            oldPath = strings.ReplaceAll(oldPath, "\\", "/")
-                            dir := filepath.ToSlash(filepath.Dir(oldPath))
+                            // 构建新路径
                             var newPath string
-                            if dir == "." || dir == "" {
-                                newPath = newFilename
+                            if strings.HasPrefix(oldPath, "./") {
+                                newPath = "./" + newHashedPath
                             } else {
-                                // 保留原始路径格式，直接拼接
-                                newPath = dir + "/" + newFilename
+                                newPath = newHashedPath
                             }
                             
                             // 添加CDN域名（如果配置了）
                             if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") {
-                                // 移除开头的 ./，但保留 ../
-                                cleanNewPath := newPath
-                                if strings.HasPrefix(cleanNewPath, "./") {
-                                    cleanNewPath = strings.TrimPrefix(cleanNewPath, "./")
-                                }
+                                cleanNewPath := strings.TrimPrefix(newPath, "./")
                                 newPath = vm.config.CDNDomain + "/" + cleanNewPath
                             }
                             
@@ -732,15 +722,12 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
     
     // 处理JS引用（包括组件）
     if jsMap, ok := resources["js"]; ok {
-        for originalRelPath, newFilename := range jsMap {
-            // 规范化路径 - 统一使用正斜杠
-            cleanPath := strings.TrimPrefix(originalRelPath, "./")
-            cleanPath = strings.ReplaceAll(cleanPath, "\\", "/")
+        for originalRelPath, newHashedPath := range jsMap {
+            // originalRelPath 已经是规范化的路径（去掉了 ./ 前缀）
+            fmt.Printf("  🔍 匹配JS: %s -> %s\n", originalRelPath, newHashedPath)
             
             // 移除可能的hash
-            cleanPath = vm.removeHashFromFilename(cleanPath)
-            
-            fmt.Printf("  🔍 尝试匹配JS: %s (原始: %s)\n", cleanPath, originalRelPath)
+            cleanPath := vm.removeHashFromFilename(originalRelPath)
             
             // 转义特殊字符，同时匹配反斜杠和正斜杠
             escapedPath := regexp.QuoteMeta(cleanPath)
@@ -765,24 +752,17 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
                             oldPath := submatches[2]
                             suffix := submatches[3]
                             
-                            // 保留原路径的目录部分，只替换文件名（统一使用正斜杠）
-                            oldPath = strings.ReplaceAll(oldPath, "\\", "/")
-                            dir := filepath.ToSlash(filepath.Dir(oldPath))
+                            // 构建新路径
                             var newPath string
-                            if dir == "." || dir == "" {
-                                newPath = newFilename
+                            if strings.HasPrefix(oldPath, "./") {
+                                newPath = "./" + newHashedPath
                             } else {
-                                // 保留原始路径格式，直接拼接
-                                newPath = dir + "/" + newFilename
+                                newPath = newHashedPath
                             }
                             
                             // 添加CDN域名（如果配置了）
                             if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") {
-                                // 移除开头的 ./，但保留 ../
-                                cleanNewPath := newPath
-                                if strings.HasPrefix(cleanNewPath, "./") {
-                                    cleanNewPath = strings.TrimPrefix(cleanNewPath, "./")
-                                }
+                                cleanNewPath := strings.TrimPrefix(newPath, "./")
                                 newPath = vm.config.CDNDomain + "/" + cleanNewPath
                             }
                             
@@ -868,11 +848,17 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
             relPath, _ := filepath.Rel(htmlDir, actualJsPath)
             relPath = filepath.ToSlash(relPath)
             
-            // 同时记录多种可能的路径格式
-            resources["js"][relPath] = filepath.Base(info.HashedPath)
-            resources["js"]["./"+relPath] = filepath.Base(info.HashedPath)
+            // 计算新文件的完整相对路径（包含目录）
+            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+            hashedRelPath = filepath.ToSlash(hashedRelPath)
             
-            fmt.Printf("  ✅ 主JS: %s -> %s\n", filepath.Base(actualJsPath), filepath.Base(info.HashedPath))
+            // 只记录一次，使用规范化的key
+            normalizedKey := strings.TrimPrefix(relPath, "./")
+            if _, exists := resources["js"][normalizedKey]; !exists {
+                resources["js"][normalizedKey] = hashedRelPath
+            }
+            
+            fmt.Printf("  ✅ 主JS: %s -> %s\n", relPath, hashedRelPath)
             mainJsFound = true
             break
         } else {
@@ -907,11 +893,17 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
             relPath, _ := filepath.Rel(htmlDir, actualCssPath)
             relPath = filepath.ToSlash(relPath)
             
-            // 同时记录多种可能的路径格式
-            resources["css"][relPath] = filepath.Base(info.HashedPath)
-            resources["css"]["./"+relPath] = filepath.Base(info.HashedPath)
+            // 计算新文件的完整相对路径（包含目录）
+            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+            hashedRelPath = filepath.ToSlash(hashedRelPath)
             
-            fmt.Printf("  ✅ 主CSS: %s -> %s\n", filepath.Base(actualCssPath), filepath.Base(info.HashedPath))
+            // 只记录一次，使用规范化的key
+            normalizedKey := strings.TrimPrefix(relPath, "./")
+            if _, exists := resources["css"][normalizedKey]; !exists {
+                resources["css"][normalizedKey] = hashedRelPath
+            }
+            
+            fmt.Printf("  ✅ 主CSS: %s -> %s\n", relPath, hashedRelPath)
             mainCssFound = true
             break
         } else {
@@ -937,6 +929,12 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
     if len(htmlResources["js"]) > 0 {
         fmt.Println("\n🔧 处理组件 JavaScript 文件...")
         for _, jsRelPath := range htmlResources["js"] {
+            // 规范化key，避免重复
+            normalizedKey := strings.TrimPrefix(strings.ReplaceAll(jsRelPath, "\\", "/"), "./")
+            if _, exists := resources["js"][normalizedKey]; exists {
+                continue // 已经处理过
+            }
+            
             fmt.Printf("  🔧 处理组件JS: %s\n", jsRelPath)
             info, err := vm.processComponentResource(htmlDir, jsRelPath)
             if err != nil {
@@ -944,10 +942,13 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
                 continue
             }
             
-            // 使用HTML中的原始路径作为key
-            resources["js"][jsRelPath] = filepath.Base(info.HashedPath)
+            // 计算新文件的完整相对路径
+            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+            hashedRelPath = filepath.ToSlash(hashedRelPath)
             
-            fmt.Printf("    ✅ %s -> %s\n", filepath.Base(info.OriginalPath), filepath.Base(info.HashedPath))
+            resources["js"][normalizedKey] = hashedRelPath
+            
+            fmt.Printf("    ✅ %s -> %s\n", normalizedKey, hashedRelPath)
         }
     }
     
@@ -955,6 +956,12 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
     if len(htmlResources["css"]) > 0 {
         fmt.Println("\n🔧 处理组件 CSS 文件...")
         for _, cssRelPath := range htmlResources["css"] {
+            // 规范化key，避免重复
+            normalizedKey := strings.TrimPrefix(strings.ReplaceAll(cssRelPath, "\\", "/"), "./")
+            if _, exists := resources["css"][normalizedKey]; exists {
+                continue // 已经处理过
+            }
+            
             fmt.Printf("  🔧 处理组件CSS: %s\n", cssRelPath)
             info, err := vm.processComponentResource(htmlDir, cssRelPath)
             if err != nil {
@@ -962,10 +969,13 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
                 continue
             }
             
-            // 使用HTML中的原始路径作为key
-            resources["css"][cssRelPath] = filepath.Base(info.HashedPath)
+            // 计算新文件的完整相对路径
+            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+            hashedRelPath = filepath.ToSlash(hashedRelPath)
             
-            fmt.Printf("    ✅ %s -> %s\n", filepath.Base(info.OriginalPath), filepath.Base(info.HashedPath))
+            resources["css"][normalizedKey] = hashedRelPath
+            
+            fmt.Printf("    ✅ %s -> %s\n", normalizedKey, hashedRelPath)
         }
     }
     
@@ -1012,7 +1022,7 @@ func (vm *VersionManager) saveVersionMap() {
         fmt.Printf("⚠️  保存版本映射失败: %v\n", err)
         return
     }
-    mapPath := ".version-map.json"
+    mapPath:= ".version-map.json"
     if err := os.WriteFile(mapPath, data, 0644); err != nil {
         fmt.Printf("⚠️  写入版本映射失败: %v\n", err)
         return
