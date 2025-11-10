@@ -16,11 +16,15 @@ import (
 
 // Config 配置结构
 type Config struct {
-    RootDir     string   `json:"rootDir"`
-    CDNDomain   string   `json:"cdnDomain"`
-    HashLength  int      `json:"hashLength"`
-    HTMLFiles   []string `json:"htmlFiles"`
-    ExcludeDirs []string `json:"excludeDirs"`
+    RootDir         string   `json:"rootDir"`
+    CDNDomain       string   `json:"cdnDomain"`
+    HashLength      int      `json:"hashLength"`
+    SingleHTMLFile  string   `json:"singleHTMLFile"`  // 单个HTML文件路径
+    HTMLFiles       []string `json:"htmlFiles"`
+    ExcludeDirs     []string `json:"excludeDirs"`
+    // 环境相关配置
+    HomeHTMLFile    string   `json:"homeHTMLFile"`    // 家里电脑的HTML文件路径
+    CompanyHTMLFile string   `json:"companyHTMLFile"` // 公司电脑的HTML文件路径
 }
 
 // VersionManager 版本管理器
@@ -1098,12 +1102,30 @@ func loadConfig(configPath string) (*Config, error) {
         config.ExcludeDirs = []string{"node_modules", ".git", "dist", "build"}
     }
     
+    // 根据环境变量 IS_HOME 选择路径
+    isHome := os.Getenv("IS_HOME")
+    fmt.Printf("📍 环境变量 IS_HOME=%s\n", isHome)
+    
+    if config.HomeHTMLFile != "" || config.CompanyHTMLFile != "" {
+        if isHome == "1" {
+            if config.HomeHTMLFile != "" {
+                config.SingleHTMLFile = config.HomeHTMLFile
+                fmt.Printf("🏠 使用家里电脑路径: %s\n", config.SingleHTMLFile)
+            }
+        } else {
+            if config.CompanyHTMLFile != "" {
+                config.SingleHTMLFile = config.CompanyHTMLFile
+                fmt.Printf("🏢 使用公司电脑路径: %s\n", config.SingleHTMLFile)
+            }
+        }
+    }
+    
     return &config, nil
 }
 
 func main() {
     configPath := flag.String("config", "version.config.json", "配置文件路径")
-    htmlFile := flag.String("file", "D:\\self_project\\go_project\\image-upload-service\\test\\index.html", "单个HTML文件路径")
+    htmlFile := flag.String("file", "", "单个HTML文件路径（命令行指定，优先级高于配置文件）")
     scanAll := flag.Bool("all", false, "扫描所有HTML文件")
     cdnDomain := flag.String("cdn", "", "CDN域名")
     
@@ -1127,9 +1149,16 @@ func main() {
     
     vm := NewVersionManager(*config)
     
+    // 确定要处理的单个HTML文件（优先级：命令行 > 配置文件）
+    targetHTMLFile := *htmlFile
+    if targetHTMLFile == "" && config.SingleHTMLFile != "" {
+        targetHTMLFile = config.SingleHTMLFile
+        fmt.Printf("📋 使用配置文件中的HTML文件: %s\n", targetHTMLFile)
+    }
+    
     // 处理单个文件
-    if *htmlFile != "" {
-        if err := vm.processHTMLFile(*htmlFile); err != nil {
+    if targetHTMLFile != "" {
+        if err := vm.processHTMLFile(targetHTMLFile); err != nil {
             fmt.Printf("❌ 处理失败: %v\n", err)
             os.Exit(1)
         }
@@ -1153,7 +1182,12 @@ func main() {
     if len(config.HTMLFiles) > 0 {
         vm.processMultipleHTMLFiles(config.HTMLFiles)
     } else {
-        fmt.Println("请使用 -file 指定文件, -all 扫描所有文件, 或在配置文件中指定HTML文件列表")
+        fmt.Println("⚠️  未指定要处理的HTML文件")
+        fmt.Println("请使用以下方式之一：")
+        fmt.Println("  1. 在配置文件中设置 'singleHTMLFile' 字段")
+        fmt.Println("  2. 使用 -file 参数指定文件")
+        fmt.Println("  3. 使用 -all 扫描所有文件")
+        fmt.Println("  4. 在配置文件中设置 'htmlFiles' 列表")
         flag.Usage()
     }
 }
