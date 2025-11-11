@@ -25,6 +25,8 @@ type Config struct {
     // 环境相关配置
     HomeHTMLFile    string   `json:"homeHTMLFile"`    // 家里电脑的HTML文件路径
     CompanyHTMLFile string   `json:"companyHTMLFile"` // 公司电脑的HTML文件路径
+    // 新增：指定要处理的组件
+    IncludeComponents []string `json:"includeComponents"` // 只处理指定的组件
 }
 
 // VersionManager 版本管理器
@@ -59,6 +61,28 @@ func NewVersionManager(config Config, debugMode bool) *VersionManager {
         processedFiles: make(map[string]bool),
         debugMode:      debugMode,
     }
+}
+
+// shouldProcessComponent 检查是否应该处理指定组件
+func (vm *VersionManager) shouldProcessComponent(componentPath string) bool {
+    // 如果没有配置包含的组件列表，则处理所有组件
+    if len(vm.config.IncludeComponents) == 0 {
+        return true
+    }
+    
+    // 检查组件路径是否匹配任何指定的组件
+    for _, componentName := range vm.config.IncludeComponents {
+        // 检查路径中是否包含该组件名
+        if strings.Contains(componentPath, "/"+componentName+"/") || 
+           strings.Contains(componentPath, "\\"+componentName+"\\") ||
+           strings.HasSuffix(componentPath, "/"+componentName) ||
+           strings.HasSuffix(componentPath, "\\"+componentName) ||
+           strings.HasPrefix(filepath.Base(componentPath), componentName+".") {
+            return true
+        }
+    }
+    
+    return false
 }
 
 // calculateFileHash 计算文件hash
@@ -389,6 +413,14 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
                 continue
             }
             
+            // 检查是否应该处理此组件
+            if !vm.shouldProcessComponent(cssPath) {
+                if vm.debugMode {
+                    fmt.Printf("    🚫 跳过组件CSS: %s (不在处理列表中)\n", cssPath)
+                }
+                continue
+            }
+            
             // 转换为绝对路径（使用系统路径分隔符）
             absolutePath := filepath.Join(htmlDir, filepath.FromSlash(cssPath))
             absolutePath = filepath.Clean(absolutePath)
@@ -415,6 +447,14 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
             
             // 只收集components目录下的JS
             if !strings.Contains(jsPath, "components") {
+                continue
+            }
+            
+            // 检查是否应该处理此组件
+            if !vm.shouldProcessComponent(jsPath) {
+                if vm.debugMode {
+                    fmt.Printf("    🚫 跳过组件JS: %s (不在处理列表中)\n", jsPath)
+                }
                 continue
             }
             
@@ -608,14 +648,16 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
     // 处理CSS引用
     if cssMap, ok := resources["css"]; ok {
         for originalRelPath, newHashedPath := range cssMap {
-            cleanPath := vm.removeHashFromFilename(originalRelPath)
+             vm.removeHashFromFilename(filepath.Base(originalRelPath))
             
-            escapedPath := regexp.QuoteMeta(cleanPath)
+            // 构建完整的路径模式，匹配原始路径的完整形式
+            escapedPath := regexp.QuoteMeta(originalRelPath)
             escapedPath = strings.ReplaceAll(escapedPath, "/", `[/\\]`)
             
+            // 支持多种引用格式的正则表达式
             patterns := []string{
                 fmt.Sprintf(`(<link[^>]*href\s*=\s*['"])(%s)(['"][^>]*>)`, escapedPath),
-                fmt.Sprintf(`(<link[^>]*href\s*=\s*['"])(\.[\\/]%s)(['"][^>]*>)`, escapedPath),
+                fmt.Sprintf(`(<link[^>]*href\s*=\s*['"])(\.{1,2}[/\\]%s)(['"][^>]*>)`, escapedPath),
             }
             
             matched := false
@@ -629,15 +671,35 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
                             oldPath := submatches[2]
                             suffix := submatches[3]
                             
+                            // 提取原始路径的目录部分
+                            oldDir := filepath.Dir(originalRelPath)
+                            newFilename := filepath.Base(newHashedPath)
+                            
+                            // 构建新路径，保持原有的目录结构
                             var newPath string
-                            if strings.HasPrefix(oldPath, "./") {
-                                newPath = "./" + newHashedPath
+                            if oldDir != "." && oldDir != "/" {
+                                newPath = filepath.Join(oldDir, newFilename)
+                                newPath = strings.ReplaceAll(newPath, `\`, "/")
                             } else {
-                                newPath = newHashedPath
+                                newPath = newFilename
+                            }
+                            
+                            // 如果原始路径是相对路径（以./或../开头），保持相对路径格式
+                            if strings.HasPrefix(oldPath, "../") || strings.HasPrefix(oldPath, "..\\") {
+                                // 保持../格式
+                                if !strings.HasPrefix(newPath, "../") && !strings.HasPrefix(newPath, "..\\") {
+                                    newPath = "../" + newPath
+                                }
+                            } else if strings.HasPrefix(oldPath, "./") || strings.HasPrefix(oldPath, ".\\") {
+                                // 保持./格式
+                                if !strings.HasPrefix(newPath, "./") && !strings.HasPrefix(newPath, ".\\") {
+                                    newPath = "./" + newPath
+                                }
                             }
                             
                             if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") {
                                 cleanNewPath := strings.TrimPrefix(newPath, "./")
+                                cleanNewPath = strings.TrimPrefix(cleanNewPath, "../")
                                 newPath = vm.config.CDNDomain + "/" + cleanNewPath
                             }
                             
@@ -661,7 +723,7 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
             }
             
             if !matched && vm.debugMode {
-                fmt.Printf("  ⚠️  未匹配: %s\n", cleanPath)
+                fmt.Printf("  ⚠️  未匹配CSS: %s\n", originalRelPath)
             }
         }
     }
@@ -669,14 +731,14 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
     // 处理JS引用
     if jsMap, ok := resources["js"]; ok {
         for originalRelPath, newHashedPath := range jsMap {
-            cleanPath := vm.removeHashFromFilename(originalRelPath)
+            vm.removeHashFromFilename(filepath.Base(originalRelPath))
             
-            escapedPath := regexp.QuoteMeta(cleanPath)
+            escapedPath := regexp.QuoteMeta(originalRelPath)
             escapedPath = strings.ReplaceAll(escapedPath, "/", `[/\\]`)
             
             patterns := []string{
                 fmt.Sprintf(`(<script[^>]*src\s*=\s*['"])(%s)(['"][^>]*>)`, escapedPath),
-                fmt.Sprintf(`(<script[^>]*src\s*=\s*['"])(\.[\\/]%s)(['"][^>]*>)`, escapedPath),
+                fmt.Sprintf(`(<script[^>]*src\s*=\s*['"])(\.{1,2}[/\\]%s)(['"][^>]*>)`, escapedPath),
             }
             
             matched := false
@@ -690,15 +752,35 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
                             oldPath := submatches[2]
                             suffix := submatches[3]
                             
+                            // 提取原始路径的目录部分
+                            oldDir := filepath.Dir(originalRelPath)
+                            newFilename := filepath.Base(newHashedPath)
+                            
+                            // 构建新路径，保持原有的目录结构
                             var newPath string
-                            if strings.HasPrefix(oldPath, "./") {
-                                newPath = "./" + newHashedPath
+                            if oldDir != "." && oldDir != "/" {
+                                newPath = filepath.Join(oldDir, newFilename)
+                                newPath = strings.ReplaceAll(newPath, `\`, "/")
                             } else {
-                                newPath = newHashedPath
+                                newPath = newFilename
+                            }
+                            
+                            // 如果原始路径是相对路径（以./或../开头），保持相对路径格式
+                            if strings.HasPrefix(oldPath, "../") || strings.HasPrefix(oldPath, "..\\") {
+                                // 保持../格式
+                                if !strings.HasPrefix(newPath, "../") && !strings.HasPrefix(newPath, "..\\") {
+                                    newPath = "../" + newPath
+                                }
+                            } else if strings.HasPrefix(oldPath, "./") || strings.HasPrefix(oldPath, ".\\") {
+                                // 保持./格式
+                                if !strings.HasPrefix(newPath, "./") && !strings.HasPrefix(newPath, ".\\") {
+                                    newPath = "./" + newPath
+                                }
                             }
                             
                             if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") {
                                 cleanNewPath := strings.TrimPrefix(newPath, "./")
+                                cleanNewPath = strings.TrimPrefix(cleanNewPath, "../")
                                 newPath = vm.config.CDNDomain + "/" + cleanNewPath
                             }
                             
@@ -722,7 +804,7 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
             }
             
             if !matched && vm.debugMode {
-                fmt.Printf("  ⚠️  未匹配: %s\n", cleanPath)
+                fmt.Printf("  ⚠️  未匹配JS: %s\n", originalRelPath)
             }
         }
     }
@@ -1058,6 +1140,13 @@ func main() {
     }
     
     vm := NewVersionManager(*config, *debugMode)
+    
+    // 显示处理的组件配置
+    if len(config.IncludeComponents) > 0 {
+        fmt.Printf("📋 指定处理组件: %v\n", config.IncludeComponents)
+    } else {
+        fmt.Printf("📋 处理所有组件\n")
+    }
     
     // 确定要处理的单个HTML文件（优先级：命令行 > 配置文件）
     targetHTMLFile := *htmlFile
