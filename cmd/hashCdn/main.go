@@ -27,6 +27,8 @@ type Config struct {
     CompanyHTMLFile string   `json:"companyHTMLFile"` // 公司电脑的HTML文件路径
     // 新增：指定要处理的组件
     IncludeComponents []string `json:"includeComponents"` // 只处理指定的组件
+    // 新增：指定哪些HTML文件需要处理主资源
+    ProcessMainResources []string `json:"processMainResources"` 
 }
 
 // VersionManager 版本管理器
@@ -834,86 +836,111 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
     htmlDir := filepath.Dir(htmlPath)
     htmlBasename := strings.TrimSuffix(filepath.Base(htmlPath), ".html")
     
+    // 判断是否需要处理主资源
+    shouldProcessMain := false
+    if len(vm.config.ProcessMainResources) > 0 {
+        for _, name := range vm.config.ProcessMainResources {
+            if name == filepath.Base(htmlPath) || name == htmlBasename {
+                shouldProcessMain = true
+                break
+            }
+        }
+    }
+    
+    if shouldProcessMain {
+        fmt.Printf("🎯 策略: 处理主资源 (JS/CSS) 及组件\n")
+    } else {
+        fmt.Printf("🎯 策略: 仅处理组件资源 (跳过主JS/CSS)\n")
+    }
+    
     resources := map[string]map[string]string{
         "css": make(map[string]string),
         "js":  make(map[string]string),
     }
     
     // 1. 处理主JS文件
-    fmt.Println("\n📦 处理主 JavaScript 文件...")
-    
-    jsPaths := []string{
-        filepath.Join(htmlDir, htmlBasename+".js"),
-        filepath.Join(htmlDir, "js", htmlBasename+".js"),
-        filepath.Join(htmlDir, "scripts", "js", htmlBasename+".js"),
-    }
-    
-    mainJsFound := false
-    for _, jsPath := range jsPaths {
-        actualJsPath := vm.findFile(jsPath)
-        if actualJsPath != "" {
-            info, err := vm.renameFileWithHash(actualJsPath)
-            if err != nil {
-                fmt.Printf("  ❌ 处理失败: %v\n", err)
-                continue
-            }
-            
-            relPath, _ := filepath.Rel(htmlDir, actualJsPath)
-            relPath = filepath.ToSlash(relPath)
-            
-            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
-            hashedRelPath = filepath.ToSlash(hashedRelPath)
-            
-            normalizedKey := strings.TrimPrefix(relPath, "./")
-            if _, exists := resources["js"][normalizedKey]; !exists {
-                resources["js"][normalizedKey] = hashedRelPath
-            }
-            
-            mainJsFound = true
-            break
+    if shouldProcessMain {
+        fmt.Println("\n📦 处理主 JavaScript 文件...")
+        
+        jsPaths := []string{
+            filepath.Join(htmlDir, htmlBasename+".js"),
+            filepath.Join(htmlDir, "js", htmlBasename+".js"),
+            filepath.Join(htmlDir, "scripts", "js", htmlBasename+".js"),
         }
-    }
-    
-    if !mainJsFound {
-        fmt.Printf("  ℹ️  未找到主JS文件\n")
+        
+        mainJsFound := false
+        for _, jsPath := range jsPaths {
+            actualJsPath := vm.findFile(jsPath)
+            if actualJsPath != "" {
+                info, err := vm.renameFileWithHash(actualJsPath)
+                if err != nil {
+                    fmt.Printf("  ❌ 处理失败: %v\n", err)
+                    continue
+                }
+                
+                relPath, _ := filepath.Rel(htmlDir, actualJsPath)
+                relPath = filepath.ToSlash(relPath)
+                
+                hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+                hashedRelPath = filepath.ToSlash(hashedRelPath)
+                
+                normalizedKey := strings.TrimPrefix(relPath, "./")
+                if _, exists := resources["js"][normalizedKey]; !exists {
+                    resources["js"][normalizedKey] = hashedRelPath
+                }
+                
+                mainJsFound = true
+                break
+            }
+        }
+        
+        if !mainJsFound {
+            fmt.Printf("  ℹ️  未找到主JS文件\n")
+        }
+    } else {
+        fmt.Println("\n📦 跳过主 JavaScript 文件")
     }
     
     // 2. 处理主CSS文件
-    fmt.Println("\n🎨 处理主 CSS 文件...")
-    
-    cssPaths := []string{
-        filepath.Join(htmlDir, htmlBasename+".css"),
-        filepath.Join(htmlDir, "css", htmlBasename+".css"),
-    }
-    
-    mainCssFound := false
-    for _, cssPath := range cssPaths {
-        actualCssPath := vm.findFile(cssPath)
-        if actualCssPath != "" {
-            info, err := vm.processComponentCSS(actualCssPath)
-            if err != nil {
-                fmt.Printf("  ❌ 处理失败: %v\n", err)
-                continue
-            }
-            
-            relPath, _ := filepath.Rel(htmlDir, actualCssPath)
-            relPath = filepath.ToSlash(relPath)
-            
-            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
-            hashedRelPath = filepath.ToSlash(hashedRelPath)
-            
-            normalizedKey := strings.TrimPrefix(relPath, "./")
-            if _, exists := resources["css"][normalizedKey]; !exists {
-                resources["css"][normalizedKey] = hashedRelPath
-            }
-            
-            mainCssFound = true
-            break
+    if shouldProcessMain {
+        fmt.Println("\n🎨 处理主 CSS 文件...")
+        
+        cssPaths := []string{
+            filepath.Join(htmlDir, htmlBasename+".css"),
+            filepath.Join(htmlDir, "css", htmlBasename+".css"),
         }
-    }
-    
-    if !mainCssFound {
-        fmt.Printf("  ℹ️  未找到主CSS文件\n")
+        
+        mainCssFound := false
+        for _, cssPath := range cssPaths {
+            actualCssPath := vm.findFile(cssPath)
+            if actualCssPath != "" {
+                info, err := vm.processComponentCSS(actualCssPath)
+                if err != nil {
+                    fmt.Printf("  ❌ 处理失败: %v\n", err)
+                    continue
+                }
+                
+                relPath, _ := filepath.Rel(htmlDir, actualCssPath)
+                relPath = filepath.ToSlash(relPath)
+                
+                hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+                hashedRelPath = filepath.ToSlash(hashedRelPath)
+                
+                normalizedKey := strings.TrimPrefix(relPath, "./")
+                if _, exists := resources["css"][normalizedKey]; !exists {
+                    resources["css"][normalizedKey] = hashedRelPath
+                }
+                
+                mainCssFound = true
+                break
+            }
+        }
+        
+        if !mainCssFound {
+            fmt.Printf("  ℹ️  未找到主CSS文件\n")
+        }
+    } else {
+        fmt.Println("\n🎨 跳过主 CSS 文件")
     }
     
     // 3. 收集并处理组件资源
