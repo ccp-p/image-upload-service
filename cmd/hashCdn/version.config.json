@@ -2,11 +2,12 @@
   "rootDir": ".",
   "cdnDomain": "",
   "hashLength": 8,
-  "homeHTMLFile": "D:\\job_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\xdractivity.html",
+  "homeHTMLFile": "D:\\job_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\xdrNormal.html",
   "companyHTMLFile": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\xdractivity.html",
   "singleHTMLFile": "",
   "includeComponents": [
-    "xdrInvite"
+    "xdrInvite",
+    "xdrsign"
   ],
   "processMainResources": [
     "xdrNormal"
