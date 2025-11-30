@@ -293,6 +293,7 @@ func (vm *VersionManager) collectImagesFromCSS(cssPath string) ([]ImageReference
 }
 
 // updateCSSImageReferences 更新CSS文件中的图片引用 - 只更新指定的CSS文件
+// imageMap 的 key 是原始CSS中的路径（如 ../images/pic.png），value 是新的带hash的文件名
 func (vm *VersionManager) updateCSSImageReferences(cssPath string, imageMap map[string]string) error {
     content, err := os.ReadFile(cssPath)
     if err != nil {
@@ -302,44 +303,87 @@ func (vm *VersionManager) updateCSSImageReferences(cssPath string, imageMap map[
     contentStr := string(content)
     updated := false
     
-    for originalPath, newFilename := range imageMap {
-        oldFilename := filepath.Base(originalPath)
-        cleanOldFilename := vm.removeHashFromFilename(oldFilename)
-        
-        // 更精确的正则表达式，处理各种引号情况
-        pattern := fmt.Sprintf(`url\(\s*(['"]?)\s*([^'")\s]*[/\\])?%s\s*(['"]?)\s*\)`, regexp.QuoteMeta(cleanOldFilename))
-        re := regexp.MustCompile(pattern)
-        
-        newContent := re.ReplaceAllStringFunc(contentStr, func(match string) string {
-            submatches := re.FindStringSubmatch(match)
-            if len(submatches) >= 4 {
-                openingQuote := submatches[1]
-                pathPrefix := submatches[2]
-                closingQuote := submatches[3]
-                
-                // 确保引号一致
-                if openingQuote != closingQuote {
-                    // 如果只有一边有引号，两边都加上
-                    if openingQuote != "" && closingQuote == "" {
-                        closingQuote = openingQuote
-                    } else if openingQuote == "" && closingQuote != "" {
-                        openingQuote = closingQuote
-                    }
-                }
-                
-                result := fmt.Sprintf("url(%s%s%s%s)", openingQuote, pathPrefix, newFilename, closingQuote)
-                
-                if match != result {
-                    updated = true
-                    fmt.Printf("    🔄 %s -> %s\n", cleanOldFilename, newFilename)
-                }
-                return result
-            }
+    // 匹配 url() 中的路径
+    re := regexp.MustCompile(`url\(\s*(['"]?)([^'")\s]+)(['"]?)\s*\)`)
+    
+    newContent := re.ReplaceAllStringFunc(contentStr, func(match string) string {
+        submatches := re.FindStringSubmatch(match)
+        if len(submatches) < 4 {
             return match
-        })
+        }
         
-        contentStr = newContent
-    }
+        openingQuote := submatches[1]
+        originalPath := submatches[2]
+        closingQuote := submatches[3]
+        
+        // 跳过绝对URL和data URI
+        if strings.HasPrefix(originalPath, "http") || 
+           strings.HasPrefix(originalPath, "data:") || 
+           strings.HasPrefix(originalPath, "//") {
+            return match
+        }
+        
+        // 移除查询字符串和hash用于匹配
+        cleanPath := strings.Split(originalPath, "?")[0]
+        cleanPath = strings.Split(cleanPath, "#")[0]
+        
+        // 标准化路径分隔符为正斜杠进行比较
+        normalizedPath := strings.ReplaceAll(cleanPath, "\\", "/")
+        
+        // 在 imageMap 中查找匹配的路径
+        var newFilename string
+        var foundKey string
+        
+        for key, value := range imageMap {
+            // 标准化 key 的路径分隔符
+            normalizedKey := strings.ReplaceAll(key, "\\", "/")
+            
+            // 精确匹配完整路径
+            if normalizedPath == normalizedKey {
+                newFilename = value
+                foundKey = key
+                break
+            }
+        }
+        
+        if newFilename == "" {
+            // 没有找到匹配项，保持原样
+            return match
+        }
+        
+        // 构建新路径：保持原有的目录结构，只替换文件名
+        dir := filepath.Dir(originalPath)
+        // 确保使用正斜杠
+        dir = strings.ReplaceAll(dir, "\\", "/")
+        
+        var newPath string
+        if dir == "." {
+            newPath = newFilename
+        } else {
+            newPath = dir + "/" + newFilename
+        }
+        
+        // 确保引号一致
+        if openingQuote != closingQuote {
+            if openingQuote != "" && closingQuote == "" {
+                closingQuote = openingQuote
+            } else if openingQuote == "" && closingQuote != "" {
+                openingQuote = closingQuote
+            }
+        }
+        
+        result := fmt.Sprintf("url(%s%s%s)", openingQuote, newPath, closingQuote)
+        
+        if match != result {
+            updated = true
+            oldFilename := filepath.Base(foundKey)
+            fmt.Printf("    🔄 %s -> %s\n", oldFilename, newFilename)
+        }
+        
+        return result
+    })
+    
+    contentStr = newContent
     
     if updated {
         return os.WriteFile(cssPath, []byte(contentStr), 0644)
@@ -546,23 +590,41 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
         return nil, err
     }
     
+    // imageMap 的 key 使用原始CSS中的相对路径，value 是新的带hash的文件名
     imageMap := make(map[string]string)
     
     if len(images) > 0 {
         fmt.Printf("    📸 处理 %d 个图片引用\n", len(images))
         
         for _, image := range images {
+            // 使用原始路径作为key（标准化为正斜杠）
+            originalPathKey := strings.ReplaceAll(image.OriginalPath, "\\", "/")
+            
             vm.mu.Lock()
             if vm.processedFiles[image.AbsolutePath] {
                 vm.mu.Unlock()
+                // 查找已存在的带hash文件
                 hash, err := vm.calculateFileHash(image.AbsolutePath)
                 if err != nil {
                     continue
                 }
+                // 找到实际的带hash文件
+                dir := filepath.Dir(image.AbsolutePath)
                 oldImageFilename := filepath.Base(image.AbsolutePath)
                 cleanImageFilename := vm.removeHashFromFilename(oldImageFilename)
                 newImageFilename := vm.addHashToFilename(cleanImageFilename, hash)
-                imageMap[image.OriginalPath] = newImageFilename
+                
+                // 验证带hash的文件是否存在
+                hashedPath := filepath.Join(dir, newImageFilename)
+                if fileExists(hashedPath) {
+                    imageMap[originalPathKey] = newImageFilename
+                } else {
+                    // 尝试查找任意带hash的版本
+                    actualHashedFile := vm.findFile(filepath.Join(dir, cleanImageFilename))
+                    if actualHashedFile != "" {
+                        imageMap[originalPathKey] = filepath.Base(actualHashedFile)
+                    }
+                }
                 continue
             }
             vm.processedFiles[image.AbsolutePath] = true
@@ -575,7 +637,12 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
             }
             
             newImageFilename := filepath.Base(info.HashedPath)
-            imageMap[image.OriginalPath] = newImageFilename
+            // 使用原始CSS中的路径作为key
+            imageMap[originalPathKey] = newImageFilename
+            
+            if vm.debugMode {
+                fmt.Printf("      📎 映射: %s -> %s\n", originalPathKey, newImageFilename)
+            }
             
             relPath, _ := filepath.Rel(vm.config.RootDir, image.AbsolutePath)
             vm.versionMap[relPath] = info.Hash
@@ -598,6 +665,13 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
     
     // 更新hash版本CSS中的图片引用
     if len(imageMap) > 0 {
+        if vm.debugMode {
+            fmt.Printf("    📋 图片映射表 (%d 项):\n", len(imageMap))
+            for k, v := range imageMap {
+                fmt.Printf("      %s -> %s\n", k, v)
+            }
+        }
+        
         if err := vm.updateCSSImageReferences(hashedCssPath, imageMap); err != nil {
             fmt.Printf("      ⚠️  更新CSS图片引用失败: %v\n", err)
         }
