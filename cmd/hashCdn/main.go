@@ -34,7 +34,6 @@ type Config struct {
 // VersionManager 版本管理器
 type VersionManager struct {
     config         Config
-    versionMap     map[string]string
     processedFiles map[string]bool
     mu             sync.Mutex
     debugMode      bool  // 调试模式
@@ -59,7 +58,6 @@ type ImageReference struct {
 func NewVersionManager(config Config, debugMode bool) *VersionManager {
     return &VersionManager{
         config:         config,
-        versionMap:     make(map[string]string),
         processedFiles: make(map[string]bool),
         debugMode:      debugMode,
     }
@@ -650,9 +648,8 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
             if vm.debugMode {
                 fmt.Printf("      📎 映射: %s -> %s\n", originalPathKey, newImageFilename)
             }
-            
-            relPath, _ := filepath.Rel(vm.config.RootDir, image.AbsolutePath)
-            vm.versionMap[relPath] = info.Hash
+            // 移除: relPath, _ := filepath.Rel(vm.config.RootDir, image.AbsolutePath)
+            // 移除: vm.versionMap[relPath] = info.Hash
         }
     }
     
@@ -707,8 +704,8 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
         }
     }
     
-    relPath, _ := filepath.Rel(vm.config.RootDir, originalCssPath)
-    vm.versionMap[relPath] = originalHash
+    // 移除: relPath, _ := filepath.Rel(vm.config.RootDir, originalCssPath)
+    // 移除: vm.versionMap[relPath] = originalHash
     
     return &FileInfo{
         OriginalPath: originalCssPath,
@@ -1100,26 +1097,9 @@ func (vm *VersionManager) processMultipleHTMLFiles(htmlPaths []string) {
         }
     }
     
-    vm.saveVersionMap()
     fmt.Println("\n" + strings.Repeat("=", 60))
     fmt.Println("🎉 全部处理完成！")
     fmt.Println(strings.Repeat("=", 60))
-}
-
-// saveVersionMap 保存版本映射
-func (vm *VersionManager) saveVersionMap() {
-    data, err := json.MarshalIndent(vm.versionMap, "", "  ")
-    if err != nil {
-        fmt.Printf("⚠️  保存版本映射失败: %v\n", err)
-        return
-    }
-    mapPath:= ".version-map.json"
-    if err := os.WriteFile(mapPath, data, 0644); err != nil {
-        fmt.Printf("⚠️  写入版本映射失败: %v\n", err)
-        return
-    }
-    
-    fmt.Printf("💾 版本映射已保存\n")
 }
 
 // findAllHTMLFiles 扫描目录查找所有HTML文件
@@ -1269,7 +1249,6 @@ func main() {
             fmt.Printf("❌ 处理失败: %v\n", err)
             os.Exit(1)
         }
-        vm.saveVersionMap()
         return
     }
     
