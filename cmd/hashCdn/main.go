@@ -212,16 +212,23 @@ func (vm *VersionManager) renameFileWithHash(filePath string) (*FileInfo, error)
         Renamed:      true,
     }
     
-    // 检查目标文件是否已存在且内容相同
+    // 检查目标文件是否已存在
     if fileExists(newPath) {
-        existingHash, err := vm.calculateFileHash(newPath)
-        if err == nil && existingHash == hash {
-            if vm.debugMode {
-                fmt.Printf("  ⏭️  跳过（已存在）: %s\n", newFilename)
-            }
-            return info, nil
+        // 目标文件已存在，直接跳过
+        if vm.debugMode {
+            fmt.Printf("  ⏭️  跳过（已存在）: %s\n", newFilename)
         }
-        os.Remove(newPath)
+        
+        // 删除旧的hash文件（排除当前hash）
+        ext := filepath.Ext(cleanFilename)
+        basename := strings.TrimSuffix(cleanFilename, ext)
+        if err := vm.findAndDeleteOldHashFiles(dir, basename, ext, hash); err != nil {
+            if vm.debugMode {
+                fmt.Printf("  ⚠️  清理旧文件时出错: %v\n", err)
+            }
+        }
+        
+        return info, nil
     }
     
     // 复制源文件到新路径
