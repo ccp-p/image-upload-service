@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Config 配置结构
@@ -1212,9 +1213,10 @@ func main() {
     debugMode := flag.Bool("debug", false, "调试模式（显示详细日志）")
     
     flag.Parse()
-    
     // 加载配置
     config, err := loadConfig(*configPath)
+    startTime := time.Now()
+
     if err != nil {
         config = &Config{
             RootDir:     ".",
@@ -1249,6 +1251,8 @@ func main() {
             fmt.Printf("❌ 处理失败: %v\n", err)
             os.Exit(1)
         }
+        duration := time.Since(startTime)
+        fmt.Printf("\n⏱️  总运行时间: %v\n", duration)
         return
     }
     
@@ -1272,4 +1276,6 @@ func main() {
         fmt.Println("使用 -file 指定文件, -all 扫描所有, 或在配置文件中指定")
         flag.Usage()
     }
-}
+
+
+} 
