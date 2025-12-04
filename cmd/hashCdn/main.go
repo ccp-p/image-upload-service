@@ -30,6 +30,7 @@ type Config struct {
     IncludeComponents []string `json:"includeComponents"` // 只处理指定的组件
     // 新增：指定哪些HTML文件需要处理主资源
     ProcessMainResources []string `json:"processMainResources"` 
+    ReplaceAllWithCDN bool     `json:"replaceAllWithCDN"` // 替换所有资源为CDN路径
 }
 
 // VersionManager 版本管理器
@@ -890,6 +891,87 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
         }
     }
     
+    // 新增：处理剩余的普通资源（非hash），替换为CDN路径
+    if vm.config.CDNDomain != "" && vm.config.ReplaceAllWithCDN {
+        // 处理CSS
+        cssPattern := `(<link[^>]*href\s*=\s*['"])([^'"]+)(['"][^>]*>)`
+        cssRe := regexp.MustCompile(cssPattern)
+        contentStr = cssRe.ReplaceAllStringFunc(contentStr, func(match string) string {
+            submatches := cssRe.FindStringSubmatch(match)
+            if len(submatches) >= 4 {
+                prefix := submatches[1]
+                path := submatches[2]
+                suffix := submatches[3]
+                
+                // 只处理 .css 文件
+                if !strings.Contains(path, ".css") {
+                    return match
+                }
+
+                // 跳过绝对路径
+                if strings.HasPrefix(path, "http") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "data:") {
+                    return match
+                }
+
+                // 清理路径
+                cleanPath := path
+                for strings.HasPrefix(cleanPath, "./") || strings.HasPrefix(cleanPath, "../") {
+                    cleanPath = strings.TrimPrefix(cleanPath, "./")
+                    cleanPath = strings.TrimPrefix(cleanPath, "../")
+                }
+                cleanPath = strings.TrimPrefix(cleanPath, "/")
+                
+                newPath := vm.config.CDNDomain + "/" + cleanPath
+                
+                if newPath != path {
+                    updated = true
+                    fmt.Printf("  🌍 CDN(CSS): %s -> %s\n", filepath.Base(path), newPath)
+                    return prefix + newPath + suffix
+                }
+            }
+            return match
+        })
+
+        // 处理JS
+        jsPattern := `(<script[^>]*src\s*=\s*['"])([^'"]+)(['"][^>]*>)`
+        jsRe := regexp.MustCompile(jsPattern)
+        contentStr = jsRe.ReplaceAllStringFunc(contentStr, func(match string) string {
+            submatches := jsRe.FindStringSubmatch(match)
+            if len(submatches) >= 4 {
+                prefix := submatches[1]
+                path := submatches[2]
+                suffix := submatches[3]
+                
+                // 只处理 .js 文件
+                if !strings.Contains(path, ".js") {
+                    return match
+                }
+
+                // 跳过绝对路径
+                if strings.HasPrefix(path, "http") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "data:") {
+                    return match
+                }
+
+                // 清理路径
+                cleanPath := path
+                for strings.HasPrefix(cleanPath, "./") || strings.HasPrefix(cleanPath, "../") {
+                    cleanPath = strings.TrimPrefix(cleanPath, "./")
+                    cleanPath = strings.TrimPrefix(cleanPath, "../")
+                }
+                cleanPath = strings.TrimPrefix(cleanPath, "/")
+                
+                newPath := vm.config.CDNDomain + "/" + cleanPath
+                
+                if newPath != path {
+                    updated = true
+                    fmt.Printf("  🌍 CDN(JS): %s -> %s\n", filepath.Base(path), newPath)
+                    return prefix + newPath + suffix
+                }
+            }
+            return match
+        })
+    }
+
     if updated {
         if err := os.WriteFile(htmlPath, []byte(contentStr), 0644); err != nil {
             return err
@@ -1278,4 +1360,4 @@ func main() {
     }
 
 
-} 
+}
