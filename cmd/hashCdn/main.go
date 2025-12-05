@@ -88,6 +88,38 @@ func (vm *VersionManager) gitAddFile(filePath string) {
     }
 }
 
+// runNodeCopyScript 执行Node.js复制脚本
+func (vm *VersionManager) runNodeCopyScript() {
+    isHome := os.Getenv("IS_HOME")
+    var scriptPath string
+    
+    if isHome == "1" {
+        fmt.Println("🏠 当前环境: Home")
+        scriptPath = `D:\self_project\js_project\miaowei\test\auto\normal.js`
+    } else {
+        fmt.Println("🏢 当前环境: Office")
+        scriptPath = `d:\project\my_web_project\web\train\miaov-disk\Cloud_disk\test\auto\normal.js`
+    }
+
+    fmt.Printf("🚀 执行部署脚本: node %s copy\n", scriptPath)
+
+    // 检查 node 是否存在
+    if _, err := exec.LookPath("node"); err != nil {
+        fmt.Printf("⚠️  未找到 node 命令，跳过脚本执行\n")
+        return
+    }
+
+    cmd := exec.Command("node", scriptPath, "copy")
+    cmd.Stdout = os.Stdout
+    cmd.Stderr = os.Stderr
+    
+    if err := cmd.Run(); err != nil {
+        fmt.Printf("❌ 脚本执行失败: %v\n", err)
+    } else {
+        fmt.Println("✅ 脚本执行成功")
+    }
+}
+
 // shouldProcessComponent 检查是否应该处理指定组件
 func (vm *VersionManager) shouldProcessComponent(componentPath string) bool {
     // 如果没有配置包含的组件列表，则处理所有组件
@@ -1009,6 +1041,9 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
         fmt.Printf("\n⚠️  没有内容需要更新\n")
     }
     
+    // 执行部署脚本
+    vm.runNodeCopyScript()
+
     return nil
 }
 
