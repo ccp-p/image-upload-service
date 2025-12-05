@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -62,6 +63,28 @@ func NewVersionManager(config Config, debugMode bool) *VersionManager {
         config:         config,
         processedFiles: make(map[string]bool),
         debugMode:      debugMode,
+    }
+}
+
+// gitAddFile 执行 git add 命令
+func (vm *VersionManager) gitAddFile(filePath string) {
+    // 简单检查git是否存在
+    if _, err := exec.LookPath("git"); err != nil {
+        return
+    }
+
+    cmd := exec.Command("git", "add", filepath.Base(filePath))
+    cmd.Dir = filepath.Dir(filePath)
+    
+    if output, err := cmd.CombinedOutput(); err != nil {
+        if vm.debugMode {
+            fmt.Printf("      ⚠️  Git add 失败: %s (%v)\n", filepath.Base(filePath), err)
+            fmt.Printf("      Output: %s\n", string(output))
+        }
+    } else {
+        if vm.debugMode {
+            fmt.Printf("    ➕ Git add: %s\n", filepath.Base(filePath))
+        }
     }
 }
 
@@ -236,6 +259,8 @@ func (vm *VersionManager) renameFileWithHash(filePath string) (*FileInfo, error)
         return nil, fmt.Errorf("复制文件失败: %v", err)
     }
     
+    vm.gitAddFile(newPath) // 自动添加到git
+
     fmt.Printf("  ✅ 已生成: %s\n", newFilename)
     
     // 删除旧的hash文件
@@ -697,6 +722,8 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
         }
     }
     
+    vm.gitAddFile(hashedCssPath) // 自动添加到git
+
     // 删除旧的CSS hash文件
     cssExt := filepath.Ext(cleanFilename)
     cssBasename := strings.TrimSuffix(cleanFilename, cssExt)
@@ -976,6 +1003,7 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
         if err := os.WriteFile(htmlPath, []byte(contentStr), 0644); err != nil {
             return err
         }
+        vm.gitAddFile(htmlPath) // 自动添加到git
         fmt.Printf("\n✅ HTML文件已更新\n")
     } else {
         fmt.Printf("\n⚠️  没有内容需要更新\n")
