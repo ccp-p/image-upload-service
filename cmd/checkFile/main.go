@@ -1,86 +1,319 @@
 package main
 
 import (
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"time"
 )
 
+// Config 配置
+const (
+	SourceDir     = `C:\Users\83795\Downloads\compressed`
+)
+var CacheFileName = "image_path_map.json"
+
+// TargetFileInfo 目标文件信息
+type TargetFileInfo struct {
+	Path   string `json:"path"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	Size   int64  `json:"size"`
+}
+
+// CacheData 缓存数据结构
+type CacheData struct {
+	TotalCount int                         `json:"totalCount"`
+	LastUpdate time.Time                   `json:"lastUpdate"`
+	Mapping    map[string][]TargetFileInfo `json:"mapping"`
+}
+
 func main() {
-	inputFile := `D:\project\cx_project\china_mobile\chartityProject\gitSourceCode\charity-open-fronted\wap\dev\dist\static\js_20251205\chunk-05a8245a.8d409448.chunk.js`
-	outputFile := `a`
-	imgDir := "D:\\project\\my_go_project\\image-upload-service\\cmd\\checkFile\\images"
+	// 1. 确定 BasePath
+	isHome := os.Getenv("IS_HOME") == "1"
+	var destBasePath string
+	if isHome {
+		destBasePath = `D:\job_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
+		CacheFileName = "image_path_map_home.json"
+	} else {
+		destBasePath = `D:\project\cx_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
+	}
 
-	// 1. 读取文件
-	content, err := ioutil.ReadFile(inputFile)
+	fmt.Printf("当前环境: %v\n目标根目录: %s\n", isHome, destBasePath)
+
+	// 2. 检查并更新缓存
+	cache, err := ensureCache(destBasePath)
 	if err != nil {
-		fmt.Printf("无法读取文件 %s: %v\n", inputFile, err)
+		fmt.Printf("缓存处理失败: %v\n", err)
 		return
 	}
-	originalSize := len(content)
 
-	// 2. 创建图片目录
-	if _, err := os.Stat(imgDir); os.IsNotExist(err) {
-		os.Mkdir(imgDir, 0755)
+	// 3. 处理压缩图片
+	processCompressedImages(SourceDir, cache)
+}
+
+// ensureCache 确保缓存是最新的
+func ensureCache(basePath string) (*CacheData, error) {
+	// 扫描当前目录获取图片总数
+	staticList:= []string{
+		"components/xdrsign/static",
+		"images/xdrNormal/202505",
+		"components/xdrInvite/static/202510",
 	}
+	currentCount := 0
+	for _, subPath := range staticList {
+		fullPath := filepath.Join(basePath, subPath)
+		currentCount += countImages(fullPath)
+	}
+	fmt.Printf("当前目录图片总数: %d\n", currentCount)
 
-	// 3. 正则匹配 Base64 图片字符串
-	// 匹配格式: data:image/png;base64,iVBORw0KGgo...
-	// 这是一个简单的正则，可能需要根据实际 JS 内容调整
-	re := regexp.MustCompile(`data:image\/([a-zA-Z]+);base64,([a-zA-Z0-9+/=]+)`)
-
-	newContent := re.ReplaceAllStringFunc(string(content), func(match string) string {
-		// 提取子匹配
-		submatches := re.FindStringSubmatch(match)
-		if len(submatches) < 3 {
-			return match // 匹配失败，不替换
+	// 尝试读取缓存
+	cache, err := loadCache()
+	if err == nil {
+		if cache.TotalCount == currentCount {
+			fmt.Println("缓存有效，直接使用")
+			return cache, nil
 		}
-
-		ext := submatches[1]      // 图片扩展名 (png, jpeg, etc.)
-		b64Data := submatches[2]  // Base64 数据部分
-
-		// 解码 Base64
-		decoded, err := base64.StdEncoding.DecodeString(b64Data)
-		if err != nil {
-			fmt.Printf("Base64 解码失败: %v\n", err)
-			return match
+		fmt.Printf("缓存过期 (缓存: %d, 实际: %d)，重新扫描...\n", cache.TotalCount, currentCount)
+	} else {
+		fmt.Println("缓存不存在或读取失败，开始扫描...")
+	}
+    newCache := &CacheData{
+		Mapping: make(map[string][]TargetFileInfo),
+		TotalCount: 0,
+	}
+	// 重新构建缓存
+	for _, subPath := range staticList {
+		fullPath:= filepath.Join(basePath, subPath)
+		subCache := buildCache(fullPath)
+		// 合并子缓存
+		for k, v := range subCache.Mapping {
+			newCache.Mapping[k] = append(newCache.Mapping[k], v...)
 		}
-
-		// 生成文件名 (使用简单的计数或哈希，这里用简单的临时文件名逻辑，实际可用 md5)
-		// 为了简单起见，这里不维护全局计数器，直接用内容长度+部分数据做文件名，或者你可以引入全局变量
-		// 这里简单使用纳秒时间戳或者随机数，但在 ReplaceAllStringFunc 中不好控制顺序计数
-		// 更好的方式是先 FindAll 拿到所有，再 Replace。
-		// 但为了保持流式处理，我们这里简单生成一个基于内容哈希的文件名
-		filename := fmt.Sprintf("img_%d.%s", len(decoded), ext)
-		savePath := filepath.Join(imgDir, filename)
-
-		// 保存图片 (如果文件已存在可能会覆盖，实际场景建议用 md5 命名)
-		err = ioutil.WriteFile(savePath, decoded, 0644)
-		if err != nil {
-			fmt.Printf("保存图片失败 %s: %v\n", savePath, err)
-			return match
+	}
+	newCache.TotalCount = currentCount // 确保计数一致
+	if err := saveCache(newCache); err != nil {
+		fmt.Printf("警告: 保存缓存失败: %v\n", err)
+	}
+	return newCache, nil
+}
+func isHashImageFileName(filename string) bool {
+	// afterGetEquityPop.88ade0f6.png
+	hashPattern := `\.[a-f0-9]{6,}\.(png|jpg|jpeg|gif)$`
+	isHashImg, _ := regexp.MatchString(hashPattern, filename)
+	return isHashImg
+}
+// countImages 快速计算图片数量
+func countImages(root string) int {
+	count := 0
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
 		}
-
-		fmt.Printf("已保存图片: %s\n", savePath)
-
-		// 返回替换后的字符串，按要求替换为空字符
-		return "" 
+		// is hash 1.2a351e.png
+		
+		if isImage(path) && !isHashImageFileName(info.Name()) {
+			count++
+		}
+		return nil
 	})
+	return count
+}
 
-	// 4. 保存瘦身后的 JS
-	err = ioutil.WriteFile(outputFile, []byte(newContent), 0644)
+// buildCache 构建路径映射
+func buildCache(root string) *CacheData {
+	mapping := make(map[string][]TargetFileInfo)
+	count := 0
+
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !isImage(path) || isHashImageFileName(info.Name()) {
+			return nil
+		}
+
+		count++
+		width, height := getImageDimensions(path)
+		
+		fileInfo := TargetFileInfo{
+			Path:   path,
+			Width:  width,
+			Height: height,
+			Size:   info.Size(),
+		}
+
+		filename := info.Name()
+		mapping[filename] = append(mapping[filename], fileInfo)
+		
+		if count%100 == 0 {
+			fmt.Printf("\r已扫描: %d", count)
+		}
+		return nil
+	})
+	fmt.Println()
+
+	return &CacheData{
+		TotalCount: count,
+		LastUpdate: time.Now(),
+		Mapping:    mapping,
+	}
+}
+
+// processCompressedImages 处理源目录下的图片
+func processCompressedImages(sourceDir string, cache *CacheData) {
+	files, err := os.ReadDir(sourceDir)
 	if err != nil {
-		fmt.Printf("无法写入文件 %s: %v\n", outputFile, err)
+		fmt.Printf("读取源目录失败: %v\n", err)
 		return
 	}
-	newSize := len(newContent)
 
-	// 5. 输出结果
-	fmt.Printf("处理完成。\n")
-	fmt.Printf("原始文件 (%s) 大小: %d bytes\n", inputFile, originalSize)
-	fmt.Printf("瘦身文件 (%s) 大小: %d bytes\n", outputFile, newSize)
-	fmt.Printf("减少大小: %d bytes\n", originalSize-newSize)
+	fmt.Println("开始处理图片移动...")
+	for _, file := range files {
+		if file.IsDir() || !isImage(file.Name()) {
+			continue
+		}
+
+		sourcePath := filepath.Join(sourceDir, file.Name())
+		width, height := getImageDimensions(sourcePath)
+		sourceSize, _ := getFileSize(sourcePath)
+
+		candidates, ok := cache.Mapping[file.Name()]
+		if !ok {
+			fmt.Printf("❌ 未找到目标: %s\n", file.Name())
+			continue
+		}
+
+		// 筛选匹配的候选文件
+		var matched []TargetFileInfo
+		// 1. 优先匹配宽高
+		for _, c := range candidates {
+			if c.Width == width && c.Height == height {
+				matched = append(matched, c)
+			}
+		}
+		// matched
+		fmt.Printf("🔍 处理: %s (Size: %d, %dx%d), 候选数: %d, 匹配数: %d\n", file.Name(), sourceSize, width, height, len(candidates), len(matched))
+
+		targetPath := ""
+		if len(matched) == 1 {
+			targetPath = matched[0].Path
+		} else if len(matched) > 1 {
+			// 尝试通过大小进一步区分（仅当源文件和目标文件大小时）
+			fmt.Printf("⚠️  存在歧义 (%d 个匹配): %s (Size: %d, %dx%d)\n", len(matched), file.Name(), sourceSize, width, height)
+			for _, m := range matched {
+				fmt.Printf("   - 候选: %s (Size: %d, %dx%d)\n", m.Path, m.Size, m.Width, m.Height)
+			}
+			// 简单的策略：如果无法区分，跳过
+			continue
+		} else {
+			// 宽高都不匹配
+			// 尝试回退到文件名匹配（如果有且仅有一个同名文件）
+			if len(candidates) == 1 {
+				fmt.Printf("⚠️  宽高不匹配但仅有一个同名文件，强制匹配: %s\n", file.Name())
+				targetPath = candidates[0].Path
+			} else {
+				fmt.Printf("❌ 宽高不匹配且有多个同名文件: %s\n", file.Name())
+				continue
+			}
+		}
+
+		if targetPath != "" {
+			err := moveFile(sourcePath, targetPath)
+			if err != nil {
+				fmt.Printf("❌ 移动失败 %s -> %s: %v\n", file.Name(), targetPath, err)
+			} else {
+				fmt.Printf("✅ 移动成功: %s -> %s\n", file.Name(), targetPath)
+			}
+		}
+	}
+}
+
+// 辅助函数
+
+func isImage(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif"
+}
+
+func getImageDimensions(path string) (int, int) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0
+	}
+	defer file.Close()
+
+	config, _, err := image.DecodeConfig(file)
+	if err != nil {
+		return 0, 0
+	}
+	return config.Width, config.Height
+}
+
+func getFileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func loadCache() (*CacheData, error) {
+	file, err := os.Open(CacheFileName)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var data CacheData
+	if err := json.NewDecoder(file).Decode(&data); err != nil {
+		return nil, err
+	}
+	return &data, nil
+}
+
+func saveCache(data *CacheData) error {
+	file, err := os.Create(CacheFileName)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(data)
+}
+
+func moveFile(src, dst string) error {
+	// 跨盘符移动需要 Copy + Remove
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return err
+	}
+
+	// 关闭文件后删除源文件
+	sourceFile.Close()
+	destFile.Close()
+	
+	return os.Remove(src)
 }
