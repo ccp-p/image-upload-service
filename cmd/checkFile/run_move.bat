@@ -2,7 +2,7 @@
 REM filepath: d:\project\my_go_project\image-upload-service\cmd\hashCdn\run_hash_cdn.bat
 @chcp 65001 >nul
 echo ========================================
-echo    HTML Hash CDN 工具
+echo    HTML 替换图片 CDN 工具
 echo ========================================
 echo.
 
