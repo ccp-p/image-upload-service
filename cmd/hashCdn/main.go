@@ -34,6 +34,7 @@ type Config struct {
 	IncludeComponents  []string `json:"includeComponents"` // 只处理指定的组件
 	ProcessMainResources []string `json:"processMainResources"` // 指定哪些HTML文件需要处理主资源
 	ReplaceAllWithCDN    bool     `json:"replaceAllWithCDN"` // 替换所有资源为CDN路径
+	RollbackAfterDeploy  bool     `json:"rollbackAfterDeploy"` // 🔥 新增：部署结束后回退HTML文件
 }
 
 // VersionManager 版本管理器
@@ -116,6 +117,31 @@ func (vm *VersionManager) gitAddFile(filePath string) {
 		if vm.debugMode {
 			fmt.Printf("    ➕ Git add: %s\n", filepath.Base(filePath))
 		}
+	}
+}
+
+// 🔥 新增：gitRollbackFile 执行 git checkout HEAD <file>
+func (vm *VersionManager) gitRollbackFile(filePath string) {
+	if !vm.config.RollbackAfterDeploy {
+		return
+	}
+
+	// 简单检查git是否存在
+	if _, err := exec.LookPath("git"); err != nil {
+		return
+	}
+
+	fmt.Printf("🔙 正在回退文件(Git): %s\n", filepath.Base(filePath))
+
+	// 使用 git checkout HEAD <file> 回退到最新提交状态（撤销暂存区和工作区的修改）
+	cmd := exec.Command("git", "checkout", "HEAD", filepath.Base(filePath))
+	cmd.Dir = filepath.Dir(filePath)
+
+	if output, err := cmd.CombinedOutput(); err != nil {
+		fmt.Printf("      ⚠️  回退失败: %s (%v)\n", filepath.Base(filePath), err)
+		fmt.Printf("      Output: %s\n", string(output))
+	} else {
+		fmt.Printf("      ✅ 文件已回退到 git HEAD 版本 (开发环境保持相对路径)\n")
 	}
 }
 
@@ -1066,6 +1092,11 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 	// 执行部署脚本 (调用整合进来的 RunResDeploy)
 	vm.RunResDeploy()
 
+	// 🔥 新增：如果配置了回退，且文件被修改过，则执行回退
+	if updated {
+		vm.gitRollbackFile(htmlPath)
+	}
+
 	return nil
 }
 
@@ -1713,6 +1744,8 @@ func loadConfig(configPath string) (*Config, error) {
 	}
 
 	var config Config
+	config.RollbackAfterDeploy = true // 🔥 设置默认值为 true
+
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
