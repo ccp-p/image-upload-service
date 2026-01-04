@@ -1899,10 +1899,7 @@ func (vm *VersionManager) runDeploy() {
 
 // shouldExcludeFromCDN 检查文件是否应该排除CDN替换
 func (vm *VersionManager) shouldExcludeFromCDN(filePath string) bool {
-    // replaceAllWithCDN
-    if !vm.config.ReplaceAllWithCDN {
-        return true
-    }
+
     if len(vm.config.CDNExcludeFiles) == 0 {
         return false
     }
