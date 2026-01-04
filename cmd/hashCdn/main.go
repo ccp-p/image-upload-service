@@ -32,6 +32,23 @@ type Config struct {
     // 新增：指定哪些HTML文件需要处理主资源
     ProcessMainResources []string `json:"processMainResources"` 
     ReplaceAllWithCDN bool     `json:"replaceAllWithCDN"` // 替换所有资源为CDN路径
+    // 新增：部署相关配置
+    RollbackAfterDeploy bool   `json:"rollbackAfterDeploy"` // 部署后回滚HTML
+    CDNExcludeFiles []string   `json:"cdnExcludeFiles"`     // CDN替换排除的文件列表
+    Deploy          DeployConfig `json:"deploy"`            // 部署配置
+}
+
+// DeployConfig 部署配置
+type DeployConfig struct {
+    Enabled           bool     `json:"enabled"`
+    Command           string   `json:"command"`           // copy 或 copy-commit
+    AutoCommit        bool     `json:"autoCommit"`
+    HomeSourcePath    string   `json:"homeSourcePath"`
+    HomeDestPath      string   `json:"homeDestPath"`
+    CompanySourcePath string   `json:"companySourcePath"`
+    CompanyDestPath   string   `json:"companyDestPath"`
+    FilePaths         []string `json:"filePaths"`
+    GitAuthors        []string `json:"gitAuthors"`
 }
 
 // VersionManager 版本管理器
@@ -39,7 +56,8 @@ type VersionManager struct {
     config         Config
     processedFiles map[string]bool
     mu             sync.Mutex
-    debugMode      bool  // 调试模式
+    debugMode      bool
+    folderOpened   bool // 记录文件夹是否已打开
 }
 
 // FileInfo 文件信息
@@ -63,6 +81,7 @@ func NewVersionManager(config Config, debugMode bool) *VersionManager {
         config:         config,
         processedFiles: make(map[string]bool),
         debugMode:      debugMode,
+        folderOpened:   false,
     }
 }
 
@@ -237,7 +256,264 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
     
     return nil
 }
+// processHTMLFile 处理单个HTML文件及其关联资源
+func (vm *VersionManager) processHTMLFile(htmlPath string) error {
+    fmt.Println(strings.Repeat("=", 60))
+    fmt.Printf("📄 处理: %s\n", htmlPath)
+    fmt.Println(strings.Repeat("=", 60))
+    
+    if !fileExists(htmlPath) {
+        return fmt.Errorf("文件不存在: %s", htmlPath)
+    }
+    
+    htmlDir := filepath.Dir(htmlPath)
+    htmlBasename := strings.TrimSuffix(filepath.Base(htmlPath), ".html")
+    
+    // 判断是否需要处理主资源
+    shouldProcessMain := false
+    if len(vm.config.ProcessMainResources) > 0 {
+        for _, name := range vm.config.ProcessMainResources {
+            if name == filepath.Base(htmlPath) || name == htmlBasename {
+                shouldProcessMain = true
+                break
+            }
+        }
+    }
+    
+    if shouldProcessMain {
+        fmt.Printf("🎯 策略: 处理主资源 (JS/CSS) 及组件\n")
+    } else {
+        fmt.Printf("🎯 策略: 仅处理组件资源 (跳过主JS/CSS)\n")
+    }
+    
+    resources := map[string]map[string]string{
+        "css": make(map[string]string),
+        "js":  make(map[string]string),
+    }
+    
+    // 1. 处理主JS文件
+    if shouldProcessMain {
+        fmt.Println("\n📦 处理主 JavaScript 文件...")
+        
+        jsPaths := []string{
+            filepath.Join(htmlDir, htmlBasename+".js"),
+            filepath.Join(htmlDir, "js", htmlBasename+".js"),
+            filepath.Join(htmlDir, "scripts", "js", htmlBasename+".js"),
+        }
+        
+        mainJsFound := false
+        for _, jsPath := range jsPaths {
+            actualJsPath := vm.findFile(jsPath)
+            if actualJsPath != "" {
+                info, err := vm.renameFileWithHash(actualJsPath)
+                if err != nil {
+                    fmt.Printf("  ❌ 处理失败: %v\n", err)
+                    continue
+                }
+                
+                relPath, _ := filepath.Rel(htmlDir, actualJsPath)
+                relPath = filepath.ToSlash(relPath)
+                
+                hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+                hashedRelPath = filepath.ToSlash(hashedRelPath)
+                
+                normalizedKey := strings.TrimPrefix(relPath, "./")
+                if _, exists := resources["js"][normalizedKey]; !exists {
+                    resources["js"][normalizedKey] = hashedRelPath
+                }
+                
+                mainJsFound = true
+                break
+            }
+        }
+        
+        if !mainJsFound {
+            fmt.Printf("  ℹ️  未找到主JS文件\n")
+        }
+    } else {
+        fmt.Println("\n📦 跳过主 JavaScript 文件")
+    }
+    
+    // 2. 处理主CSS文件
+    if shouldProcessMain {
+        fmt.Println("\n🎨 处理主 CSS 文件...")
+        
+        cssPaths := []string{
+            filepath.Join(htmlDir, htmlBasename+".css"),
+            filepath.Join(htmlDir, "css", htmlBasename+".css"),
+        }
+        
+        mainCssFound := false
+        for _, cssPath := range cssPaths {
+            actualCssPath := vm.findFile(cssPath)
+            if actualCssPath != "" {
+                info, err := vm.processComponentCSS(actualCssPath)
+                if err != nil {
+                    fmt.Printf("  ❌ 处理失败: %v\n", err)
+                    continue
+                }
+                
+                relPath, _ := filepath.Rel(htmlDir, actualCssPath)
+                relPath = filepath.ToSlash(relPath)
+                
+                hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+                hashedRelPath = filepath.ToSlash(hashedRelPath)
+                
+                normalizedKey := strings.TrimPrefix(relPath, "./")
+                if _, exists := resources["css"][normalizedKey]; !exists {
+                    resources["css"][normalizedKey] = hashedRelPath
+                }
+                
+                mainCssFound = true
+                break
+            }
+        }
+        
+        if !mainCssFound {
+            fmt.Printf("  ℹ️  未找到主CSS文件\n")
+        }
+    } else {
+        fmt.Println("\n🎨 跳过主 CSS 文件")
+    }
+    
+    // 3. 收集并处理组件资源
+    fmt.Println("\n🔍 扫描组件资源...")
+    htmlResources, err := vm.collectResourcesFromHTML(htmlPath)
+    if err != nil {
+        return fmt.Errorf("扫描HTML失败: %v", err)
+    }
+    
+    fmt.Printf("  找到 %d 个组件CSS, %d 个组件JS\n", len(htmlResources["css"]), len(htmlResources["js"]))
+    
+    // 4. 处理组件JS文件
+    if len(htmlResources["js"]) > 0 {
+        fmt.Println("\n🔧 处理组件 JavaScript 文件...")
+        for _, jsRelPath := range htmlResources["js"] {
+            normalizedKey := strings.TrimPrefix(strings.ReplaceAll(jsRelPath, "\\", "/"), "./")
+            if _, exists := resources["js"][normalizedKey]; exists {
+                continue
+            }
+            
+            info, err := vm.processComponentResource(htmlDir, jsRelPath)
+            if err != nil {
+                fmt.Printf("  ❌ 失败: %s\n", jsRelPath)
+                continue
+            }
+            
+            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+            hashedRelPath = filepath.ToSlash(hashedRelPath)
+            
+            resources["js"][normalizedKey] = hashedRelPath
+        }
+    }
+    
+    // 5. 处理组件CSS文件
+    if len(htmlResources["css"]) > 0 {
+        fmt.Println("\n🔧 处理组件 CSS 文件...")
+        for _, cssRelPath := range htmlResources["css"] {
+            normalizedKey := strings.TrimPrefix(strings.ReplaceAll(cssRelPath, "\\", "/"), "./")
+            if _, exists := resources["css"][normalizedKey]; exists {
+                continue
+            }
+            
+            info, err := vm.processComponentResource(htmlDir, cssRelPath)
+            if err != nil {
+                fmt.Printf("  ❌ 失败: %s\n", cssRelPath)
+                continue
+            }
+            
+            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
+            hashedRelPath = filepath.ToSlash(hashedRelPath)
+            
+            resources["css"][normalizedKey] = hashedRelPath
+        }
+    }
+    
+    // 6. 更新HTML中的引用
+    fmt.Println("\n🔄 更新HTML中的资源引用...")
+    fmt.Printf("  📋 CSS: %d 项, JS: %d 项\n", len(resources["css"]), len(resources["js"]))
+    
+    if err := vm.updateHTMLReferences(htmlPath, resources); err != nil {
+        return fmt.Errorf("更新HTML失败: %v", err)
+    }
+    
+    fmt.Println("\n✨ 处理完成!")
+    return nil
+}
 
+// processMultipleHTMLFiles 批量处理多个HTML文件
+func (vm *VersionManager) processMultipleHTMLFiles(htmlPaths []string) {
+    fmt.Println("🚀 开始批量处理HTML文件...\n")
+    
+    for _, htmlPath := range htmlPaths {
+        absolutePath := filepath.Join(vm.config.RootDir, htmlPath)
+        if err := vm.processHTMLFile(absolutePath); err != nil {
+            fmt.Printf("❌ 处理失败 %s: %v\n", htmlPath, err)
+        }
+    }
+    
+    fmt.Println("\n" + strings.Repeat("=", 60))
+    fmt.Println("🎉 全部处理完成！")
+    fmt.Println(strings.Repeat("=", 60))
+}
+
+// findAllHTMLFiles 扫描目录查找所有HTML文件
+func (vm *VersionManager) findAllHTMLFiles() []string {
+    var htmlFiles []string
+    
+    err := filepath.Walk(vm.config.RootDir, func(path string, info os.FileInfo, err error) error {
+        if err != nil {
+            return err
+        }
+        
+        // 跳过排除的目录
+        if info.IsDir() {
+            for _, excludeDir := range vm.config.ExcludeDirs {
+                if info.Name() == excludeDir {
+                    return filepath.SkipDir
+                }
+            }
+            return nil
+        }
+        
+        if filepath.Ext(path) == ".html" {
+            relPath, _ := filepath.Rel(vm.config.RootDir, path)
+            htmlFiles = append(htmlFiles, relPath)
+        }
+        
+        return nil
+    })
+    
+    if err != nil {
+        fmt.Printf("⚠️  扫描目录失败: %v\n", err)
+    }
+    
+    return htmlFiles
+}
+
+// 辅助函数
+
+func fileExists(path string) bool {
+    _, err := os.Stat(path)
+    return err == nil
+}
+
+func copyFile(src, dst string) error {
+    sourceFile, err := os.Open(src)
+    if err != nil {
+        return err
+    }
+    defer sourceFile.Close()
+    
+    destFile, err := os.Create(dst)
+    if err != nil {
+        return err
+    }
+    defer destFile.Close()
+    
+    _, err = io.Copy(destFile, sourceFile)
+    return err
+}
 // renameFileWithHash 重命名文件（如果hash改变）
 func (vm *VersionManager) renameFileWithHash(filePath string) (*FileInfo, error) {
     dir := filepath.Dir(filePath)
@@ -441,7 +717,11 @@ func (vm *VersionManager) updateCSSImageReferences(cssPath string, imageMap map[
         if match != result {
             updated = true
             oldFilename := filepath.Base(foundKey)
+            if(vm.debugMode){
+
             fmt.Printf("    🔄 %s -> %s\n", oldFilename, newFilename)
+            }
+
         }
         
         return result
@@ -730,9 +1010,13 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
     if len(imageMap) > 0 {
         if vm.debugMode {
             fmt.Printf("    📋 图片映射表 (%d 项):\n", len(imageMap))
+            if(vm.debugMode){
+
             for k, v := range imageMap {
                 fmt.Printf("      %s -> %s\n", k, v)
             }
+            }
+
         }
         
         if err := vm.updateCSSImageReferences(hashedCssPath, imageMap); err != nil {
@@ -791,11 +1075,9 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
         for originalRelPath, newHashedPath := range cssMap {
              vm.removeHashFromFilename(filepath.Base(originalRelPath))
             
-            // 构建完整的路径模式，匹配原始路径的完整形式
             escapedPath := regexp.QuoteMeta(originalRelPath)
             escapedPath = strings.ReplaceAll(escapedPath, "/", `[/\\]`)
             
-            // 支持多种引用格式的正则表达式
             patterns := []string{
                 fmt.Sprintf(`(<link[^>]*href\s*=\s*['"])(%s)(['"][^>]*>)`, escapedPath),
                 fmt.Sprintf(`(<link[^>]*href\s*=\s*['"])(\.{1,2}[/\\]%s)(['"][^>]*>)`, escapedPath),
@@ -838,7 +1120,8 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
                                 }
                             }
                             
-                            if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") {
+                            // 🔥 检查是否排除CDN替换
+                            if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") && !vm.shouldExcludeFromCDN(newPath) {
                                 cleanNewPath := strings.TrimPrefix(newPath, "./")
                                 cleanNewPath = strings.TrimPrefix(cleanNewPath, "../")
                                 newPath = vm.config.CDNDomain + "/" + cleanNewPath
@@ -919,7 +1202,8 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
                                 }
                             }
                             
-                            if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") {
+                            // 🔥 检查是否排除CDN替换
+                            if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") && !vm.shouldExcludeFromCDN(newPath) {
                                 cleanNewPath := strings.TrimPrefix(newPath, "./")
                                 cleanNewPath = strings.TrimPrefix(cleanNewPath, "../")
                                 newPath = vm.config.CDNDomain + "/" + cleanNewPath
@@ -951,7 +1235,7 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
     }
     
     // 新增：处理剩余的普通资源（非hash），替换为CDN路径
-    if vm.config.CDNDomain != "" && vm.config.ReplaceAllWithCDN {
+    if vm.config.CDNDomain != ""  {
         // 处理CSS
         cssPattern := `(<link[^>]*href\s*=\s*['"])([^'"]+)(['"][^>]*>)`
         cssRe := regexp.MustCompile(cssPattern)
@@ -969,6 +1253,11 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 
                 // 跳过绝对路径
                 if strings.HasPrefix(path, "http") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "data:") {
+                    return match
+                }
+
+                // 🔥 检查是否排除CDN替换
+                if vm.shouldExcludeFromCDN(path) {
                     return match
                 }
 
@@ -1011,6 +1300,11 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
                     return match
                 }
 
+                // 🔥 检查是否排除CDN替换
+                if vm.shouldExcludeFromCDN(path) {
+                    return match
+                }
+
                 // 清理路径
                 cleanPath := path
                 for strings.HasPrefix(cleanPath, "./") || strings.HasPrefix(cleanPath, "../") {
@@ -1041,269 +1335,668 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
         fmt.Printf("\n⚠️  没有内容需要更新\n")
     }
     
-    // 执行部署脚本
-    vm.runNodeCopyScript()
+    // 执行部署脚本（如果启用）
+    if vm.config.Deploy.Enabled {
+        vm.runDeploy()
+    } else {
+        vm.runNodeCopyScript()
+    }
 
     return nil
 }
 
-// processHTMLFile 处理单个HTML文件及其关联资源
-func (vm *VersionManager) processHTMLFile(htmlPath string) error {
-    fmt.Println(strings.Repeat("=", 60))
-    fmt.Printf("📄 处理: %s\n", htmlPath)
-    fmt.Println(strings.Repeat("=", 60))
+// ==================== 部署相关功能 ====================
+
+// DeployManager 部署管理器
+type DeployManager struct {
+    config       DeployConfig
+    sourcePath   string
+    destPath     string
+    debugMode    bool
+    folderOpened bool
+}
+
+// NewDeployManager 创建部署管理器
+func NewDeployManager(config DeployConfig, debugMode bool) *DeployManager {
+    isHome := os.Getenv("IS_HOME") == "1"
     
-    if !fileExists(htmlPath) {
-        return fmt.Errorf("文件不存在: %s", htmlPath)
-    }
-    
-    htmlDir := filepath.Dir(htmlPath)
-    htmlBasename := strings.TrimSuffix(filepath.Base(htmlPath), ".html")
-    
-    // 判断是否需要处理主资源
-    shouldProcessMain := false
-    if len(vm.config.ProcessMainResources) > 0 {
-        for _, name := range vm.config.ProcessMainResources {
-            if name == filepath.Base(htmlPath) || name == htmlBasename {
-                shouldProcessMain = true
-                break
-            }
-        }
-    }
-    
-    if shouldProcessMain {
-        fmt.Printf("🎯 策略: 处理主资源 (JS/CSS) 及组件\n")
+    var sourcePath, destPath string
+    if isHome {
+        sourcePath = config.HomeSourcePath
+        destPath = config.HomeDestPath
     } else {
-        fmt.Printf("🎯 策略: 仅处理组件资源 (跳过主JS/CSS)\n")
+        sourcePath = config.CompanySourcePath
+        destPath = config.CompanyDestPath
     }
     
-    resources := map[string]map[string]string{
-        "css": make(map[string]string),
-        "js":  make(map[string]string),
+    return &DeployManager{
+        config:       config,
+        sourcePath:   sourcePath,
+        destPath:     destPath,
+        debugMode:    debugMode,
+        folderOpened: false,
     }
-    
-    // 1. 处理主JS文件
-    if shouldProcessMain {
-        fmt.Println("\n📦 处理主 JavaScript 文件...")
-        
-        jsPaths := []string{
-            filepath.Join(htmlDir, htmlBasename+".js"),
-            filepath.Join(htmlDir, "js", htmlBasename+".js"),
-            filepath.Join(htmlDir, "scripts", "js", htmlBasename+".js"),
-        }
-        
-        mainJsFound := false
-        for _, jsPath := range jsPaths {
-            actualJsPath := vm.findFile(jsPath)
-            if actualJsPath != "" {
-                info, err := vm.renameFileWithHash(actualJsPath)
-                if err != nil {
-                    fmt.Printf("  ❌ 处理失败: %v\n", err)
-                    continue
-                }
-                
-                relPath, _ := filepath.Rel(htmlDir, actualJsPath)
-                relPath = filepath.ToSlash(relPath)
-                
-                hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
-                hashedRelPath = filepath.ToSlash(hashedRelPath)
-                
-                normalizedKey := strings.TrimPrefix(relPath, "./")
-                if _, exists := resources["js"][normalizedKey]; !exists {
-                    resources["js"][normalizedKey] = hashedRelPath
-                }
-                
-                mainJsFound = true
-                break
-            }
-        }
-        
-        if !mainJsFound {
-            fmt.Printf("  ℹ️  未找到主JS文件\n")
-        }
-    } else {
-        fmt.Println("\n📦 跳过主 JavaScript 文件")
-    }
-    
-    // 2. 处理主CSS文件
-    if shouldProcessMain {
-        fmt.Println("\n🎨 处理主 CSS 文件...")
-        
-        cssPaths := []string{
-            filepath.Join(htmlDir, htmlBasename+".css"),
-            filepath.Join(htmlDir, "css", htmlBasename+".css"),
-        }
-        
-        mainCssFound := false
-        for _, cssPath := range cssPaths {
-            actualCssPath := vm.findFile(cssPath)
-            if actualCssPath != "" {
-                info, err := vm.processComponentCSS(actualCssPath)
-                if err != nil {
-                    fmt.Printf("  ❌ 处理失败: %v\n", err)
-                    continue
-                }
-                
-                relPath, _ := filepath.Rel(htmlDir, actualCssPath)
-                relPath = filepath.ToSlash(relPath)
-                
-                hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
-                hashedRelPath = filepath.ToSlash(hashedRelPath)
-                
-                normalizedKey := strings.TrimPrefix(relPath, "./")
-                if _, exists := resources["css"][normalizedKey]; !exists {
-                    resources["css"][normalizedKey] = hashedRelPath
-                }
-                
-                mainCssFound = true
-                break
-            }
-        }
-        
-        if !mainCssFound {
-            fmt.Printf("  ℹ️  未找到主CSS文件\n")
-        }
-    } else {
-        fmt.Println("\n🎨 跳过主 CSS 文件")
-    }
-    
-    // 3. 收集并处理组件资源
-    fmt.Println("\n🔍 扫描组件资源...")
-    htmlResources, err := vm.collectResourcesFromHTML(htmlPath)
+}
+
+// getFileHash 计算文件hash
+func getFileHash(filePath string) (string, error) {
+    file, err := os.Open(filePath)
     if err != nil {
-        return fmt.Errorf("扫描HTML失败: %v", err)
+        return "", err
     }
-    
-    fmt.Printf("  找到 %d 个组件CSS, %d 个组件JS\n", len(htmlResources["css"]), len(htmlResources["js"]))
-    
-    // 4. 处理组件JS文件
-    if len(htmlResources["js"]) > 0 {
-        fmt.Println("\n🔧 处理组件 JavaScript 文件...")
-        for _, jsRelPath := range htmlResources["js"] {
-            normalizedKey := strings.TrimPrefix(strings.ReplaceAll(jsRelPath, "\\", "/"), "./")
-            if _, exists := resources["js"][normalizedKey]; exists {
-                continue
-            }
-            
-            info, err := vm.processComponentResource(htmlDir, jsRelPath)
-            if err != nil {
-                fmt.Printf("  ❌ 失败: %s\n", jsRelPath)
-                continue
-            }
-            
-            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
-            hashedRelPath = filepath.ToSlash(hashedRelPath)
-            
-            resources["js"][normalizedKey] = hashedRelPath
-        }
+    defer file.Close()
+
+    hash := md5.New()
+    if _, err := io.Copy(hash, file); err != nil {
+        return "", err
     }
-    
-    // 5. 处理组件CSS文件
-    if len(htmlResources["css"]) > 0 {
-        fmt.Println("\n🔧 处理组件 CSS 文件...")
-        for _, cssRelPath := range htmlResources["css"] {
-            normalizedKey := strings.TrimPrefix(strings.ReplaceAll(cssRelPath, "\\", "/"), "./")
-            if _, exists := resources["css"][normalizedKey]; exists {
-                continue
-            }
-            
-            info, err := vm.processComponentResource(htmlDir, cssRelPath)
-            if err != nil {
-                fmt.Printf("  ❌ 失败: %s\n", cssRelPath)
-                continue
-            }
-            
-            hashedRelPath, _ := filepath.Rel(htmlDir, info.HashedPath)
-            hashedRelPath = filepath.ToSlash(hashedRelPath)
-            
-            resources["css"][normalizedKey] = hashedRelPath
-        }
-    }
-    
-    // 6. 更新HTML中的引用
-    fmt.Println("\n🔄 更新HTML中的资源引用...")
-    fmt.Printf("  📋 CSS: %d 项, JS: %d 项\n", len(resources["css"]), len(resources["js"]))
-    
-    if err := vm.updateHTMLReferences(htmlPath, resources); err != nil {
-        return fmt.Errorf("更新HTML失败: %v", err)
-    }
-    
-    fmt.Println("\n✨ 处理完成!")
-    return nil
+
+    return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// processMultipleHTMLFiles 批量处理多个HTML文件
-func (vm *VersionManager) processMultipleHTMLFiles(htmlPaths []string) {
-    fmt.Println("🚀 开始批量处理HTML文件...\n")
+// findAllFileVersions 查找文件的所有版本（包含hash值）
+func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
+    fullPath := filepath.Join(dm.sourcePath, configPath)
+    dir := filepath.Dir(fullPath)
+    fileName := filepath.Base(fullPath)
+    ext := filepath.Ext(fileName)
+    basename := strings.TrimSuffix(fileName, ext)
     
-    for _, htmlPath := range htmlPaths {
-        absolutePath := filepath.Join(vm.config.RootDir, htmlPath)
-        if err := vm.processHTMLFile(absolutePath); err != nil {
-            fmt.Printf("❌ 处理失败 %s: %v\n", htmlPath, err)
+    var versions []FileVersion
+    
+    if !fileExists(dir) {
+        return versions
+    }
+    
+    // 检查无hash版本
+    if fileExists(fullPath) {
+        hash, _ := getFileHash(fullPath)
+        info, _ := os.Stat(fullPath)
+        versions = append(versions, FileVersion{
+            Path:    fullPath,
+            Name:    fileName,
+            HasHash: false,
+            ModTime: info.ModTime(),
+            Hash:    hash,
+        })
+    }
+    
+    // 查找所有hash版本
+    files, err := os.ReadDir(dir)
+    if err != nil {
+        return versions
+    }
+    
+    hashPattern := regexp.MustCompile(fmt.Sprintf(`^%s\.[a-zA-Z0-9]+%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext)))
+    
+    for _, file := range files {
+        if file.Name() == fileName {
+            continue
+        }
+        
+        if hashPattern.MatchString(file.Name()) {
+            filePath := filepath.Join(dir, file.Name())
+            hash, _ := getFileHash(filePath)
+            info, _ := file.Info()
+            versions = append(versions, FileVersion{
+                Path:    filePath,
+                Name:    file.Name(),
+                HasHash: true,
+                ModTime: info.ModTime(),
+                Hash:    hash,
+            })
         }
     }
     
-    fmt.Println("\n" + strings.Repeat("=", 60))
-    fmt.Println("🎉 全部处理完成！")
-    fmt.Println(strings.Repeat("=", 60))
+    // 按修改时间排序（最新的在前）
+    for i := 0; i < len(versions)-1; i++ {
+        for j := i + 1; j < len(versions); j++ {
+            if versions[j].ModTime.After(versions[i].ModTime) {
+                versions[i], versions[j] = versions[j], versions[i]
+            }
+        }
+    }
+    
+    return versions
 }
 
-// findAllHTMLFiles 扫描目录查找所有HTML文件
-func (vm *VersionManager) findAllHTMLFiles() []string {
-    var htmlFiles []string
+// FileVersion 文件版本信息
+type FileVersion struct {
+    Path    string
+    Name    string
+    HasHash bool
+    ModTime time.Time
+    Hash    string
+}
+
+// cleanHashFiles 清理旧的hash文件
+func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
+    destDir := filepath.Dir(destPath)
+    destFileName := filepath.Base(destPath)
+    ext := filepath.Ext(destFileName)
+    basename := strings.TrimSuffix(destFileName, ext)
     
-    err := filepath.Walk(vm.config.RootDir, func(path string, info os.FileInfo, err error) error {
+    if !fileExists(destDir) {
+        return 0
+    }
+    
+    files, err := os.ReadDir(destDir)
+    if err != nil {
+        return 0
+    }
+    
+    hashPattern := regexp.MustCompile(fmt.Sprintf(`^%s\.[a-zA-Z0-9]+%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext)))
+    
+    deletedCount := 0
+    for _, file := range files {
+        if file.Name() == destFileName || file.Name() == keepFileName {
+            continue
+        }
+        
+        if hashPattern.MatchString(file.Name()) {
+            filePath := filepath.Join(destDir, file.Name())
+            if err := os.Remove(filePath); err == nil {
+                deletedCount++
+            }
+        }
+    }
+    
+    return deletedCount
+}
+
+// copyFileWithVersions 复制文件（包括hash版本）
+func (dm *DeployManager) copyFileWithVersions(sourcePath, destPath string) (int, int, error) {
+    versions := dm.findAllFileVersions(sourcePath)
+    
+    if len(versions) == 0 {
+        return 0, 0, fmt.Errorf("源文件不存在: %s", sourcePath)
+    }
+    
+    // 筛选：只保留基础文件和最新的hash文件
+    var versionsToProcess []FileVersion
+    var baseVersion *FileVersion
+    var latestHashVersion *FileVersion
+    
+    for i := range versions {
+        if !versions[i].HasHash {
+            baseVersion = &versions[i]
+        } else if latestHashVersion == nil {
+            latestHashVersion = &versions[i]
+        }
+    }
+    
+    if baseVersion != nil {
+        versionsToProcess = append(versionsToProcess, *baseVersion)
+    }
+    if latestHashVersion != nil {
+        versionsToProcess = append(versionsToProcess, *latestHashVersion)
+    }
+    
+    destDir := filepath.Dir(destPath)
+    if err := os.MkdirAll(destDir, 0755); err != nil {
+        return 0, 0, err
+    }
+    
+    // 清理旧的hash文件
+    if latestHashVersion != nil {
+        dm.cleanHashFiles(destPath, latestHashVersion.Name)
+    }
+    
+    copiedCount := 0
+    skippedCount := 0
+    
+    for _, version := range versionsToProcess {
+        var versionDestPath string
+        if version.HasHash {
+            versionDestPath = filepath.Join(destDir, version.Name)
+        } else {
+            versionDestPath = destPath
+        }
+        
+        // 检查目标文件是否存在且内容相同
+        if fileExists(versionDestPath) {
+            destHash, err := getFileHash(versionDestPath)
+            if err == nil && destHash == version.Hash {
+                skippedCount++
+                continue
+            }
+        }
+        
+        // 复制文件
+        if err := copyFile(version.Path, versionDestPath); err != nil {
+            return copiedCount, skippedCount, err
+        }
+        copiedCount++
+    }
+    
+    return copiedCount, skippedCount, nil
+}
+
+// handleWildcardPath 处理通配符路径
+func (dm *DeployManager) handleWildcardPath(wildcardPath string) (int, int, error) {
+    dirPath := strings.TrimSuffix(wildcardPath, "/*")
+    sourceDirPath := filepath.Join(dm.sourcePath, dirPath)
+    destDirPath := filepath.Join(dm.destPath, dirPath)
+    
+    if !fileExists(sourceDirPath) {
+        return 0, 0, fmt.Errorf("源目录不存在: %s", sourceDirPath)
+    }
+    
+    totalCopied := 0
+    totalSkipped := 0
+    
+    err := filepath.Walk(sourceDirPath, func(path string, info os.FileInfo, err error) error {
         if err != nil {
             return err
         }
         
-        // 跳过排除的目录
         if info.IsDir() {
-            for _, excludeDir := range vm.config.ExcludeDirs {
-                if info.Name() == excludeDir {
-                    return filepath.SkipDir
-                }
-            }
             return nil
         }
         
-        if filepath.Ext(path) == ".html" {
-            relPath, _ := filepath.Rel(vm.config.RootDir, path)
-            htmlFiles = append(htmlFiles, relPath)
+        relPath, _ := filepath.Rel(sourceDirPath, path)
+        destPath := filepath.Join(destDirPath, relPath)
+        
+        // 获取相对于sourcePath的路径用于查找版本
+        relToSource, _ := filepath.Rel(dm.sourcePath, path)
+        
+        copied, skipped, err := dm.copyFileWithVersions(relToSource, destPath)
+        totalFailed := 0
+        if err != nil {
+            fmt.Printf("⚠️  处理失败: %s - %v\n", destPath, err)
+            totalFailed++
+            return nil
         }
         
+        totalCopied += copied
+        totalSkipped += skipped
         return nil
     })
     
+    return totalCopied, totalSkipped, err
+}
+
+// isSvnRepo 检查是否是SVN仓库
+func isSvnRepo(dir string) bool {
+    cmd := exec.Command("svn", "info")
+    cmd.Dir = dir
+    return cmd.Run() == nil
+}
+
+// isGitRepo 检查是否是Git仓库
+func isGitRepo(dir string) bool {
+    cmd := exec.Command("git", "status")
+    cmd.Dir = dir
+    return cmd.Run() == nil
+}
+
+// updateSvnRepo 更新SVN仓库
+func (dm *DeployManager) updateSvnRepo() error {
+    fmt.Printf("🔄 正在更新SVN仓库: %s\n", dm.destPath)
+    
+    cmd := exec.Command("svn", "update")
+    cmd.Dir = dm.destPath
+    
+    output, err := cmd.CombinedOutput()
     if err != nil {
-        fmt.Printf("⚠️  扫描目录失败: %v\n", err)
+        // 尝试清理
+        if strings.Contains(string(output), "locked") || strings.Contains(string(output), "cleanup") {
+            fmt.Println("🔧 检测到SVN锁定，尝试清理...")
+            cleanCmd := exec.Command("svn", "cleanup")
+            cleanCmd.Dir = dm.destPath
+            if cleanErr := cleanCmd.Run(); cleanErr == nil {
+                // 重试更新
+                return dm.updateSvnRepo()
+            }
+        }
+        return err
     }
     
-    return htmlFiles
+    fmt.Printf("✅ SVN更新成功\n%s\n", string(output))
+    return nil
 }
 
-// 辅助函数
-
-func fileExists(path string) bool {
-    _, err := os.Stat(path)
-    return err == nil
-}
-
-func copyFile(src, dst string) error {
-    sourceFile, err := os.Open(src)
+// svnAddAll 添加所有新文件到SVN
+func (dm *DeployManager) svnAddAll() error {
+    fmt.Println("📁 正在添加新文件到SVN...")
+    
+    cmd := exec.Command("svn", "status")
+    cmd.Dir = dm.destPath
+    
+    output, err := cmd.Output()
     if err != nil {
         return err
     }
-    defer sourceFile.Close()
     
-    destFile, err := os.Create(dst)
+    lines := strings.Split(string(output), "\n")
+    addedCount := 0
+    
+    for _, line := range lines {
+        line = strings.TrimSpace(line)
+        if strings.HasPrefix(line, "?") {
+            file := strings.TrimSpace(line[1:])
+            if file == "" {
+                continue
+            }
+            
+            addCmd := exec.Command("svn", "add", file)
+            addCmd.Dir = dm.destPath
+            if addErr := addCmd.Run(); addErr == nil {
+                addedCount++
+            }
+        }
+    }
+    
+    if addedCount > 0 {
+        fmt.Printf("✅ 已添加 %d 个新文件\n", addedCount)
+    }
+    
+    return nil
+}
+
+// getLatestGitCommit 获取Git最新提交信息
+func (dm *DeployManager) getLatestGitCommit() (string, string, error) {
+    if !isGitRepo(dm.sourcePath) {
+        return "", "", fmt.Errorf("源路径不是Git仓库")
+    }
+    
+    authors := dm.config.GitAuthors
+    if len(authors) == 0 {
+        authors = []string{"chenchengpeng", "ccp"}
+    }
+    
+    // 构建author过滤参数
+    args := []string{"log", "-1", "--pretty=format:%h|%s"}
+    for _, author := range authors {
+        args = append(args, "--author="+author)
+    }
+    
+    cmd := exec.Command("git", args...)
+    cmd.Dir = dm.sourcePath
+    
+    output, err := cmd.Output()
     if err != nil {
+        return "", "", err
+    }
+    
+    parts := strings.SplitN(string(output), "|", 2)
+    if len(parts) != 2 {
+        return "", "", fmt.Errorf("无法解析Git提交信息")
+    }
+    
+    return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
+}
+
+// svnCommit 提交SVN更改
+func (dm *DeployManager) svnCommit(message string) error {
+    fmt.Printf("📤 正在提交SVN更改...\n")
+    fmt.Printf("   提交信息: %s\n", message)
+    
+    // 先添加所有新文件
+    dm.svnAddAll()
+    
+    // 创建临时文件存储提交信息
+    tempFile := filepath.Join(dm.destPath, ".svn_commit_msg.tmp")
+    defer os.Remove(tempFile)
+    
+    // 写入带BOM的UTF-8内容
+    content := "\xEF\xBB\xBF" + message
+    if err := os.WriteFile(tempFile, []byte(content), 0644); err != nil {
         return err
     }
-    defer destFile.Close()
     
-    _, err = io.Copy(destFile, sourceFile)
-    return err
+    cmd := exec.Command("svn", "commit", "--file", tempFile, "--encoding", "UTF-8")
+    cmd.Dir = dm.destPath
+    
+    output, err := cmd.CombinedOutput()
+    if err != nil {
+        if strings.Contains(string(output), "no changes") || strings.Contains(string(output), "没有修改") {
+            fmt.Println("ℹ️  没有需要提交的更改")
+            return nil
+        }
+        return fmt.Errorf("SVN提交失败: %s", string(output))
+    }
+    
+    fmt.Printf("✅ SVN提交成功\n%s\n", string(output))
+    return nil
+}
+
+// openFolder 打开文件夹（避免重复打开）
+func (dm *DeployManager) openFolder() {
+    if dm.folderOpened {
+        return
+    }
+    
+    if !fileExists(dm.destPath) {
+        fmt.Printf("⚠️  目标目录不存在: %s\n", dm.destPath)
+        return
+    }
+    
+    var cmd *exec.Cmd
+    if isWindows() {
+        cmd = exec.Command("explorer", dm.destPath)
+    } else {
+        cmd = exec.Command("xdg-open", dm.destPath)
+    }
+    
+    if err := cmd.Start(); err != nil {
+        fmt.Printf("❌ 打开文件夹失败: %v\n", err)
+        fmt.Printf("📁 请手动打开: %s\n", dm.destPath)
+    } else {
+        fmt.Printf("✅ 已打开目标文件夹: %s\n", dm.destPath)
+        dm.folderOpened = true
+    }
+}
+
+// Run 执行部署
+func (dm *DeployManager) Run(autoCommit bool) error {
+    fmt.Println("🚀 开始部署操作...")
+    fmt.Printf("📂 源路径: %s\n", dm.sourcePath)
+    fmt.Printf("📂 目标路径: %s\n\n", dm.destPath)
+    
+    // 先更新SVN仓库
+    if isSvnRepo(dm.destPath) {
+        if err := dm.updateSvnRepo(); err != nil {
+            fmt.Printf("⚠️  SVN更新失败: %v，继续部署...\n", err)
+        }
+    }
+    
+    fmt.Println("📦 开始复制文件...\n")
+    
+    totalCopied := 0
+    totalSkipped := 0
+    totalFailed := 0
+    
+    for _, filePath := range dm.config.FilePaths {
+        if strings.Contains(filePath, "*") {
+            copied, skipped, err := dm.handleWildcardPath(filePath)
+            if err != nil {
+                fmt.Printf("⚠️  处理失败: %s - %v\n", filePath, err)
+                totalFailed++
+                continue
+            }
+            totalCopied += copied
+            totalSkipped += skipped
+        } else {
+            sourcePath := strings.TrimPrefix(filePath, "/")
+            destPath := filepath.Join(dm.destPath, sourcePath)
+            
+            copied, skipped, err := dm.copyFileWithVersions(sourcePath, destPath)
+            if err != nil {
+                fmt.Printf("⚠️  复制失败: %s - %v\n", filePath, err)
+                totalFailed++
+                continue
+            }
+            totalCopied += copied
+            totalSkipped += skipped
+        }
+    }
+    
+    // 打印汇总
+    fmt.Printf("\n%s\n", strings.Repeat("=", 50))
+    fmt.Printf("📊 部署完成: 复制 %d, 跳过 %d, 失败 %d\n", totalCopied, totalSkipped, totalFailed)
+    
+    if totalFailed == 0 {
+        fmt.Println("✅ 全部成功！")
+    }
+    fmt.Printf("%s\n\n", strings.Repeat("=", 50))
+    
+    // 自动提交
+    if autoCommit && isSvnRepo(dm.destPath) {
+        hash, message, err := dm.getLatestGitCommit()
+        if err != nil {
+            fmt.Printf("⚠️  获取Git提交信息失败: %v\n", err)
+            fmt.Println("💡 请手动提交SVN更改")
+        } else {
+            svnMessage := message
+            fmt.Printf("\n📝 Git提交: %s - %s\n", hash, message)
+            fmt.Println("⏳ 2秒后开始提交...")
+            time.Sleep(2 * time.Second)
+            
+            if err := dm.svnCommit(svnMessage); err != nil {
+                fmt.Printf("❌ 自动提交失败: %v\n", err)
+            } else {
+                fmt.Println("🎉 自动提交完成！")
+            }
+        }
+    }
+    
+    // 打开文件夹
+    dm.openFolder()
+    
+    return nil
+}
+
+// runDeploy 执行部署流程
+func (vm *VersionManager) runDeploy() {
+    if !vm.config.Deploy.Enabled {
+        return
+    }
+    
+    fmt.Println("\n" + strings.Repeat("=", 60))
+    fmt.Println("🚀 开始部署流程")
+    fmt.Println(strings.Repeat("=", 60))
+    
+    dm := NewDeployManager(vm.config.Deploy, vm.debugMode)
+    
+    autoCommit := vm.config.Deploy.AutoCommit
+    if vm.config.Deploy.Command == "copy-commit" {
+        autoCommit = true
+    }
+    
+    if err := dm.Run(autoCommit); err != nil {
+        fmt.Printf("❌ 部署失败: %v\n", err)
+    }
+    
+    // 回滚HTML文件
+    if vm.config.RollbackAfterDeploy && vm.config.SingleHTMLFile != "" {
+        vm.rollbackHTMLFile(vm.config.SingleHTMLFile)
+    }
+    
+    // 更新folderOpened状态
+    vm.folderOpened = dm.folderOpened
+}
+
+// shouldExcludeFromCDN 检查文件是否应该排除CDN替换
+func (vm *VersionManager) shouldExcludeFromCDN(filePath string) bool {
+    // replaceAllWithCDN
+    if !vm.config.ReplaceAllWithCDN {
+        return true
+    }
+    if len(vm.config.CDNExcludeFiles) == 0 {
+        return false
+    }
+    
+    filename := filepath.Base(filePath)
+    // 移除查询参数
+    if idx := strings.Index(filename, "?"); idx != -1 {
+        filename = filename[:idx]
+    }
+    
+    for _, excludeFile := range vm.config.CDNExcludeFiles {
+        if filename == excludeFile || strings.Contains(filePath, excludeFile) {
+            if vm.debugMode {
+                fmt.Printf("    🚫 排除CDN替换: %s\n", filename)
+            }
+            return true
+        }
+    }
+    return false
+}
+
+// rollbackHTMLFile 使用git回滚HTML文件
+func (vm *VersionManager) rollbackHTMLFile(htmlPath string) error {
+    if !vm.config.RollbackAfterDeploy {
+        return nil
+    }
+    
+    fmt.Printf("\n🔄 正在回滚HTML文件: %s\n", filepath.Base(htmlPath))
+    
+    // 检查git是否存在
+    if _, err := exec.LookPath("git"); err != nil {
+        fmt.Printf("⚠️  未找到git命令，跳过回滚\n")
+        return nil
+    }
+    
+    dir := filepath.Dir(htmlPath)
+    filename := filepath.Base(htmlPath)
+    
+    // 执行 git checkout
+    cmd := exec.Command("git", "checkout", filename)
+    cmd.Dir = dir
+    
+    if output, err := cmd.CombinedOutput(); err != nil {
+        fmt.Printf("❌ Git回滚失败: %v\n", err)
+        fmt.Printf("   Output: %s\n", string(output))
+        return err
+    }
+    
+    fmt.Printf("✅ HTML文件已回滚到CDN替换前的状态\n")
+    return nil
+}
+
+// openFolder 打开文件夹（避免重复打开）
+func (vm *VersionManager) openFolder(folderPath string) {
+    if vm.folderOpened {
+        if vm.debugMode {
+            fmt.Printf("📁 文件夹已打开，跳过: %s\n", folderPath)
+        }
+        return
+    }
+    
+    if !fileExists(folderPath) {
+        fmt.Printf("⚠️  目标目录不存在: %s\n", folderPath)
+        return
+    }
+    
+    var cmd *exec.Cmd
+    switch {
+    case isWindows():
+        cmd = exec.Command("explorer", folderPath)
+    case isDarwin():
+        cmd = exec.Command("open", folderPath)
+    default:
+        cmd = exec.Command("xdg-open", folderPath)
+    }
+    
+    if err := cmd.Start(); err != nil {
+        fmt.Printf("❌ 打开文件夹失败: %v\n", err)
+        fmt.Printf("📁 请手动打开: %s\n", folderPath)
+    } else {
+        fmt.Printf("✅ 已打开目标文件夹: %s\n", folderPath)
+        vm.folderOpened = true
+    }
+}
+
+// isWindows 检查是否Windows系统
+func isWindows() bool {
+    return os.PathSeparator == '\\' && os.PathListSeparator == ';'
+}
+
+// isDarwin 检查是否macOS系统
+func isDarwin() bool {
+    // 简单检查，实际可以用runtime.GOOS
+    return false
 }
 
 // loadConfig 加载配置文件
@@ -1356,9 +2049,11 @@ func main() {
     scanAll := flag.Bool("all", false, "扫描所有HTML文件")
     cdnDomain := flag.String("cdn", "", "CDN域名")
     debugMode := flag.Bool("debug", false, "调试模式（显示详细日志）")
+    deployOnly := flag.Bool("deploy", false, "仅执行部署（不处理hash）")
+    deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
     
     flag.Parse()
-    // 加载配置
+    
     config, err := loadConfig(*configPath)
     startTime := time.Now()
 
@@ -1376,11 +2071,36 @@ func main() {
     
     vm := NewVersionManager(*config, *debugMode)
     
+    // 仅部署模式
+    if *deployOnly || *deployCommit {
+        if !config.Deploy.Enabled {
+            fmt.Println("❌ 部署功能未启用，请在配置文件中设置 deploy.enabled = true")
+            os.Exit(1)
+        }
+        
+        dm := NewDeployManager(config.Deploy, *debugMode)
+        autoCommit := *deployCommit || config.Deploy.AutoCommit || config.Deploy.Command == "copy-commit"
+        
+        if err := dm.Run(autoCommit); err != nil {
+            fmt.Printf("❌ 部署失败: %v\n", err)
+            os.Exit(1)
+        }
+        
+        duration := time.Since(startTime)
+        fmt.Printf("\n⏱️  总运行时间: %v\n", duration)
+        return
+    }
+    
     // 显示处理的组件配置
     if len(config.IncludeComponents) > 0 {
         fmt.Printf("📋 指定处理组件: %v\n", config.IncludeComponents)
     } else {
         fmt.Printf("📋 处理所有组件\n")
+    }
+    
+    // 显示CDN排除文件
+    if len(config.CDNExcludeFiles) > 0 {
+        fmt.Printf("🚫 CDN排除文件: %v\n", config.CDNExcludeFiles)
     }
     
     // 确定要处理的单个HTML文件（优先级：命令行 > 配置文件）
@@ -1419,8 +2139,9 @@ func main() {
     } else {
         fmt.Println("⚠️  未指定要处理的HTML文件")
         fmt.Println("使用 -file 指定文件, -all 扫描所有, 或在配置文件中指定")
+        fmt.Println("\n🚀 部署命令:")
+        fmt.Println("  -deploy        仅执行部署（不处理hash）")
+        fmt.Println("  -deploy-commit 部署并自动提交SVN")
         flag.Usage()
     }
-
-
 }

@@ -5,8 +5,7 @@
   "homeHTMLFile": "D:\\job_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\xdrNormal.html",
   "companyHTMLFile": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\xdrNormal.html",
   "singleHTMLFile": "",
-  "replaceAllWithCDN": true,
-  "rollbackAfterDeploy": false,
+  "RollbackAfterDeploy": true,
   "includeComponents": [
     "xdrInvite",
     "xdrsign"
@@ -20,5 +19,29 @@
     ".git",
     "dist",
     "build"
+  ],
+  "deploy": {
+    "enabled": true,
+    "command": "copy",
+    "autoCommit": false,
+    "homeSourcePath": "D:\\job_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap",
+    "homeDestPath": "D:\\job_project\\china_mobile\\huidu\\xhmqqthy-res",
+    "companySourcePath": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap",
+    "companyDestPath": "D:\\project\\cx_project\\china_mobile\\huidu\\xhmqqthy-res",
+    "filePaths": [
+      "/components/*",
+      "/css/xdrNormal.css",
+      "/images/xdrNormal/202505/*",
+      "/scripts/js/xdrNormal.js",
+      "/images/gztc1.png",
+      "/xdrNormal.html",
+      "/scripts/common/utils_index.js"
+    ],
+    "gitAuthors": ["chenchengpeng", "ccp"]
+  },
+  "replaceAllWithCDN": false,
+  "cdnExcludeFiles": [
+    "provinceData.js",
+    "provinceInit.js"
   ]
 }
