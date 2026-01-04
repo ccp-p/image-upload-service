@@ -42,6 +42,12 @@ type VersionManager struct {
 	processedFiles map[string]bool
 	mu             sync.Mutex
 	debugMode      bool // 调试模式
+
+	// 🔥 新增：部署相关字段
+	isHome          bool
+	sourceBasePath  string
+	destBasePath    string
+	deployFilePaths []string
 }
 
 // FileInfo 文件信息
@@ -61,23 +67,6 @@ type ImageReference struct {
 
 // ================= 整合部分：全局变量与结构体 =================
 
-// 配置变量 (来自 deploy_task.go 逻辑)
-var (
-	isHome         bool
-	sourceBasePath string
-	destBasePath   string
-	// 需要处理的文件列表
-	deployFilePaths = []string{
-		"/components/*",
-		"/css/xdrNormal.css",
-		"/images/xdrNormal/202505/*",
-		"/scripts/js/xdrNormal.js",
-		"/images/gztc1.png",
-		"/xdrNormal.html",
-		"/scripts/common/utils_index.js",
-	}
-)
-
 // FileVersion 表示文件的一个版本（基础版或带Hash版）
 type FileVersion struct {
 	Path    string
@@ -95,6 +84,16 @@ func NewVersionManager(config Config, debugMode bool) *VersionManager {
 		config:         config,
 		processedFiles: make(map[string]bool),
 		debugMode:      debugMode,
+		// 初始化部署文件列表
+		deployFilePaths: []string{
+			"/components/*",
+			"/css/xdrNormal.css",
+			"/images/xdrNormal/202505/*",
+			"/scripts/js/xdrNormal.js",
+			"/images/gztc1.png",
+			"/xdrNormal.html",
+			"/scripts/common/utils_index.js",
+		},
 	}
 }
 
@@ -1065,7 +1064,7 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 	}
 
 	// 执行部署脚本 (调用整合进来的 RunResDeploy)
-	RunResDeploy()
+	vm.RunResDeploy()
 
 	return nil
 }
@@ -1309,24 +1308,24 @@ func (vm *VersionManager) findAllHTMLFiles() []string {
 // ================= 整合部分：RunResDeploy 相关函数 =================
 
 // RunResDeploy 是主入口函数，对应 Node.js 的 processFiles(false)
-func RunResDeploy() {
-	initDeployConfig()
+func (vm *VersionManager) RunResDeploy() {
+	vm.initDeployConfig()
 
-	fmt.Printf("🏠 当前环境: %v\n", map[bool]string{true: "Home", false: "Office"}[isHome])
+	fmt.Printf("🏠 当前环境: %v\n", map[bool]string{true: "Home", false: "Office"}[vm.isHome])
 	fmt.Printf("🚀 开始文件复制操作...\n")
-	fmt.Printf("📂 源路径: %s\n", sourceBasePath)
-	fmt.Printf("📂 目标路径: %s\n\n", destBasePath)
+	fmt.Printf("📂 源路径: %s\n", vm.sourceBasePath)
+	fmt.Printf("📂 目标路径: %s\n\n", vm.destBasePath)
 
-	if !dirExists(sourceBasePath) {
-		fmt.Printf("❌ 源路径不存在: %s\n", sourceBasePath)
+	if !dirExists(vm.sourceBasePath) {
+		fmt.Printf("❌ 源路径不存在: %s\n", vm.sourceBasePath)
 		return
 	}
 
 	// 1. 构建资源依赖图 (防止删除正在使用的 hash 文件)
-	depMap := buildDependencyMap()
+	depMap := vm.buildDependencyMap()
 
 	// 2. 更新 SVN
-	updateSvn(destBasePath)
+	vm.updateSvn(vm.destBasePath)
 
 	// 3. 处理文件
 	successCount := 0
@@ -1334,16 +1333,16 @@ func RunResDeploy() {
 
 	fmt.Println("📦 开始复制文件...")
 
-	for _, fp := range deployFilePaths {
+	for _, fp := range vm.deployFilePaths {
 		// 处理通配符
 		if strings.Contains(fp, "*") {
-			count := handleWildcard(fp, depMap)
+			count := vm.handleWildcard(fp, depMap)
 			totalFiles += count
 			successCount += count // 简化处理，假设未报错即成功
 		} else {
 			// 处理单个文件
 			totalFiles++
-			if processSingleFile(fp, depMap) {
+			if vm.processSingleFile(fp, depMap) {
 				successCount++
 			}
 		}
@@ -1353,29 +1352,29 @@ func RunResDeploy() {
 	fmt.Printf("📊 复制完成: 成功 %d/%d\n", successCount, totalFiles)
 	fmt.Printf("%s\n\n", strings.Repeat("=", 50))
 
-	openDir(destBasePath)
+	openDir(vm.destBasePath)
 }
 
-func initDeployConfig() {
-	isHome = os.Getenv("IS_HOME") == "1"
-	if isHome {
-		sourceBasePath = `D:\job_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
-		destBasePath = `D:\job_project\china_mobile\huidu\xhmqqthy-res`
+func (vm *VersionManager) initDeployConfig() {
+	vm.isHome = os.Getenv("IS_HOME") == "1"
+	if vm.isHome {
+		vm.sourceBasePath = `D:\job_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
+		vm.destBasePath = `D:\job_project\china_mobile\huidu\xhmqqthy-res`
 	} else {
-		sourceBasePath = `D:\project\cx_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
-		destBasePath = `D:\project\cx_project\china_mobile\huidu\xhmqqthy-res`
+		vm.sourceBasePath = `D:\project\cx_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
+		vm.destBasePath = `D:\project\cx_project\china_mobile\huidu\xhmqqthy-res`
 	}
 }
 
 // processSingleFile 处理单个文件的复制逻辑
-func processSingleFile(relPath string, depMap map[string]bool) bool {
+func (vm *VersionManager) processSingleFile(relPath string, depMap map[string]bool) bool {
 	// 规范化路径分隔符
 	relPath = filepath.FromSlash(relPath)
-	sourcePath := filepath.Join(sourceBasePath, relPath)
-	destPath := filepath.Join(destBasePath, relPath)
+	sourcePath := filepath.Join(vm.sourceBasePath, relPath)
+	destPath := filepath.Join(vm.destBasePath, relPath)
 
 	// 查找所有版本
-	versions := findAllFileVersions(sourcePath)
+	versions := vm.findAllFileVersions(sourcePath)
 	if len(versions) == 0 {
 		fmt.Printf("⚠️  源文件不存在: %s\n", relPath)
 		return false
@@ -1399,7 +1398,7 @@ func processSingleFile(relPath string, depMap map[string]bool) bool {
 
 	// 清理旧 Hash 文件
 	if hashVersion != nil {
-		cleanHashFiles(destPath, hashVersion.Name, depMap)
+		vm.cleanHashFiles(destPath, hashVersion.Name, depMap)
 	}
 
 	// 执行复制
@@ -1411,7 +1410,7 @@ func processSingleFile(relPath string, depMap map[string]bool) bool {
 
 		// 检查是否需要复制 (Hash对比)
 		if fileExists(targetPath) {
-			destHash, _ := getFileHash(targetPath)
+			destHash, _ := vm.getFileHash(targetPath)
 			if destHash == v.Hash {
 				continue // 内容相同，跳过
 			}
@@ -1426,11 +1425,11 @@ func processSingleFile(relPath string, depMap map[string]bool) bool {
 }
 
 // handleWildcard 递归处理通配符路径
-func handleWildcard(wildcardPath string, _ map[string]bool) int {
+func (vm *VersionManager) handleWildcard(wildcardPath string, _ map[string]bool) int {
 	cleanPath := strings.ReplaceAll(wildcardPath, "*", "")
 	cleanPath = filepath.FromSlash(cleanPath)
 
-	srcDir := filepath.Join(sourceBasePath, cleanPath)
+	srcDir := filepath.Join(vm.sourceBasePath, cleanPath)
 
 	if !dirExists(srcDir) {
 		return 0
@@ -1442,11 +1441,11 @@ func handleWildcard(wildcardPath string, _ map[string]bool) int {
 			return nil
 		}
 
-		rel, _ := filepath.Rel(sourceBasePath, path)
+		rel, _ := filepath.Rel(vm.sourceBasePath, path)
 		// 简单处理：直接复制，不处理复杂的hash逻辑（参考原JS逻辑，通配符下通常是静态资源）
 		// 如果需要对通配符下的文件也做hash处理，可以调用 processSingleFile
 
-		target := filepath.Join(destBasePath, rel)
+		target := filepath.Join(vm.destBasePath, rel)
 		os.MkdirAll(filepath.Dir(target), 0755)
 
 		// 这里简化为直接复制，如果需要完全一致的逻辑，应该递归调用 processSingleFile
@@ -1460,7 +1459,7 @@ func handleWildcard(wildcardPath string, _ map[string]bool) int {
 }
 
 // findAllFileVersions 查找文件的所有版本（包括带Hash的）
-func findAllFileVersions(fullPath string) []FileVersion {
+func (vm *VersionManager) findAllFileVersions(fullPath string) []FileVersion {
 	dir := filepath.Dir(fullPath)
 	baseName := filepath.Base(fullPath)
 	ext := filepath.Ext(baseName)
@@ -1473,7 +1472,7 @@ func findAllFileVersions(fullPath string) []FileVersion {
 
 	// 1. 基础版本
 	if fileExists(fullPath) {
-		hash, _ := getFileHash(fullPath)
+		hash, _ := vm.getFileHash(fullPath)
 		info, _ := os.Stat(fullPath)
 		versions = append(versions, FileVersion{
 			Path: fullPath, Name: baseName, HasHash: false, MTime: info.ModTime(), Hash: hash,
@@ -1491,7 +1490,7 @@ func findAllFileVersions(fullPath string) []FileVersion {
 	}
 
 	pattern := fmt.Sprintf(`^%s\.[a-zA-Z0-9]+%s$`, regexp.QuoteMeta(nameNoExt), regexp.QuoteMeta(ext))
-	
+
 	// 🔥 修复：使用 Compile 代替 MustCompile，处理潜在的正则错误
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -1504,7 +1503,7 @@ func findAllFileVersions(fullPath string) []FileVersion {
 		}
 		if re.MatchString(entry.Name()) {
 			p := filepath.Join(dir, entry.Name())
-			hash, _ := getFileHash(p)
+			hash, _ := vm.getFileHash(p)
 			info, _ := entry.Info()
 			versions = append(versions, FileVersion{
 				Path: p, Name: entry.Name(), HasHash: true, MTime: info.ModTime(), Hash: hash,
@@ -1521,7 +1520,7 @@ func findAllFileVersions(fullPath string) []FileVersion {
 }
 
 // cleanHashFiles 清理旧的 Hash 文件
-func cleanHashFiles(destPath string, keepFileName string, depMap map[string]bool) {
+func (vm *VersionManager) cleanHashFiles(destPath string, keepFileName string, depMap map[string]bool) {
 	dir := filepath.Dir(destPath)
 	if !dirExists(dir) {
 		return
@@ -1546,7 +1545,7 @@ func cleanHashFiles(destPath string, keepFileName string, depMap map[string]bool
 			fullPath := filepath.Join(dir, name)
 
 			// 检查依赖图
-			relPath, _ := filepath.Rel(destBasePath, fullPath)
+			relPath, _ := filepath.Rel(vm.destBasePath, fullPath)
 			relPath = filepath.ToSlash(relPath) // 统一转为 / 格式对比
 			if depMap[relPath] {
 				continue // 正在使用，跳过
@@ -1558,7 +1557,7 @@ func cleanHashFiles(destPath string, keepFileName string, depMap map[string]bool
 }
 
 // buildDependencyMap 构建资源依赖图
-func buildDependencyMap() map[string]bool {
+func (vm *VersionManager) buildDependencyMap() map[string]bool {
 	fmt.Println("🔍 构建资源依赖图...")
 	depMap := make(map[string]bool)
 
@@ -1580,9 +1579,9 @@ func buildDependencyMap() map[string]bool {
 		processed[relPath] = true
 		depMap[relPath] = true
 
-		fullPath := filepath.Join(sourceBasePath, relPath)
+		fullPath := filepath.Join(vm.sourceBasePath, relPath)
 		// 尝试找到实际文件（可能是带hash的）
-		versions := findAllFileVersions(fullPath)
+		versions := vm.findAllFileVersions(fullPath)
 		if len(versions) == 0 {
 			return
 		}
@@ -1629,7 +1628,7 @@ func buildDependencyMap() map[string]bool {
 		}
 	}
 
-	for _, fp := range deployFilePaths {
+	for _, fp := range vm.deployFilePaths {
 		scanFile(strings.TrimPrefix(fp, "/"))
 	}
 
@@ -1637,7 +1636,7 @@ func buildDependencyMap() map[string]bool {
 }
 
 // updateSvn 更新 SVN
-func updateSvn(dir string) {
+func (vm *VersionManager) updateSvn(dir string) {
 	if !dirExists(filepath.Join(dir, ".svn")) {
 		return
 	}
@@ -1658,7 +1657,7 @@ func updateSvn(dir string) {
 	}
 }
 
-func getFileHash(path string) (string, error) {
+func (vm *VersionManager) getFileHash(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
