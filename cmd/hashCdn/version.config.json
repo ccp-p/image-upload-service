@@ -6,7 +6,7 @@
   "companyHTMLFile": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\xdrNormal.html",
   "singleHTMLFile": "",
   "replaceAllWithCDN": true,
-  "rollbackAfterDeploy": true,
+  "rollbackAfterDeploy": false,
   "includeComponents": [
     "xdrInvite",
     "xdrsign"
