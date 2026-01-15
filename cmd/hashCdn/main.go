@@ -1329,7 +1329,6 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
         if err := os.WriteFile(htmlPath, []byte(contentStr), 0644); err != nil {
             return err
         }
-        vm.gitAddFile(htmlPath) // 自动添加到git
         fmt.Printf("\n✅ HTML文件已更新\n")
     } else {
         fmt.Printf("\n⚠️  没有内容需要更新\n")
@@ -1923,33 +1922,52 @@ func (vm *VersionManager) shouldExcludeFromCDN(filePath string) bool {
 
 // rollbackHTMLFile 使用git回滚HTML文件
 func (vm *VersionManager) rollbackHTMLFile(htmlPath string) error {
-    if !vm.config.RollbackAfterDeploy {
-        return nil
-    }
-    
-    fmt.Printf("\n🔄 正在回滚HTML文件: %s\n", filepath.Base(htmlPath))
-    
-    // 检查git是否存在
-    if _, err := exec.LookPath("git"); err != nil {
-        fmt.Printf("⚠️  未找到git命令，跳过回滚\n")
-        return nil
-    }
-    
-    dir := filepath.Dir(htmlPath)
-    filename := filepath.Base(htmlPath)
-    
-    // 执行 git checkout
-    cmd := exec.Command("git", "checkout", filename)
-    cmd.Dir = dir
-    
-    if output, err := cmd.CombinedOutput(); err != nil {
-        fmt.Printf("❌ Git回滚失败: %v\n", err)
-        fmt.Printf("   Output: %s\n", string(output))
-        return err
-    }
-    
-    fmt.Printf("✅ HTML文件已回滚到CDN替换前的状态\n")
-    return nil
+	if !vm.config.RollbackAfterDeploy {
+		return nil
+	}
+
+	absPath, _ := filepath.Abs(htmlPath)
+	dir := filepath.Dir(absPath)
+	filename := filepath.Base(absPath)
+
+	fmt.Printf("\n🔄 正在回滚HTML文件: %s\n", filename)
+	fmt.Printf("  📂 工作目录: %s\n", dir)
+
+	// 检查git是否存在
+	if _, err := exec.LookPath("git"); err != nil {
+		fmt.Printf("⚠️  未找到git命令，跳过回滚\n")
+		return nil
+	}
+
+	// 1. 使用 HEAD 强制从上次提交恢复，忽略已经 git add 的内容
+	cmd := exec.Command("git", "checkout", "HEAD", "--", filename)
+	cmd.Dir = dir
+
+	if _, err := cmd.CombinedOutput(); err != nil {
+		// 如果 HEAD 恢复失败，尝试普通的 checkout
+		cmdRetry := exec.Command("git", "checkout", "--", filename)
+		cmdRetry.Dir = dir
+		if outRetry, errRetry := cmdRetry.CombinedOutput(); errRetry != nil {
+			fmt.Printf("❌ Git回滚失败: %v\n", errRetry)
+			fmt.Printf("   Output: %s\n", string(outRetry))
+			return errRetry
+		}
+	}
+
+	// 2. 打印回滚后的 Git 状态以便确认
+	statusCmd := exec.Command("git", "status", "-s", filename)
+	statusCmd.Dir = dir
+	if statusOut, err := statusCmd.Output(); err == nil {
+		statusStr := strings.TrimSpace(string(statusOut))
+		if statusStr == "" {
+			fmt.Printf("  ✓ 文件状态: 已恢复至 Commit 状态 (Clean)\n")
+		} else {
+			fmt.Printf("  📊 Git状态: %s\n", statusStr)
+		}
+	}
+
+	fmt.Printf("\n✅ HTML文件已回滚到CDN替换前的状态\n")
+	return nil
 }
 
 // openFolder 打开文件夹（避免重复打开）
@@ -2067,6 +2085,7 @@ func main() {
     }
     
     vm := NewVersionManager(*config, *debugMode)
+    
     
     // 仅部署模式
     if *deployOnly || *deployCommit {
