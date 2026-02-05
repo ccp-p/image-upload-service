@@ -776,9 +776,16 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
         return nil, err
     }
     
-    htmlDir := filepath.Dir(htmlPath)
-    // 移除未使用的变量
-    // htmlBasename := strings.TrimSuffix(filepath.Base(htmlPath), ".html")
+    htmlBasename := strings.TrimSuffix(filepath.Base(htmlPath), ".html")
+    
+    // 判断当前HTML是否为主资源文件
+    shouldProcessMain := false
+    for _, name := range vm.config.ProcessMainResources {
+        if name == filepath.Base(htmlPath) || name == htmlBasename {
+            shouldProcessMain = true
+            break
+        }
+    }
     
     resources := map[string][]string{
         "css": {},
@@ -787,77 +794,54 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
     
     contentStr := string(content)
     
-    // 收集CSS文件（只收集组件CSS，主CSS会单独处理）
+    // 收集CSS文件
     cssRe := regexp.MustCompile(`<link[^>]*href\s*=\s*['"]([^'"]+\.css)['"]`)
     cssMatches := cssRe.FindAllStringSubmatch(contentStr, -1)
     for _, match := range cssMatches {
         if len(match) >= 2 {
             cssPath := match[1]
-            // 跳过外部URL
-            if strings.HasPrefix(cssPath, "http") || strings.HasPrefix(cssPath, "//") {
-                continue
-            }
+            isExternal := strings.HasPrefix(cssPath, "http") || strings.HasPrefix(cssPath, "//")
             
-            // 只收集components目录下的CSS
-            if !strings.Contains(cssPath, "components") {
+            // 如果是外部URL且当前是主资源页面，跳过
+            // 如果是外部URL但不是主资源页面且不包含components，跳过
+            if isExternal {
+                if shouldProcessMain || !strings.Contains(cssPath, "components") {
+                    continue
+                }
+            } else if !strings.Contains(cssPath, "components") {
                 continue
             }
             
             // 检查是否应该处理此组件
             if !vm.shouldProcessComponent(cssPath) {
-                if vm.debugMode {
-                    fmt.Printf("    🚫 跳过组件CSS: %s (不在处理列表中)\n", cssPath)
-                }
                 continue
             }
             
-            // 转换为绝对路径（使用系统路径分隔符）
-            absolutePath := filepath.Join(htmlDir, filepath.FromSlash(cssPath))
-            absolutePath = filepath.Clean(absolutePath)
-            
-            if fileExists(absolutePath) || vm.findFile(absolutePath) != "" {
-                // 保存时使用正斜杠（HTML标准）
-                normalizedPath := filepath.ToSlash(cssPath)
-                resources["css"] = append(resources["css"], normalizedPath)
-                fmt.Printf("    📌 收集组件CSS: %s\n", normalizedPath)
-            }
+            resources["css"] = append(resources["css"], cssPath)
         }
     }
     
-    // 收集JS文件（只收集组件目录下的JS，主JS会单独处理）
+    // 收集JS文件
     jsRe := regexp.MustCompile(`<script[^>]*src\s*=\s*['"]([^'"]+\.js)['"]`)
     jsMatches := jsRe.FindAllStringSubmatch(contentStr, -1)
     for _, match := range jsMatches {
         if len(match) >= 2 {
             jsPath := match[1]
-            // 跳过外部URL
-            if strings.HasPrefix(jsPath, "http") || strings.HasPrefix(jsPath, "//") {
-                continue
-            }
+            isExternal := strings.HasPrefix(jsPath, "http") || strings.HasPrefix(jsPath, "//")
             
-            // 只收集components目录下的JS
-            if !strings.Contains(jsPath, "components") {
-                continue
-            }
-            
-            // 检查是否应该处理此组件
-            if !vm.shouldProcessComponent(jsPath) {
-                if vm.debugMode {
-                    fmt.Printf("    🚫 跳过组件JS: %s (不在处理列表中)\n", jsPath)
+            if isExternal {
+                if shouldProcessMain || !strings.Contains(jsPath, "components") {
+                    continue
                 }
+            } else if !strings.Contains(jsPath, "components") {
                 continue
             }
             
-            // 转换为绝对路径（使用系统路径分隔符）
-            absolutePath := filepath.Join(htmlDir, filepath.FromSlash(jsPath))
-            absolutePath = filepath.Clean(absolutePath)
-            
-            if fileExists(absolutePath) || vm.findFile(absolutePath) != "" {
-                // 保存时使用正斜杠（HTML标准）
-                normalizedPath := filepath.ToSlash(jsPath)
-                resources["js"] = append(resources["js"], normalizedPath)
-                fmt.Printf("    📌 收集组件JS: %s\n", normalizedPath)
+            if !vm.shouldProcessComponent(jsPath) {
+                continue
             }
+            
+            resources["js"] = append(resources["js"], jsPath)
         }
     }
     
@@ -866,7 +850,16 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
 
 // processComponentResource 处理组件资源（JS或CSS）
 func (vm *VersionManager) processComponentResource(htmlDir, relativePath string) (*FileInfo, error) {
-    absolutePath := filepath.Join(htmlDir, filepath.FromSlash(relativePath))
+    // 处理可能的外部URL：尝试从中提取相对路径部分（从components开始）
+    targetPath := relativePath
+    if strings.HasPrefix(relativePath, "http") || strings.HasPrefix(relativePath, "//") {
+        idx := strings.Index(relativePath, "components/")
+        if idx != -1 {
+            targetPath = relativePath[idx:]
+        }
+    }
+
+    absolutePath := filepath.Join(htmlDir, filepath.FromSlash(targetPath))
     absolutePath = filepath.Clean(absolutePath)
     
     // 查找实际文件（可能是带hash的版本）
@@ -1095,12 +1088,28 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
                             suffix := submatches[3]
                             
                             // 提取原始路径的目录部分
-                            oldDir := filepath.Dir(originalRelPath)
+                            var oldDir string
+                            isUrl := strings.HasPrefix(originalRelPath, "http") || strings.HasPrefix(originalRelPath, "//")
+                            if isUrl {
+                                lastSlash := strings.LastIndex(originalRelPath, "/")
+                                if lastSlash != -1 {
+                                    oldDir = originalRelPath[:lastSlash]
+                                }
+                            } else {
+                                oldDir = filepath.Dir(originalRelPath)
+                            }
+                            
                             newFilename := filepath.Base(newHashedPath)
                             
                             // 构建新路径，保持原有的目录结构
                             var newPath string
-                            if oldDir != "." && oldDir != "/" {
+                            if isUrl {
+                                if oldDir != "" {
+                                    newPath = oldDir + "/" + newFilename
+                                } else {
+                                    newPath = newFilename
+                                }
+                            } else if oldDir != "." && oldDir != "/" {
                                 newPath = filepath.Join(oldDir, newFilename)
                                 newPath = strings.ReplaceAll(newPath, `\`, "/")
                             } else {
@@ -1177,12 +1186,28 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
                             suffix := submatches[3]
                             
                             // 提取原始路径的目录部分
-                            oldDir := filepath.Dir(originalRelPath)
+                            var oldDir string
+                            isUrl := strings.HasPrefix(originalRelPath, "http") || strings.HasPrefix(originalRelPath, "//")
+                            if isUrl {
+                                lastSlash := strings.LastIndex(originalRelPath, "/")
+                                if lastSlash != -1 {
+                                    oldDir = originalRelPath[:lastSlash]
+                                }
+                            } else {
+                                oldDir = filepath.Dir(originalRelPath)
+                            }
+                            
                             newFilename := filepath.Base(newHashedPath)
                             
                             // 构建新路径，保持原有的目录结构
                             var newPath string
-                            if oldDir != "." && oldDir != "/" {
+                            if isUrl {
+                                if oldDir != "" {
+                                    newPath = oldDir + "/" + newFilename
+                                } else {
+                                    newPath = newFilename
+                                }
+                            } else if oldDir != "." && oldDir != "/" {
                                 newPath = filepath.Join(oldDir, newFilename)
                                 newPath = strings.ReplaceAll(newPath, `\`, "/")
                             } else {
