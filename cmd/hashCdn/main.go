@@ -49,6 +49,7 @@ type DeployConfig struct {
     CompanyDestPath   string   `json:"companyDestPath"`
     FilePaths         []string `json:"filePaths"`
     GitAuthors        []string `json:"gitAuthors"`
+    CDNPathPrefix     string   `json:"cdnPathPrefix"`     // 新增：CDN URL中需要裁掉的前缀映射，例如 /2016tyjf/xhmqqthy/res/wap/
 }
 
 // VersionManager 版本管理器
@@ -1797,9 +1798,12 @@ func (dm *DeployManager) openFolder() {
     }
     
     var cmd *exec.Cmd
-    if isWindows() {
+    switch {
+    case isWindows():
         cmd = exec.Command("explorer", dm.destPath)
-    } else {
+    case isDarwin():
+        cmd = exec.Command("open", dm.destPath)
+    default:
         cmd = exec.Command("xdg-open", dm.destPath)
     }
     
@@ -1813,7 +1817,7 @@ func (dm *DeployManager) openFolder() {
 }
 
 // Run 执行部署
-func (dm *DeployManager) Run(autoCommit bool) error {
+func (dm *DeployManager) Run(autoCommit bool, htmlPath string, cdnDomain string) error {
     fmt.Println("🚀 开始部署操作...")
     fmt.Printf("📂 源路径: %s\n", dm.sourcePath)
     fmt.Printf("📂 目标路径: %s\n\n", dm.destPath)
@@ -1858,8 +1862,17 @@ func (dm *DeployManager) Run(autoCommit bool) error {
     
     // 打印汇总
     fmt.Printf("\n%s\n", strings.Repeat("=", 50))
-    fmt.Printf("📊 部署完成: 复制 %d, 跳过 %d, 失败 %d\n", totalCopied, totalSkipped, totalFailed)
+    fmt.Printf("📊 复制完成: 复制 %d, 跳过 %d, 失败 %d\n", totalCopied, totalSkipped, totalFailed)
     
+    // 验证 CDN 资源存在性
+    if htmlPath != "" && cdnDomain != "" {
+        fmt.Println("🔍 正在校验 HTML 中的 CDN 资源 (已忽略注释内容)...")
+        if err := dm.validateCDNResources(htmlPath, cdnDomain); err != nil {
+            return fmt.Errorf("❌ CDN 资源校验失败: %v", err)
+        }
+        fmt.Println("✅ 所有非注释 CDN 资源均已在目标目录就绪")
+    }
+
     if totalFailed == 0 {
         fmt.Println("✅ 全部成功！")
     }
@@ -1891,6 +1904,50 @@ func (dm *DeployManager) Run(autoCommit bool) error {
     return nil
 }
 
+// validateCDNResources 校验 HTML 中的 CDN 资源是否在 destPath 中存在
+func (dm *DeployManager) validateCDNResources(htmlPath string, cdnDomain string) error {
+    content, err := os.ReadFile(htmlPath)
+    if err != nil {
+        return err
+    }
+
+    // 1. 移除 HTML 注释内容，避免处理被注释掉的标签
+    reComments := regexp.MustCompile(`(?s)<!--.*?-->`)
+    cleanContent := reComments.ReplaceAllString(string(content), "")
+
+    // 2. 在清理后的内容中匹配 CDN 域名开头的资源路径
+    // 修改：排除反引号 \x60，防止匹配到模板字符串内容
+    pattern := regexp.QuoteMeta(cdnDomain) + "(/[^\\s'\"\\x60]+)"
+    re := regexp.MustCompile(pattern)
+    matches := re.FindAllStringSubmatch(cleanContent, -1)
+
+    for _, match := range matches {
+        urlPath := match[1]
+        
+        // 移除查询参数
+        if idx := strings.Index(urlPath, "?"); idx != -1 {
+            urlPath = urlPath[:idx]
+        }
+        
+        // 如果配置了前缀，则移除它以获取相对于 destPath 的路径
+        relPath := urlPath
+        if dm.config.CDNPathPrefix != "" && strings.HasPrefix(urlPath, dm.config.CDNPathPrefix) {
+            relPath = strings.TrimPrefix(urlPath, dm.config.CDNPathPrefix)
+        }
+        
+        // 拼接到目标目录进行检查
+        checkPath := filepath.Join(dm.destPath, filepath.FromSlash(relPath))
+        if !fileExists(checkPath) {
+            return fmt.Errorf("文件缺失: %s -> (预检路径: %s)", urlPath, checkPath)
+        }
+        
+        if dm.debugMode {
+            fmt.Printf("  ✓ 校验通过: %s\n", urlPath)
+        }
+    }
+    return nil
+}
+
 // runDeploy 执行部署流程
 func (vm *VersionManager) runDeploy() {
     if !vm.config.Deploy.Enabled {
@@ -1908,8 +1965,9 @@ func (vm *VersionManager) runDeploy() {
         autoCommit = true
     }
     
-    if err := dm.Run(autoCommit); err != nil {
+    if err := dm.Run(autoCommit, vm.config.SingleHTMLFile, vm.config.CDNDomain); err != nil {
         fmt.Printf("❌ 部署失败: %v\n", err)
+        return
     }
     
     // 回滚HTML文件
@@ -2122,7 +2180,7 @@ func main() {
         dm := NewDeployManager(config.Deploy, *debugMode)
         autoCommit := *deployCommit || config.Deploy.AutoCommit || config.Deploy.Command == "copy-commit"
         
-        if err := dm.Run(autoCommit); err != nil {
+        if err := dm.Run(autoCommit, vm.config.SingleHTMLFile, vm.config.CDNDomain); err != nil {
             fmt.Printf("❌ 部署失败: %v\n", err)
             os.Exit(1)
         }
