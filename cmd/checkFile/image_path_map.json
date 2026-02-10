@@ -1,5 +1,5 @@
 {
-  "totalCount": 674,
+  "totalCount": 683,
   "lastUpdate": "0001-01-01T00:00:00Z",
   "mapping": {
     "afterGetEquityPop.png": [
@@ -23,7 +23,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\afterGetEquityPop3.png",
         "width": 546,
         "height": 690,
-        "size": 95985
+        "size": 85321
       }
     ],
     "bar_bg.png": [
@@ -112,6 +112,22 @@
         "width": 138,
         "height": 29,
         "size": 3896
+      }
+    ],
+    "client_help2510.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\support\\client_help2510.png",
+        "width": 630,
+        "height": 630,
+        "size": 109155
+      }
+    ],
+    "client_help_normal2510.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\support\\client_help_normal2510.png",
+        "width": 630,
+        "height": 630,
+        "size": 103609
       }
     ],
     "clock.png": [
@@ -270,8 +286,8 @@
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-bg.png",
         "width": 1500,
-        "height": 1698,
-        "size": 137379
+        "height": 1742,
+        "size": 53827
       }
     ],
     "invite-btn-djs.png": [
@@ -335,7 +351,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-friend-inner.png",
         "width": 1230,
         "height": 1638,
-        "size": 278518
+        "size": 247493
       }
     ],
     "invite-friend-outer.png": [
@@ -623,7 +639,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-success41.png",
         "width": 1168,
         "height": 1290,
-        "size": 121097
+        "size": 136404
       }
     ],
     "invite-success42.png": [
@@ -631,7 +647,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-success42.png",
         "width": 1168,
         "height": 1290,
-        "size": 121097
+        "size": 136404
       }
     ],
     "invite-success43.png": [
@@ -639,7 +655,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-success43.png",
         "width": 1168,
         "height": 1290,
-        "size": 121097
+        "size": 136404
       }
     ],
     "invite-success44.png": [
@@ -647,7 +663,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-success44.png",
         "width": 1168,
         "height": 1290,
-        "size": 121097
+        "size": 136404
       }
     ],
     "invite-support-failed.png": [
@@ -679,7 +695,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-support-xdr.png",
         "width": 1202,
         "height": 2054,
-        "size": 479339
+        "size": 482853
       }
     ],
     "invite-tab1.png": [
@@ -770,6 +786,14 @@
         "size": 149051
       }
     ],
+    "invite-wrap-n.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-wrap-n.png",
+        "width": 1372,
+        "height": 992,
+        "size": 123109
+      }
+    ],
     "invite-wrap-op1.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-wrap-op1.png",
@@ -791,7 +815,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-wrap.png",
         "width": 1372,
         "height": 992,
-        "size": 123109
+        "size": 13612
       }
     ],
     "invite-xhs.png": [
@@ -920,6 +944,14 @@
         "width": 1446,
         "height": 1728,
         "size": 40094
+      }
+    ],
+    "left_tab_active_03-n.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\left_tab_active_03-n.png",
+        "width": 1446,
+        "height": 1728,
+        "size": 39123
       }
     ],
     "left_tab_active_03.png": [
@@ -1386,6 +1418,22 @@
         "size": 742
       }
     ],
+    "poster_2510.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\support\\poster_2510.png",
+        "width": 653,
+        "height": 919,
+        "size": 148302
+      }
+    ],
+    "poster_normal_2510.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\support\\poster_normal_2510.png",
+        "width": 652,
+        "height": 840,
+        "size": 125900
+      }
+    ],
     "province-box_main-n.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\province-box_main-n.png",
@@ -1520,6 +1568,14 @@
         "size": 42364
       }
     ],
+    "right_tab_active_03-n.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\right_tab_active_03-n.png",
+        "width": 1446,
+        "height": 1728,
+        "size": 299530
+      }
+    ],
     "right_tab_active_03.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\right_tab_active_03.png",
@@ -1590,6 +1646,14 @@
         "width": 1446,
         "height": 1728,
         "size": 331961
+      }
+    ],
+    "right_tab_not_start_active_03-n.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\right_tab_not_start_active_03-n.png",
+        "width": 1446,
+        "height": 1728,
+        "size": 308249
       }
     ],
     "right_tab_not_start_active_03.png": [
@@ -1687,6 +1751,12 @@
     "rule_close.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\rule_close.png",
+        "width": 51,
+        "height": 51,
+        "size": 1216
+      },
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\rule_close.png",
         "width": 51,
         "height": 51,
         "size": 1216
@@ -2184,8 +2254,8 @@
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrsign\\static\\sign-dfy-wyy.png",
         "width": 718,
-        "height": 335,
-        "size": 20298
+        "height": 306,
+        "size": 53012
       }
     ],
     "sign-dlq.gif": [
@@ -2433,7 +2503,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrsign\\static\\sign-t-aixth.png",
         "width": 1040,
         "height": 200,
-        "size": 11387
+        "size": 13490
       }
     ],
     "sign-t-gmq.png": [
@@ -2457,7 +2527,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrsign\\static\\sign-t-mrcd.png",
         "width": 1040,
         "height": 200,
-        "size": 21479
+        "size": 15219
       }
     ],
     "sign-t-sjzl.png": [

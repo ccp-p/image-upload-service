@@ -66,7 +66,7 @@ func ensureCache(basePath string) (*CacheData, error) {
 	staticList:= []string{
 		"components/xdrsign/static",
 		"images/xdrNormal/202505",
-		"components/xdrInvite/static/202510",
+		"components/xdrInvite/static",
 	}
 	currentCount := 0
 	for _, subPath := range staticList {
