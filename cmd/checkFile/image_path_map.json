@@ -1,5 +1,5 @@
 {
-  "totalCount": 683,
+  "totalCount": 685,
   "lastUpdate": "0001-01-01T00:00:00Z",
   "mapping": {
     "afterGetEquityPop.png": [
@@ -558,8 +558,8 @@
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrInvite\\static\\202510\\invite-rule202511.png",
         "width": 579,
-        "height": 2472,
-        "size": 233563
+        "height": 2820,
+        "size": 265625
       }
     ],
     "invite-sec-confirm-bg.png": [
@@ -1983,9 +1983,9 @@
     "sign-bg202508.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrsign\\static\\pop\\sign-bg202508.png",
-        "width": 1306,
-        "height": 1722,
-        "size": 78151
+        "width": 250,
+        "height": 330,
+        "size": 9290
       }
     ],
     "sign-bg_backup.png": [
@@ -2766,6 +2766,22 @@
         "width": 540,
         "height": 176,
         "size": 58852
+      }
+    ],
+    "untransfer-ljlq.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\untransfer-ljlq.png",
+        "width": 930,
+        "height": 170,
+        "size": 8743
+      }
+    ],
+    "untransfer.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\untransfer.png",
+        "width": 1102,
+        "height": 170,
+        "size": 8683
       }
     ],
     "wcxhy_active_dks-n.png": [

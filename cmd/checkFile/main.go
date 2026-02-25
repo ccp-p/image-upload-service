@@ -57,7 +57,7 @@ func main() {
 	}
 
 	// 3. 处理压缩图片
-	processCompressedImages(SourceDir, cache)
+	processCompressedImages(SourceDir, cache, destBasePath)
 }
 
 // ensureCache 确保缓存是最新的
@@ -169,7 +169,7 @@ func buildCache(root string) *CacheData {
 }
 
 // processCompressedImages 处理源目录下的图片
-func processCompressedImages(sourceDir string, cache *CacheData) {
+func processCompressedImages(sourceDir string, cache *CacheData, destBasePath string) {
 	files, err := os.ReadDir(sourceDir)
 	if err != nil {
 		fmt.Printf("读取源目录失败: %v\n", err)
@@ -232,9 +232,95 @@ func processCompressedImages(sourceDir string, cache *CacheData) {
 				fmt.Printf("❌ 移动失败 %s -> %s: %v\n", file.Name(), targetPath, err)
 			} else {
 				fmt.Printf("✅ 移动成功: %s -> %s\n", file.Name(), targetPath)
+				// 新增：更新对应 CSS
+				updateCSSAfterMove(targetPath, width, height, destBasePath)
 			}
 		}
 	}
+}
+
+// updateCSSAfterMove 更新 CSS 中的 rem 值
+func updateCSSAfterMove(imagePath string, width, height int, basePath string) {
+	cssPath := getCSSPath(imagePath, basePath)
+	if cssPath == "" {
+		return
+	}
+
+	content, err := os.ReadFile(cssPath)
+	if err != nil {
+		fmt.Printf("  ⚠️  读取CSS失败 %s: %v\n", cssPath, err)
+		return
+	}
+
+	lines := strings.Split(string(content), "\n")
+	filename := filepath.Base(imagePath)
+	remBase:=200.0
+	newWidthRem := fmt.Sprintf("%.2frem", float64(width)/remBase)
+	newHeightRem := fmt.Sprintf("%.2frem", float64(height)/remBase)
+
+	reWidth := regexp.MustCompile(`(width\s*:\s*)([\d\.]+)rem`)
+	reHeight := regexp.MustCompile(`(height\s*:\s*)([\d\.]+)rem`)
+
+	updated := false
+	for i, line := range lines {
+		if strings.Contains(line, filename) {
+			// 找到文件名所在行，向上向下各搜索 10 行（通常在一个样式块内）
+			start := i - 10
+			if start < 0 {
+				start = 0
+			}
+			end := i + 10
+			if end >= len(lines) {
+				end = len(lines) - 1
+			}
+
+			for j := start; j <= end; j++ {
+				// 检查该范围内是否包含 width 或 height
+				if reWidth.MatchString(lines[j]) {
+					lines[j] = reWidth.ReplaceAllString(lines[j], `${1}`+newWidthRem)
+					updated = true
+				}
+				if reHeight.MatchString(lines[j]) {
+					lines[j] = reHeight.ReplaceAllString(lines[j], `${1}`+newHeightRem)
+					updated = true
+				}
+				// 如果遇到闭合括号，说明样式块结束，可提前停止当前范围搜索（可选）
+				if strings.Contains(lines[j], "}") && j > i {
+					break
+				}
+			}
+		}
+	}
+
+	if updated {
+		newContent := strings.Join(lines, "\n")
+		if err := os.WriteFile(cssPath, []byte(newContent), 0644); err != nil {
+			fmt.Printf("  ❌ 更新CSS写入失败: %v\n", err)
+		} else {
+			fmt.Printf("  ✨ 已根据行定位更新 CSS: %s (w:%d, h:%d)\n", filepath.Base(cssPath), width, height)
+		}
+	} else {
+		fmt.Printf("  ❓ 在 CSS 中未找到 %s 相关的宽高定义\n", filename)
+	}
+}
+
+// getCSSPath 根据图片路径获取 CSS 路径
+func getCSSPath(imagePath, basePath string) string {
+	relPath, _ := filepath.Rel(basePath, imagePath)
+	relPath = filepath.ToSlash(relPath)
+
+	mapping := map[string]string{
+		"components/xdrsign/static":   "components/xdrsign/index.css",
+		"components/xdrInvite/static": "components/xdrInvite/index.css",
+		"images/xdrNormal/202505":     "css/xdrNormal.css",
+	}
+
+	for dir, css := range mapping {
+		if strings.HasPrefix(relPath, dir) {
+			return filepath.Join(basePath, css)
+		}
+	}
+	return ""
 }
 
 // 辅助函数
