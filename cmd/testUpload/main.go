@@ -1,182 +1,405 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
 
+// Config 配置
 const (
-	sourceDir   = `C:\Users\83795\Downloads\compressed`
-	defaultDest  = `D:\project\cx_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap\images\xdrNormal\202505`
-	maxRetries   = 3
-	retryDelay   = 500 * time.Millisecond
+	SourceDir     = `C:\Users\83795\Downloads\compressed`
 )
+var CacheFileName = "image_path_map.json"
 
-// 前缀到目标目录的映射
-var prefixDestMap = map[string]string{
-	"invite": `D:\project\cx_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap\components\xdrInvite\static\202510`,
-	// 可以在这里添加更多前缀映射
-	// "other": `D:\path\to\other\directory`,
+// TargetFileInfo 目标文件信息
+type TargetFileInfo struct {
+	Path   string `json:"path"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	Size   int64  `json:"size"`
 }
 
-// 支持的图片扩展名
-var imageExtensions = []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+// CacheData 缓存数据结构
+type CacheData struct {
+	TotalCount int                         `json:"totalCount"`
+	LastUpdate time.Time                   `json:"lastUpdate"`
+	Mapping    map[string][]TargetFileInfo `json:"mapping"`
+}
 
 func main() {
-	fmt.Println("开始移动图片...")
-	fmt.Printf("源目录: %s\n", sourceDir)
-
-	// 检查源目录是否存在
-	if _, err := os.Stat(sourceDir); os.IsNotExist(err) {
-		fmt.Printf("错误: 源目录不存在: %s\n", sourceDir)
-		fmt.Println("按任意键退出...")
-		fmt.Scanln()
-		return
+	// 1. 确定 BasePath
+	isHome := os.Getenv("IS_HOME") == "1"
+	var destBasePath string
+	if isHome {
+		destBasePath = `D:\job_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
+		CacheFileName = "image_path_map_home.json"
+	} else {
+		destBasePath = `D:\project\cx_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
 	}
 
-	// 读取源目录中的所有文件
-	files, err := os.ReadDir(sourceDir)
+	fmt.Printf("当前环境: %v\n目标根目录: %s\n", isHome, destBasePath)
+
+	// 2. 检查并更新缓存
+	cache, err := ensureCache(destBasePath)
 	if err != nil {
-		fmt.Printf("错误: 无法读取源目录: %v\n", err)
-		fmt.Println("按任意键退出...")
-		fmt.Scanln()
+		fmt.Printf("缓存处理失败: %v\n", err)
 		return
 	}
 
-	movedCount := 0
-	skippedCount := 0
-	failedFiles := []string{}
-
-	for _, file := range files {
-		if file.IsDir() {
-			continue
-		}
-
-		fileName := file.Name()
-		ext := strings.ToLower(filepath.Ext(fileName))
-
-		// 检查是否为图片文件
-		if !isImageFile(ext) {
-			fmt.Printf("跳过非图片文件: %s\n", fileName)
-			skippedCount++
-			continue
-		}
-
-		// 根据文件名前缀确定目标目录
-		destDir := getDestDirectory(fileName)
-
-		// 确保目标目录存在
-		if err := os.MkdirAll(destDir, 0755); err != nil {
-			fmt.Printf("错误: 无法创建目标目录 %s: %v\n", destDir, err)
-			failedFiles = append(failedFiles, fileName)
-			continue
-		}
-
-		// 移动文件（带重试）
-		sourcePath := filepath.Join(sourceDir, fileName)
-		destPath := filepath.Join(destDir, fileName)
-
-		if err := moveFileWithRetry(sourcePath, destPath); err != nil {
-			fmt.Printf("✗ 失败: %s (原因: %v)\n", fileName, err)
-			failedFiles = append(failedFiles, fileName)
-			continue
-		}
-
-		fmt.Printf("✓ 已移动: %s -> %s\n", fileName, destDir)
-		movedCount++
-	}
-
-	// 显示结果
-	fmt.Println("\n==================")
-	fmt.Printf("移动完成! 成功: %d, 跳过: %d, 失败: %d\n", movedCount, skippedCount, len(failedFiles))
-
-	if len(failedFiles) > 0 {
-		fmt.Println("\n失败的文件列表:")
-		for _, f := range failedFiles {
-			fmt.Printf("  - %s\n", f)
-		}
-		fmt.Println("\n提示: 请关闭可能占用这些文件的程序（如图片查看器、编辑器等），然后重新运行。")
-	}
-
-	fmt.Println("\n按任意键退出...")
-	fmt.Scanln()
+	// 3. 处理压缩图片
+	processCompressedImages(SourceDir, cache, destBasePath)
 }
 
-// 判断是否为图片文件
-func isImageFile(ext string) bool {
-	for _, imgExt := range imageExtensions {
-		if ext == imgExt {
-			return true
+// ensureCache 确保缓存是最新的
+func ensureCache(basePath string) (*CacheData, error) {
+	// 扫描当前目录获取图片总数
+	staticList:= []string{
+		"components/xdrsign/static",
+		"images/xdrNormal/202505",
+		"components/xdrInvite/static",
+	}
+	currentCount := 0
+	for _, subPath := range staticList {
+		fullPath := filepath.Join(basePath, subPath)
+		currentCount += countImages(fullPath)
+	}
+	fmt.Printf("当前目录图片总数: %d\n", currentCount)
+
+	// 尝试读取缓存
+	cache, err := loadCache()
+	if err == nil {
+		if cache.TotalCount == currentCount {
+			fmt.Println("缓存有效，直接使用")
+			return cache, nil
+		}
+		fmt.Printf("缓存过期 (缓存: %d, 实际: %d)，重新扫描...\n", cache.TotalCount, currentCount)
+	} else {
+		fmt.Println("缓存不存在或读取失败，开始扫描...")
+	}
+    newCache := &CacheData{
+		Mapping: make(map[string][]TargetFileInfo),
+		TotalCount: 0,
+	}
+	// 重新构建缓存
+	for _, subPath := range staticList {
+		fullPath:= filepath.Join(basePath, subPath)
+		subCache := buildCache(fullPath)
+		// 合并子缓存
+		for k, v := range subCache.Mapping {
+			newCache.Mapping[k] = append(newCache.Mapping[k], v...)
 		}
 	}
-	return false
-}
-
-// 根据文件名前缀获取目标目录
-func getDestDirectory(fileName string) string {
-	for prefix, destDir := range prefixDestMap {
-		if strings.HasPrefix(strings.ToLower(fileName), strings.ToLower(prefix)) {
-			return destDir
-		}
+	newCache.TotalCount = currentCount // 确保计数一致
+	if err := saveCache(newCache); err != nil {
+		fmt.Printf("警告: 保存缓存失败: %v\n", err)
 	}
-	return defaultDest
+	return newCache, nil
 }
-
-// 带重试的移动文件
-func moveFileWithRetry(sourcePath, destPath string) error {
-	var lastErr error
-
-	for i := 0; i < maxRetries; i++ {
-		if i > 0 {
-			fmt.Printf("  重试 %d/%d...\n", i, maxRetries-1)
-			time.Sleep(retryDelay)
-		}
-
-		err := copyFile(sourcePath, destPath)
-		if err == nil {
-			// 复制成功，尝试删除源文件
-			if err := os.Remove(sourcePath); err != nil {
-				// 删除失败，但复制成功，记录警告
-				fmt.Printf("  警告: 文件已复制但无法删除源文件: %v\n", err)
-				return nil
-			}
+func isHashImageFileName(filename string) bool {
+	// afterGetEquityPop.88ade0f6.png
+	hashPattern := `\.[a-f0-9]{6,}\.(png|jpg|jpeg|gif)$`
+	isHashImg, _ := regexp.MatchString(hashPattern, filename)
+	return isHashImg
+}
+// countImages 快速计算图片数量
+func countImages(root string) int {
+	count := 0
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
 			return nil
 		}
-		lastErr = err
-	}
-
-	return lastErr
+		// is hash 1.2a351e.png
+		
+		if isImage(path) && !isHashImageFileName(info.Name()) {
+			count++
+		}
+		return nil
+	})
+	return count
 }
 
-// 复制文件
-func copyFile(sourcePath, destPath string) error {
-	// 打开源文件
-	sourceFile, err := os.Open(sourcePath)
+// buildCache 构建路径映射
+func buildCache(root string) *CacheData {
+	mapping := make(map[string][]TargetFileInfo)
+	count := 0
+
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !isImage(path) || isHashImageFileName(info.Name()) {
+			return nil
+		}
+
+		count++
+		width, height := getImageDimensions(path)
+		
+		fileInfo := TargetFileInfo{
+			Path:   path,
+			Width:  width,
+			Height: height,
+			Size:   info.Size(),
+		}
+
+		filename := info.Name()
+		mapping[filename] = append(mapping[filename], fileInfo)
+		
+		if count%100 == 0 {
+			fmt.Printf("\r已扫描: %d", count)
+		}
+		return nil
+	})
+	fmt.Println()
+
+	return &CacheData{
+		TotalCount: count,
+		LastUpdate: time.Now(),
+		Mapping:    mapping,
+	}
+}
+
+// processCompressedImages 处理源目录下的图片
+func processCompressedImages(sourceDir string, cache *CacheData, destBasePath string) {
+	files, err := os.ReadDir(sourceDir)
+	if err != nil {
+		fmt.Printf("读取源目录失败: %v\n", err)
+		return
+	}
+
+	fmt.Println("开始处理图片移动...")
+	for _, file := range files {
+		if file.IsDir() || !isImage(file.Name()) {
+			continue
+		}
+
+		sourcePath := filepath.Join(sourceDir, file.Name())
+		width, height := getImageDimensions(sourcePath)
+		sourceSize, _ := getFileSize(sourcePath)
+
+		candidates, ok := cache.Mapping[file.Name()]
+		if !ok {
+			fmt.Printf("❌ 未找到目标: %s\n", file.Name())
+			continue
+		}
+
+		// 筛选匹配的候选文件
+		var matched []TargetFileInfo
+		// 1. 优先匹配宽高
+		for _, c := range candidates {
+			if c.Width == width && c.Height == height {
+				matched = append(matched, c)
+			}
+		}
+		// matched
+		fmt.Printf("🔍 处理: %s (Size: %d, %dx%d), 候选数: %d, 匹配数: %d\n", file.Name(), sourceSize, width, height, len(candidates), len(matched))
+
+		targetPath := ""
+		if len(matched) == 1 {
+			targetPath = matched[0].Path
+		} else if len(matched) > 1 {
+			// 尝试通过大小进一步区分（仅当源文件和目标文件大小时）
+			fmt.Printf("⚠️  存在歧义 (%d 个匹配): %s (Size: %d, %dx%d)\n", len(matched), file.Name(), sourceSize, width, height)
+			for _, m := range matched {
+				fmt.Printf("   - 候选: %s (Size: %d, %dx%d)\n", m.Path, m.Size, m.Width, m.Height)
+			}
+			// 简单的策略：如果无法区分，跳过
+			continue
+		} else {
+			// 宽高都不匹配
+			// 尝试回退到文件名匹配（如果有且仅有一个同名文件）
+			if len(candidates) == 1 {
+				fmt.Printf("⚠️  宽高不匹配但仅有一个同名文件，强制匹配: %s\n", file.Name())
+				targetPath = candidates[0].Path
+			} else {
+				fmt.Printf("❌ 宽高不匹配且有多个同名文件: %s\n", file.Name())
+				continue
+			}
+		}
+
+		if targetPath != "" {
+			err := moveFile(sourcePath, targetPath)
+			if err != nil {
+				fmt.Printf("❌ 移动失败 %s -> %s: %v\n", file.Name(), targetPath, err)
+			} else {
+				fmt.Printf("✅ 移动成功: %s -> %s\n", file.Name(), targetPath)
+				// 新增：更新对应 CSS
+				updateCSSAfterMove(targetPath, width, height, destBasePath)
+			}
+		}
+	}
+}
+
+// updateCSSAfterMove 更新 CSS 中的 rem 值
+func updateCSSAfterMove(imagePath string, width, height int, basePath string) {
+	cssPath := getCSSPath(imagePath, basePath)
+	if cssPath == "" {
+		return
+	}
+
+	content, err := os.ReadFile(cssPath)
+	if err != nil {
+		fmt.Printf("  ⚠️  读取CSS失败 %s: %v\n", cssPath, err)
+		return
+	}
+
+	lines := strings.Split(string(content), "\n")
+	filename := filepath.Base(imagePath)
+	remBase:=200.0
+	newWidthRem := fmt.Sprintf("%.2frem", float64(width)/remBase)
+	newHeightRem := fmt.Sprintf("%.2frem", float64(height)/remBase)
+
+	reWidth := regexp.MustCompile(`(width\s*:\s*)([\d\.]+)rem`)
+	reHeight := regexp.MustCompile(`(height\s*:\s*)([\d\.]+)rem`)
+
+	updated := false
+	for i, line := range lines {
+		if strings.Contains(line, filename) {
+			// 找到文件名所在行，向上向下各搜索 10 行（通常在一个样式块内）
+			start := i - 10
+			if start < 0 {
+				start = 0
+			}
+			end := i + 10
+			if end >= len(lines) {
+				end = len(lines) - 1
+			}
+
+			for j := start; j <= end; j++ {
+				// 检查该范围内是否包含 width 或 height
+				if reWidth.MatchString(lines[j]) {
+					lines[j] = reWidth.ReplaceAllString(lines[j], `${1}`+newWidthRem)
+					updated = true
+				}
+				if reHeight.MatchString(lines[j]) {
+					lines[j] = reHeight.ReplaceAllString(lines[j], `${1}`+newHeightRem)
+					updated = true
+				}
+				// 如果遇到闭合括号，说明样式块结束，可提前停止当前范围搜索（可选）
+				if strings.Contains(lines[j], "}") && j > i {
+					break
+				}
+			}
+		}
+	}
+
+	if updated {
+		newContent := strings.Join(lines, "\n")
+		if err := os.WriteFile(cssPath, []byte(newContent), 0644); err != nil {
+			fmt.Printf("  ❌ 更新CSS写入失败: %v\n", err)
+		} else {
+			fmt.Printf("  ✨ 已根据行定位更新 CSS: %s (w:%d, h:%d)\n", filepath.Base(cssPath), width, height)
+		}
+	} else {
+		fmt.Printf("  ❓ 在 CSS 中未找到 %s 相关的宽高定义\n", filename)
+	}
+}
+
+// getCSSPath 根据图片路径获取 CSS 路径
+func getCSSPath(imagePath, basePath string) string {
+	relPath, _ := filepath.Rel(basePath, imagePath)
+	relPath = filepath.ToSlash(relPath)
+
+	mapping := map[string]string{
+		"components/xdrsign/static":   "components/xdrsign/index.css",
+		"components/xdrInvite/static": "components/xdrInvite/index.css",
+		"images/xdrNormal/202505":     "css/xdrNormal.css",
+	}
+
+	for dir, css := range mapping {
+		if strings.HasPrefix(relPath, dir) {
+			return filepath.Join(basePath, css)
+		}
+	}
+	return ""
+}
+
+// 辅助函数
+
+func isImage(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif"
+}
+
+func getImageDimensions(path string) (int, int) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0
+	}
+	defer file.Close()
+
+	config, _, err := image.DecodeConfig(file)
+	if err != nil {
+		return 0, 0
+	}
+	return config.Width, config.Height
+}
+
+func getFileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func loadCache() (*CacheData, error) {
+	file, err := os.Open(CacheFileName)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var data CacheData
+	if err := json.NewDecoder(file).Decode(&data); err != nil {
+		return nil, err
+	}
+	return &data, nil
+}
+
+func saveCache(data *CacheData) error {
+	file, err := os.Create(CacheFileName)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(data)
+}
+
+func moveFile(src, dst string) error {
+	// 跨盘符移动需要 Copy + Remove
+	sourceFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer sourceFile.Close()
 
-	// 创建目标文件（如果存在则覆盖）
-	destFile, err := os.Create(destPath)
+	destFile, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
 	defer destFile.Close()
 
-	// 复制文件内容
-	if _, err := io.Copy(destFile, sourceFile); err != nil {
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
 		return err
 	}
 
-	// 确保写入完成
-	if err := destFile.Sync(); err != nil {
-		return err
-	}
-
-	return nil
+	// 关闭文件后删除源文件
+	sourceFile.Close()
+	destFile.Close()
+	
+	return os.Remove(src)
 }
