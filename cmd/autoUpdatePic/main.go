@@ -72,6 +72,8 @@ func processFile(basePath, fileName string) {
 		info["cssPath"] = filepath.Join(basePath, "css/xdrNormal.css")
 		if strings.HasSuffix(nameOnly, "_not_start") {
 			info["category"] = "notStart"
+		} else if strings.Contains(nameOnly, "_xdr") {
+			info["category"] = "xdrPrize"
 		} else {
 			info["category"] = "normalPrize"
 		}
@@ -107,9 +109,22 @@ func generateNormalCSS(name, file string) string {
 		return fmt.Sprintf(".level-award-center #XdrNotStartList #not-start-swiper .swiper-slide.%s {\n  background-image: url('../images/xdrNormal/%s/%s');\n}\n", cleanName, dateDir, file)
 	}
 
+	// 处理 _xdr_r 后缀 (映射为 .received)
+	if before, ok := strings.CutSuffix(name, "_xdr_r"); ok {
+		cleanName := before
+		return fmt.Sprintf(".level-award-center #XdrPrizeList .level-award-prize .item.%s.received {\n  background-image: url('../images/xdrNormal/%s/%s');\n}\n", cleanName, dateDir, file)
+	}
+
+	// 处理 _r 后缀 (映射为 .received)
 	if before, ok := strings.CutSuffix(name, "_r"); ok {
 		cleanName := before
 		return fmt.Sprintf(".level-award-prize .item.%s.received {\n    background-image: url('../images/xdrNormal/%s/%s');\n}\n", cleanName, dateDir, file)
+	}
+
+	// 处理 _xdr 后缀
+	if before, ok := strings.CutSuffix(name, "_xdr"); ok {
+		cleanName := before
+		return fmt.Sprintf(".level-award-center #XdrPrizeList .level-award-prize .item.%s {\n  background-image: url('../images/xdrNormal/%s/%s');\n}\n", cleanName, dateDir, file)
 	}
 
 	return fmt.Sprintf("/* %s */\n.level-award-prize .item.%s {\n    background-image: url('../images/xdrNormal/%s/%s');\n}\n", name, name, dateDir, file)
@@ -137,6 +152,7 @@ func appendCSS(info map[string]string) error {
 		"popQy":       ".level-sign-popup .level-sign-popup-prize",
 		"signPrize":   ".level-sign-prize-wrapper #level-sign-prize-swiper .swiper-slide",
 		"notStart":    "#XdrNotStartList #not-start-swiper .swiper-slide",
+		"xdrPrize":    "#XdrPrizeList .level-award-prize .item",
 		"normalPrize": ".level-award-prize .item",
 	}
 
