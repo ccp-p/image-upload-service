@@ -52,94 +52,108 @@ func processFile(basePath, fileName string) {
 	ext := filepath.Ext(fileName)
 	nameOnly := strings.TrimSuffix(fileName, ext)
 
-	var targetDir, cssPath, cssContent string
+	info := make(map[string]string)
+	info["fileName"] = fileName
+	info["nameOnly"] = nameOnly
 
 	// 规则判定
 	if width == 220 && height == 220 {
-		targetDir = filepath.Join(basePath, "components/xdrsign/static/popQy")
-		cssPath = filepath.Join(basePath, "components/xdrsign/index.css")
-		cssContent = fmt.Sprintf(".level-sign-popup .level-sign-popup-prize.%s {\n    background-image: url('../../components/xdrsign/static/popQy/%s');\n}\n", nameOnly, fileName)
+		info["category"] = "popQy"
+		info["targetDir"] = filepath.Join(basePath, "components/xdrsign/static/popQy")
+		info["cssPath"] = filepath.Join(basePath, "components/xdrsign/index.css")
+		info["cssContent"] = fmt.Sprintf(".level-sign-popup .level-sign-popup-prize.%s {\n    background-image: url('../../components/xdrsign/static/popQy/%s');\n}\n", nameOnly, fileName)
 	} else if width == 200 && height == 208 {
-		targetDir = filepath.Join(basePath, "components/xdrsign/static")
-		cssPath = filepath.Join(basePath, "components/xdrsign/index.css")
-		cssContent = fmt.Sprintf(".level-sign-prize-wrapper #level-sign-prize-swiper .swiper-slide.%s {\n    background-image: url('../../components/xdrsign/static/%s');\n}\n", nameOnly, fileName)
+		info["category"] = "signPrize"
+		info["targetDir"] = filepath.Join(basePath, "components/xdrsign/static")
+		info["cssPath"] = filepath.Join(basePath, "components/xdrsign/index.css")
+		info["cssContent"] = fmt.Sprintf(".level-sign-prize-wrapper #level-sign-prize-swiper .swiper-slide.%s {\n    background-image: url('../../components/xdrsign/static/%s');\n}\n", nameOnly, fileName)
 	} else {
-		targetDir = filepath.Join(basePath, "images/xdrNormal", dateDir)
-		cssPath = filepath.Join(basePath, "css/xdrNormal.css")
-		cssContent = generateNormalCSS(nameOnly, fileName)
+		info["targetDir"] = filepath.Join(basePath, "images/xdrNormal", dateDir)
+		info["cssPath"] = filepath.Join(basePath, "css/xdrNormal.css")
+		if strings.HasSuffix(nameOnly, "_not_start") {
+			info["category"] = "notStart"
+		} else {
+			info["category"] = "normalPrize"
+		}
+		info["cssContent"] = generateNormalCSS(nameOnly, fileName)
 	}
 
 	// 1. 移动文件
-	err := os.MkdirAll(targetDir, 0755)
+	err := os.MkdirAll(info["targetDir"], 0755)
 	if err != nil {
-		fmt.Printf("[错误] 创建目录失败 %s: %v\n", targetDir, err)
+		fmt.Printf("[错误] 创建目录失败 %s: %v\n", info["targetDir"], err)
 		return
 	}
 
-	err = moveFile(fullPath, filepath.Join(targetDir, fileName))
+	err = moveFile(fullPath, filepath.Join(info["targetDir"], fileName))
 	if err != nil {
 		fmt.Printf("[错误] 移动文件 %s 失败: %v\n", fileName, err)
 		return
 	}
-	fmt.Printf("[移动] %s -> %s\n", fileName, targetDir)
+	fmt.Printf("[移动] %s -> %s\n", fileName, info["targetDir"])
 
 	// 2. 追加 CSS
-	err = appendCSS(cssPath, cssContent, nameOnly)
+	err = appendCSS(info)
 	if err != nil {
-		fmt.Printf("[错误] 更新 CSS %s 失败: %v\n", cssPath, err)
+		fmt.Printf("[错误] 更新 CSS %s 失败: %v\n", info["cssPath"], err)
 	} else {
-		fmt.Printf("[CSS] 成功更新样式至: %s\n", filepath.Base(cssPath))
+		fmt.Printf("[CSS] 成功更新样式至: %s\n", filepath.Base(info["cssPath"]))
 	}
 }
 
 func generateNormalCSS(name, file string) string {
-	if before, ok :=strings.CutSuffix(name, "_not_start"); ok  {
+	if before, ok := strings.CutSuffix(name, "_not_start"); ok {
 		cleanName := before
 		return fmt.Sprintf(".level-award-center #XdrNotStartList #not-start-swiper .swiper-slide.%s {\n  background-image: url('../images/xdrNormal/%s/%s');\n}\n", cleanName, dateDir, file)
 	}
-	// ... 类似处理 _xdr, _xdr_r 等逻辑
+
+	if before, ok := strings.CutSuffix(name, "_r"); ok {
+		cleanName := before
+		return fmt.Sprintf(".level-award-prize .item.%s.received {\n    background-image: url('../images/xdrNormal/%s/%s');\n}\n", cleanName, dateDir, file)
+	}
+
 	return fmt.Sprintf("/* %s */\n.level-award-prize .item.%s {\n    background-image: url('../images/xdrNormal/%s/%s');\n}\n", name, name, dateDir, file)
 }
 
-func appendCSS(path, content, keyword string) error {
+func appendCSS(info map[string]string) error {
+	path := info["cssPath"]
+	content := info["cssContent"]
+	keyword := info["nameOnly"]
+	category := info["category"]
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	contentStr := string(data)
 
-	// 1. 检查是否已存在 (防重复)
 	if strings.Contains(contentStr, keyword) {
 		fmt.Printf("[跳过] 样式已存在: %s\n", keyword)
 		return nil
 	}
 
-	// 2. 寻找插入位置
-	// 定义特征关键字，用于寻找同类样式的聚居区
-	var searchKey string
-	if strings.Contains(content, "#XdrNotStartList") {
-		searchKey = "_not_start"
-	} else if strings.Contains(content, "popQy") {
-		searchKey = "popQy"
-	} else if strings.Contains(content, "xdrsign") {
-		searchKey = "xdrsign"
-	} else {
-		searchKey = "level-award-prize" // 默认普通奖品区
+	// 定义各类样式的特征选择器 map
+	searchKeys := map[string]string{
+		"popQy":       ".level-sign-popup .level-sign-popup-prize",
+		"signPrize":   ".level-sign-prize-wrapper #level-sign-prize-swiper .swiper-slide",
+		"notStart":    "#XdrNotStartList #not-start-swiper .swiper-slide",
+		"normalPrize": ".level-award-prize .item",
 	}
 
+	searchKey := searchKeys[category]
 	lastIdx := strings.LastIndex(contentStr, searchKey)
 	insertIdx := len(contentStr)
 
 	if lastIdx != -1 {
-		// 找到该类样式最后一次出现后的闭合大括号位置
-		afterLast := contentStr[lastIdx:]
-		endBraceIdx := strings.Index(afterLast, "}")
+		// 寻找该选择器块结束的 '}'
+		afterMatch := contentStr[lastIdx:]
+		endBraceIdx := strings.Index(afterMatch, "}")
 		if endBraceIdx != -1 {
 			insertIdx = lastIdx + endBraceIdx + 1
 		}
 	}
 
-	// 3. 构建新内容并重写
+	// 插入内容
 	newContent := contentStr[:insertIdx] + "\n" + content + contentStr[insertIdx:]
 	return os.WriteFile(path, []byte(newContent), 0644)
 }
