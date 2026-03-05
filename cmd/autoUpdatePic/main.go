@@ -35,28 +35,40 @@ func main() {
 		return
 	}
 
+	// 按 CSS 路径分组收集处理信息
+	cssGroups := make(map[string][]map[string]string)
 	count := 0
+
 	for _, f := range files {
-		if f.IsDir() {
+		if f.IsDir() || !strings.HasPrefix(f.Name(), "xdr") {
 			continue
 		}
-		processFile(basePath, f.Name())
-		count++
+		info := prepareFileInfo(basePath, f.Name())
+		if info != nil {
+			cssGroups[info["cssPath"]] = append(cssGroups[info["cssPath"]], info)
+			count++
+		}
 	}
+
+	// 统一处理文件移动和 CSS 更新
+	for cssPath, infos := range cssGroups {
+		updateBatch(cssPath, infos)
+	}
+
 	fmt.Printf("[完成] 共处理 %d 个文件。\n", count)
 }
 
-func processFile(basePath, fileName string) {
+func prepareFileInfo(basePath, fileName string) map[string]string {
 	fullPath := filepath.Join(compressedPath, fileName)
 	width, height := getImageDimension(fullPath)
 	ext := filepath.Ext(fileName)
 	nameOnly := strings.TrimSuffix(fileName, ext)
 
 	info := make(map[string]string)
+	info["fullPath"] = fullPath
 	info["fileName"] = fileName
 	info["nameOnly"] = nameOnly
 
-	// 规则判定
 	if width == 220 && height == 220 {
 		info["category"] = "popQy"
 		info["targetDir"] = filepath.Join(basePath, "components/xdrsign/static/popQy")
@@ -79,28 +91,49 @@ func processFile(basePath, fileName string) {
 		}
 		info["cssContent"] = generateNormalCSS(nameOnly, fileName)
 	}
+	return info
+}
 
-	// 1. 移动文件
-	err := os.MkdirAll(info["targetDir"], 0755)
+func updateBatch(cssPath string, infos []map[string]string) {
+	data, err := os.ReadFile(cssPath)
 	if err != nil {
-		fmt.Printf("[错误] 创建目录失败 %s: %v\n", info["targetDir"], err)
+		fmt.Printf("[错误] 读取 CSS 失败 %s: %v\n", cssPath, err)
 		return
 	}
+	contentStr := string(data)
 
-	err = moveFile(fullPath, filepath.Join(info["targetDir"], fileName))
-	if err != nil {
-		fmt.Printf("[错误] 移动文件 %s 失败: %v\n", fileName, err)
-		return
+	searchKeys := map[string]string{
+		"popQy":       ".level-sign-popup .level-sign-popup-prize",
+		"signPrize":   ".level-sign-prize-wrapper #level-sign-prize-swiper .swiper-slide",
+		"notStart":    "#XdrNotStartList #not-start-swiper .swiper-slide",
+		"xdrPrize":    "#XdrPrizeList .level-award-prize .item",
+		"normalPrize": ".level-award-prize .item",
 	}
-	fmt.Printf("[移动] %s -> %s\n", fileName, info["targetDir"])
 
-	// 2. 追加 CSS
-	err = appendCSS(info)
-	if err != nil {
-		fmt.Printf("[错误] 更新 CSS %s 失败: %v\n", info["cssPath"], err)
-	} else {
-		fmt.Printf("[CSS] 成功更新样式至: %s\n", filepath.Base(info["cssPath"]))
+	for _, info := range infos {
+		// 1. 移动文件
+		os.MkdirAll(info["targetDir"], 0755)
+		moveFile(info["fullPath"], filepath.Join(info["targetDir"], info["fileName"]))
+		fmt.Printf("[移动] %s -> %s\n", info["fileName"], info["targetDir"])
+
+		// 2. 内存中构造新 CSS
+		if strings.Contains(contentStr, info["nameOnly"]) {
+			continue
+		}
+
+		searchKey := searchKeys[info["category"]]
+		lastIdx := strings.LastIndex(contentStr, searchKey)
+		insertIdx := len(contentStr)
+		if lastIdx != -1 {
+			if endBraceIdx := strings.Index(contentStr[lastIdx:], "}"); endBraceIdx != -1 {
+				insertIdx = lastIdx + endBraceIdx + 1
+			}
+		}
+		contentStr = contentStr[:insertIdx] + "\n" + info["cssContent"] + contentStr[insertIdx:]
 	}
+
+	os.WriteFile(cssPath, []byte(contentStr), 0644)
+	fmt.Printf("[CSS] 已批量更新: %s\n", filepath.Base(cssPath))
 }
 
 func generateNormalCSS(name, file string) string {
