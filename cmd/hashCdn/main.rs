@@ -642,6 +642,7 @@ impl VersionManager {
             } else if !css_path.contains("components") { continue; }
 
             if !self.should_process_component(&css_path) { continue; }
+            println!("    📝 扫描到组件CSS: {}", css_path);
             resources.get_mut("css").unwrap().push(css_path);
         }
 
@@ -655,6 +656,7 @@ impl VersionManager {
             } else if !js_path.contains("components") { continue; }
 
             if !self.should_process_component(&js_path) { continue; }
+            println!("    📝 扫描到组件JS: {}", js_path);
             resources.get_mut("js").unwrap().push(js_path);
         }
 
@@ -1291,18 +1293,23 @@ impl DeployManager {
         let source_rel = source_rel.trim_start_matches('/');
         let dest_rel = dest_rel.trim_start_matches('/');
         let versions = self.find_all_file_versions(source_rel);
+        
         if versions.is_empty() {
              println!("⚠️ 未找到文件: {}", source_rel);
              return Ok((0, 0));
         }
         
+        if self.debug_mode {
+            println!("    📋 [{}] 找到 {} 个版本: {:?}", source_rel, versions.len(), versions.iter().map(|v| &v.name).collect::<Vec<_>>());
+        }
+        
         let mut base_version = None;
         let mut latest_hash_version = None;
-        for v in versions {
+        for v in &versions {
             if v.has_hash {
-                if latest_hash_version.is_none() { latest_hash_version = Some(v); }
+                if latest_hash_version.is_none() { latest_hash_version = Some(v.clone()); }
             } else {
-                base_version = Some(v);
+                base_version = Some(v.clone());
             }
         }
         
@@ -1315,9 +1322,15 @@ impl DeployManager {
         let mut copied = 0;
         let mut skipped = 0;
         
+        // 复制所有哈希版本，不只是最新的一个
         let mut versions_to_process = Vec::new();
         if let Some(b) = base_version { versions_to_process.push(b); }
-        if let Some(h) = latest_hash_version { versions_to_process.push(h); }
+        // 添加所有哈希版本
+        for v in &versions {
+            if v.has_hash {
+                versions_to_process.push(v.clone());
+            }
+        }
         
         for version in versions_to_process {
             let d_path = if version.has_hash {
@@ -1327,8 +1340,14 @@ impl DeployManager {
             };
             if d_path.exists() {
                 if let (Ok(s_meta), Ok(d_meta)) = (fs::metadata(&version.path), fs::metadata(&d_path)) {
-                    if s_meta.len() == d_meta.len() { skipped += 1; continue; }
+                    if s_meta.len() == d_meta.len() { 
+                        skipped += 1; 
+                        continue; 
+                    }
                 }
+            }
+            if self.debug_mode {
+                println!("    📤 复制: {} -> {}", version.name, d_path.display());
             }
             fs::copy(&version.path, &d_path)?;
             copied += 1;
@@ -1350,16 +1369,32 @@ impl DeployManager {
         
         let mut total_copied = 0;
         let mut total_skipped = 0;
+        let mut file_count = 0;
         
-        for entry in fs::read_dir(source_dir_path)?.flatten() {
-            if entry.metadata()?.is_file() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let rel = format!("{}/{}", dir_path, name);
+        // 使用 walkdir 递归遍历所有子目录
+        use walkdir::WalkDir;
+        for entry in WalkDir::new(&source_dir_path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() {
+                let full_source_path = entry.path();
+                let relative_path = full_source_path.strip_prefix(&source_dir_path)
+                    .unwrap_or(full_source_path);
+                let rel = format!("{}/{}", dir_path, relative_path.to_string_lossy().replace('\\', "/"));
+                
                 let (c, s) = self.copy_file_with_versions(&rel, &rel)?;
                 total_copied += c;
                 total_skipped += s;
+                file_count += 1;
             }
         }
+        
+        if self.debug_mode {
+            println!("    📁 {} 目录共处理 {} 个文件, 复制 {}, 跳过 {}", dir_path, file_count, total_copied, total_skipped);
+        }
+        
         Ok((total_copied, total_skipped))
     }
 
@@ -1448,11 +1483,11 @@ impl DeployManager {
             };
             
             // 拼接到目标目录进行检查
-            let check_path = Path::new(&self.dest_path).join(rel_path.trim_start_matches('/').replace('/', "\\"));
+            let rel_path_clean = rel_path.trim_start_matches('/');
+            let check_path = Path::new(&self.dest_path).join(rel_path_clean);
+            
             if !check_path.exists() {
                 missing_files.push(format!("{} -> (预检路径: {})", url_path, check_path.display()));
-            } else if self.debug_mode {
-                println!("  ✓ 校验通过: {}", url_path);
             }
         }
         
@@ -1473,20 +1508,38 @@ impl DeployManager {
 // 5. 程序入口
 // ==========================================
 
-fn load_config(config_path: &str) -> Config {
-    let mut data = String::new();
-    let current_dir_path = env::current_dir().unwrap_or_default().join(config_path);
-    let exe_dir_path = env::current_exe().unwrap_or_default().parent().unwrap_or(Path::new("")).join(config_path);
-
-    if let Ok(d) = fs::read_to_string(&current_dir_path) {
-        data = d;
-    } else if let Ok(d) = fs::read_to_string(&exe_dir_path) {
-        data = d;
-    } else if let Ok(d) = fs::read_to_string(config_path) {
-        data = d;
+fn find_config_file(config_filename: &str) -> Option<PathBuf> {
+    let search_paths = vec![
+        // 1. 当前工作目录
+        env::current_dir().ok().map(|p| p.join(config_filename)),
+        // 2. exe 所在目录（用于 release 模式）
+        env::current_exe().ok().map(|p| p.parent().unwrap_or(&p).join(config_filename)),
+        // 3. 源码目录（exe/target/release/ 的上级）
+        env::current_exe().ok().and_then(|p| p.parent().unwrap_or(&p).parent().map(|p| p.join(config_filename))),
+        // 4. 常见开发目录结构
+        env::current_exe().ok().and_then(|p| p.parent().unwrap_or(&p).parent().map(|p| p.join("cmd").join("hashCdn").join(config_filename))),
+    ];
+    
+    for path in search_paths.into_iter().flatten() {
+        if path.exists() {
+            println!("📁 找到配置文件: {}", path.display());
+            return Some(path);
+        }
     }
+    None
+}
 
-    if !data.is_empty() {
+fn load_config(config_filename: &str) -> Config {
+    let config_path = find_config_file(config_filename);
+    
+    let data = if let Some(path) = config_path {
+        fs::read_to_string(&path).ok()
+    } else {
+        // 尝试直接读取（兼容旧逻辑）
+        fs::read_to_string(config_filename).ok()
+    };
+
+    if let Some(data) = data {
         let mut cfg: Config = serde_json::from_str(&data).unwrap_or_default();
         if cfg.root_dir.is_empty() { cfg.root_dir = ".".to_string(); }
         if cfg.hash_length == 0 { cfg.hash_length = 8; }
@@ -1501,7 +1554,7 @@ fn load_config(config_path: &str) -> Config {
         }
         cfg
     } else {
-        println!("⚠️  找不到配置文件: {}，使用默认配置", config_path);
+        println!("⚠️  找不到配置文件: {}，使用默认配置", config_filename);
         Config::default()
     }
 }
