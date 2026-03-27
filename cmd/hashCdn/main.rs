@@ -37,7 +37,7 @@ pub struct Config {
     pub process_main_resources: Vec<String>,
     #[serde(default, rename = "replaceAllWithCDN")]
     pub replace_all_with_cdn: bool,
-    #[serde(default, rename = "rollbackAfterDeploy")]
+    #[serde(default, rename = "RollbackAfterDeploy")]
     pub rollback_after_deploy: bool,
     #[serde(default, rename = "cdnExcludeFiles")]
     pub cdn_exclude_files: Vec<String>,
@@ -987,36 +987,55 @@ impl VersionManager {
         let html_resources = self.collect_resources_from_html(html_path)?;
         println!("  找到 {} 个组件CSS, {} 个组件JS", html_resources.get("css").unwrap().len(), html_resources.get("js").unwrap().len());
 
+        // 并行处理组件资源
+        use rayon::prelude::*;
+        
         if let Some(js_list) = html_resources.get("js") {
             if !js_list.is_empty() {
-                println!("\n🔧 处理组件 JavaScript 文件...");
-                for js_rel in js_list {
+                println!("\n🔧 并行处理 {} 个组件 JavaScript 文件...", js_list.len());
+                let js_results: Vec<_> = js_list.par_iter().filter_map(|js_rel| {
                     let normalized_key = clean_path_slashes(js_rel).trim_start_matches("./").to_string();
-                    if resources.get("js").unwrap().contains_key(&normalized_key) { continue; }
-                    
-                    if let Ok(info) = self.process_component_resource(html_dir, js_rel) {
-                        let hashed_rel = clean_path_slashes(pathdiff::diff_paths(&info.hashed_path, html_dir).unwrap_or(info.hashed_path.clone()).to_string_lossy().as_ref());
-                        resources.get_mut("js").unwrap().insert(normalized_key, hashed_rel);
-                    } else {
-                        println!("  ❌ 失败: {}", js_rel);
+                    if self.processed_files.lock().unwrap().contains(&html_dir.join(js_rel)) {
+                        return None;
                     }
+                    match self.process_component_resource(html_dir, js_rel) {
+                        Ok(info) => {
+                            let hashed_rel = clean_path_slashes(pathdiff::diff_paths(&info.hashed_path, html_dir).unwrap_or(info.hashed_path.clone()).to_string_lossy().as_ref());
+                            Some((normalized_key, hashed_rel))
+                        }
+                        Err(_) => {
+                            println!("  ❌ 失败: {}", js_rel);
+                            None
+                        }
+                    }
+                }).collect();
+                for (key, val) in js_results {
+                    resources.get_mut("js").unwrap().insert(key, val);
                 }
             }
         }
 
         if let Some(css_list) = html_resources.get("css") {
             if !css_list.is_empty() {
-                println!("\n🔧 处理组件 CSS 文件...");
-                for css_rel in css_list {
+                println!("\n🔧 并行处理 {} 个组件 CSS 文件...", css_list.len());
+                let css_results: Vec<_> = css_list.par_iter().filter_map(|css_rel| {
                     let normalized_key = clean_path_slashes(css_rel).trim_start_matches("./").to_string();
-                    if resources.get("css").unwrap().contains_key(&normalized_key) { continue; }
-                    
-                    if let Ok(info) = self.process_component_resource(html_dir, css_rel) {
-                        let hashed_rel = clean_path_slashes(pathdiff::diff_paths(&info.hashed_path, html_dir).unwrap_or(info.hashed_path.clone()).to_string_lossy().as_ref());
-                        resources.get_mut("css").unwrap().insert(normalized_key, hashed_rel);
-                    } else {
-                        println!("  ❌ 失败: {}", css_rel);
+                    if self.processed_files.lock().unwrap().contains(&html_dir.join(css_rel)) {
+                        return None;
                     }
+                    match self.process_component_resource(html_dir, css_rel) {
+                        Ok(info) => {
+                            let hashed_rel = clean_path_slashes(pathdiff::diff_paths(&info.hashed_path, html_dir).unwrap_or(info.hashed_path.clone()).to_string_lossy().as_ref());
+                            Some((normalized_key, hashed_rel))
+                        }
+                        Err(_) => {
+                            println!("  ❌ 失败: {}", css_rel);
+                            None
+                        }
+                    }
+                }).collect();
+                for (key, val) in css_results {
+                    resources.get_mut("css").unwrap().insert(key, val);
                 }
             }
         }
@@ -1258,6 +1277,8 @@ impl DeployManager {
     }
 
     fn copy_file_with_versions(&self, source_rel: &str, dest_rel: &str) -> io::Result<(i32, i32)> {
+        let source_rel = source_rel.trim_start_matches('/');
+        let dest_rel = dest_rel.trim_start_matches('/');
         let versions = self.find_all_file_versions(source_rel);
         if versions.is_empty() {
              println!("⚠️ 未找到文件: {}", source_rel);
@@ -1305,7 +1326,7 @@ impl DeployManager {
     }
 
     fn handle_wildcard_path(&self, wildcard_path: &str) -> io::Result<(i32, i32)> {
-        let dir_path = wildcard_path.trim_end_matches("/*");
+        let dir_path = wildcard_path.trim_end_matches("/*").trim_start_matches('/');
         let source_dir_path = Path::new(&self.source_path).join(dir_path);
         let dest_dir_path = Path::new(&self.dest_path).join(dir_path);
         

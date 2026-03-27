@@ -24,6 +24,7 @@
     "cdnPathPrefix":"https://qqt-res.cmicrwx.cn/2016tyjf/xhmqqthy/res/wap",
     "enabled": true,
     "command": "copy",
+    "rollback_after_deploy": true,
     "autoCommit": false,
     "homeSourcePath": "D:\\job_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap",
     "homeDestPath": "D:\\job_project\\china_mobile\\huidu\\xhmqqthy-res",
