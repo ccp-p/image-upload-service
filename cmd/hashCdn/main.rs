@@ -992,7 +992,9 @@ impl VersionManager {
         
         if let Some(js_list) = html_resources.get("js") {
             if !js_list.is_empty() {
-                println!("\n🔧 并行处理 {} 个组件 JavaScript 文件...", js_list.len());
+                let thread_count = rayon::current_num_threads();
+                println!("\n🔧 [并行×{}] 处理 {} 个组件 JavaScript 文件...", thread_count, js_list.len());
+                let start = std::time::Instant::now();
                 let js_results: Vec<_> = js_list.par_iter().filter_map(|js_rel| {
                     let normalized_key = clean_path_slashes(js_rel).trim_start_matches("./").to_string();
                     if self.processed_files.lock().unwrap().contains(&html_dir.join(js_rel)) {
@@ -1001,10 +1003,11 @@ impl VersionManager {
                     match self.process_component_resource(html_dir, js_rel) {
                         Ok(info) => {
                             let hashed_rel = clean_path_slashes(pathdiff::diff_paths(&info.hashed_path, html_dir).unwrap_or(info.hashed_path.clone()).to_string_lossy().as_ref());
+                            println!("  ✅ [并行] JS: {} -> {}", js_rel, Path::new(&hashed_rel).file_name().unwrap_or_default().to_string_lossy());
                             Some((normalized_key, hashed_rel))
                         }
                         Err(_) => {
-                            println!("  ❌ 失败: {}", js_rel);
+                            println!("  ❌ [并行] 失败: {}", js_rel);
                             None
                         }
                     }
@@ -1012,12 +1015,15 @@ impl VersionManager {
                 for (key, val) in js_results {
                     resources.get_mut("js").unwrap().insert(key, val);
                 }
+                println!("  ⏱️  JS并行处理耗时: {:.2}s", start.elapsed().as_secs_f64());
             }
         }
 
         if let Some(css_list) = html_resources.get("css") {
             if !css_list.is_empty() {
-                println!("\n🔧 并行处理 {} 个组件 CSS 文件...", css_list.len());
+                let thread_count = rayon::current_num_threads();
+                println!("\n🎨 [并行×{}] 处理 {} 个组件 CSS 文件...", thread_count, css_list.len());
+                let start = std::time::Instant::now();
                 let css_results: Vec<_> = css_list.par_iter().filter_map(|css_rel| {
                     let normalized_key = clean_path_slashes(css_rel).trim_start_matches("./").to_string();
                     if self.processed_files.lock().unwrap().contains(&html_dir.join(css_rel)) {
@@ -1026,10 +1032,11 @@ impl VersionManager {
                     match self.process_component_resource(html_dir, css_rel) {
                         Ok(info) => {
                             let hashed_rel = clean_path_slashes(pathdiff::diff_paths(&info.hashed_path, html_dir).unwrap_or(info.hashed_path.clone()).to_string_lossy().as_ref());
+                            println!("  ✅ [并行] CSS: {} -> {}", css_rel, Path::new(&hashed_rel).file_name().unwrap_or_default().to_string_lossy());
                             Some((normalized_key, hashed_rel))
                         }
                         Err(_) => {
-                            println!("  ❌ 失败: {}", css_rel);
+                            println!("  ❌ [并行] 失败: {}", css_rel);
                             None
                         }
                     }
@@ -1037,6 +1044,7 @@ impl VersionManager {
                 for (key, val) in css_results {
                     resources.get_mut("css").unwrap().insert(key, val);
                 }
+                println!("  ⏱️  CSS并行处理耗时: {:.2}s", start.elapsed().as_secs_f64());
             }
         }
 
@@ -1048,15 +1056,18 @@ impl VersionManager {
     }
 
     pub fn process_multiple_html_files(&self, paths: &[String]) {
-        println!("🚀 开始批量处理HTML文件...
-");
+        let thread_count = rayon::current_num_threads();
+        println!("🚀 [并行×{}] 开始批量处理 {} 个 HTML 文件...\n", thread_count, paths.len());
         let root = std::path::PathBuf::from(&self.config.root_dir);
         
         use rayon::prelude::*;
         paths.par_iter().for_each(|p| {
             let abs_path = root.join(p);
+            println!("  🔄 [并行] 开始处理: {}", p);
             if let Err(e) = self.process_html_file(&abs_path) {
-                println!("❌ 处理失败 {}: {}", p, e);
+                println!("  ❌ [并行] 处理失败 {}: {}", p, e);
+            } else {
+                println!("  ✅ [并行] 完成处理: {}", p);
             }
         });
         
@@ -1381,6 +1392,15 @@ impl DeployManager {
         println!("  ✅ 复制文件: {} 个", copied);
         println!("  ⏭️  跳过文件: {} 个 (已存在且相同)", skipped);
 
+        // 校验 CDN 资源
+        if !html_path.is_empty() && !cdn_domain.is_empty() {
+            println!("\n🔍 开始校验 CDN 资源...");
+            if let Err(e) = self.validate_cdn_resources(html_path, cdn_domain) {
+                return Err(io::Error::new(io::ErrorKind::Other, format!("CDN资源校验失败: {}", e)));
+            }
+            println!("✅ CDN 资源校验通过");
+        }
+
         if auto_commit && is_svn {
             let (commit_msg, _) = self.get_latest_git_commit();
             let _ = self.svn_commit(&commit_msg);
@@ -1392,6 +1412,58 @@ impl DeployManager {
         }
 
         println!("✅ 部署操作成功");
+        Ok(())
+    }
+
+    /// 校验 HTML 中的 CDN 资源是否在 destPath 中存在
+    fn validate_cdn_resources(&self, html_path: &str, cdn_domain: &str) -> io::Result<()> {
+        let content = fs::read_to_string(html_path)?;
+        
+        // 1. 移除 HTML 注释内容，避免处理被注释掉的标签
+        let re_comments = Regex::new(r"(?s)<!--.*?-->").unwrap();
+        let clean_content = re_comments.replace_all(&content, "");
+        
+        // 2. 在清理后的内容中匹配 CDN 域名开头的资源路径
+        // 排除反引号 \x60，防止匹配到模板字符串内容
+        let pattern = format!("{}([^\\s'\"\\x60]+)", regex::escape(cdn_domain));
+        let re = Regex::new(&pattern).unwrap();
+        
+        let mut missing_files = Vec::new();
+        
+        for caps in re.captures_iter(&clean_content) {
+            let url_path = &caps[1];
+            
+            // 移除查询参数
+            let url_path = if let Some(idx) = url_path.find('?') {
+                &url_path[..idx]
+            } else {
+                url_path
+            };
+            
+            // 如果配置了前缀，则移除它以获取相对于 destPath 的路径
+            let rel_path = if !self.config.cdn_path_prefix.is_empty() && url_path.starts_with(&self.config.cdn_path_prefix) {
+                url_path.trim_start_matches(&self.config.cdn_path_prefix).to_string()
+            } else {
+                url_path.to_string()
+            };
+            
+            // 拼接到目标目录进行检查
+            let check_path = Path::new(&self.dest_path).join(rel_path.trim_start_matches('/').replace('/', "\\"));
+            if !check_path.exists() {
+                missing_files.push(format!("{} -> (预检路径: {})", url_path, check_path.display()));
+            } else if self.debug_mode {
+                println!("  ✓ 校验通过: {}", url_path);
+            }
+        }
+        
+        if !missing_files.is_empty() {
+            println!("\n❌ 发现 {} 个缺失文件:", missing_files.len());
+            for mf in &missing_files {
+                println!("    - {}", mf);
+            }
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} 个文件缺失", missing_files.len())));
+        }
+        
         Ok(())
     }
 }
@@ -1434,11 +1506,12 @@ fn load_config(config_path: &str) -> Config {
     }
 }
 fn main() {
+    let start = std::time::Instant::now();
     let args: Vec<String> = env::args().collect();
     let debug_mode = args.contains(&"--debug".to_string());
     
     let config = load_config("version.config.json");
-    let mut vm = VersionManager::new(config, debug_mode);
+    let vm = VersionManager::new(config, debug_mode);
 
     if !vm.config.single_html_file.is_empty() {
         let path = PathBuf::from(&vm.config.single_html_file);
@@ -1450,4 +1523,6 @@ fn main() {
     } else {
         println!("⚠️  未指定要处理的HTML文件");
     }
+    
+    println!("\n{}\n⏱️  总运行时间: {:.2}s", "=".repeat(60), start.elapsed().as_secs_f64());
 }
