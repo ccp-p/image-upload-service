@@ -1,5 +1,5 @@
 {
-  "totalCount": 710,
+  "totalCount": 711,
   "lastUpdate": "0001-01-01T00:00:00Z",
   "mapping": {
     "afterGetEquityPop.png": [
@@ -1023,7 +1023,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-ai-n.png",
         "width": 1436,
         "height": 1830,
-        "size": 296607
+        "size": 286775
       }
     ],
     "level-ai-no-stock.png": [
@@ -1063,7 +1063,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-ai.png",
         "width": 1446,
         "height": 1814,
-        "size": 201088
+        "size": 198100
       }
     ],
     "level-ai3.png": [
@@ -2256,6 +2256,14 @@
         "width": 718,
         "height": 306,
         "size": 53012
+      }
+    ],
+    "sign-dfy-wyy2.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrsign\\static\\sign-dfy-wyy2.png",
+        "width": 718,
+        "height": 335,
+        "size": 20298
       }
     ],
     "sign-dlq.gif": [
@@ -3473,7 +3481,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\xdrddq4_not_start.png",
         "width": 416,
         "height": 442,
-        "size": 7225
+        "size": 6961
       }
     ],
     "xdrddq4_r.png": [
@@ -4411,7 +4419,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrsign\\static\\xdrnxdc5q.png",
         "width": 200,
         "height": 208,
-        "size": 7808
+        "size": 7464
       }
     ],
     "xdrnxdcq.png": [

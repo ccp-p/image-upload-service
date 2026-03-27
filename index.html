@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>流量趋势监控</title>
+    <!-- 引入 CDN 资源 -->
+    <link rel="stylesheet" href="https://unpkg.com/element-ui/lib/theme-chalk/index.css">
+    <script src="https://unpkg.com/vue@2.6.14/dist/vue.js"></script>
+    <script src="https://unpkg.com/element-ui/lib/index.js"></script>
+    <script src="https://unpkg.com/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="https://unpkg.com/dayjs@1.11.10/dayjs.min.js"></script>
+    <style>
+        body { background-color: #f5f7fa; margin: 0; padding: 20px; font-family: "Helvetica Neue",Helvetica,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","微软雅黑",Arial,sans-serif; }
+        .chart-container { background: #fff; padding: 24px; border-radius: 8px; box-shadow: 0 2px 12px 0 rgba(0,0,0,0.1); }
+        .header-title { font-size: 18px; font-weight: bold; margin-bottom: 25px; }
+        .filter-row { display: flex; align-items: center; margin-bottom: 30px; flex-wrap: wrap; gap: 10px; }
+        .chart-box { height: 500px; width: 100%; }
+        .btn-group-custom .el-button--primary.is-plain { background-color: #409EFF; color: #fff; }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div class="chart-container">
+        <div class="header-title">流量趋势监控</div>
+        
+        <div class="filter-row">
+            <el-button-group class="btn-group-custom">
+                <el-button v-for="item in shortcuts" :key="item.label" size="small" :type="activeShortcut === item.label ? 'primary' : 'default'" @click="handleShortcut(item)">{{item.label}}</el-button>
+            </el-button-group>
+
+            <span style="margin-left: 20px;">时间</span>
+            <el-date-picker v-model="dateRange" type="daterange" size="small" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" @change="activeShortcut = ''"></el-date-picker>
+
+            <span style="margin-left: 20px;">项目</span>
+            <el-select v-model="project" placeholder="请选择项目" size="small" style="width: 180px;">
+                <el-option v-for="opt in projectOptions" :key="opt" :label="opt" :value="opt"></el-option>
+            </el-select>
+
+            <div style="margin-left: auto;">
+                <el-button type="primary" size="small" @click="fetchData">查询</el-button>
+                <el-button size="small" @click="reset">重置</el-button>
+                <el-button type="primary" size="small" @click="exportReport" style="background-color: #66b1ff;">生成报表</el-button>
+            </div>
+        </div>
+
+        <div id="mainChart" class="chart-box"></div>
+    </div>
+</div>
+
+<script>
+new Vue({
+    el: '#app',
+    data() {
+        return {
+            dateRange: [],
+            activeShortcut: '近14天',
+            project: '全部项目',
+            projectOptions: ['全部项目', '希望工程1+1', '净水计划', '谷粒计划', '和你在一起助学活动', '银发计划'],
+            shortcuts: [
+                { label: '近7天', val: 7 },
+                { label: '近30天', val: 30 },
+                { label: '近半年', val: 180 },
+                { label: '今年', val: 'year' }
+            ],
+            chart: null
+        }
+    },
+    mounted() {
+        this.initDefaultDate();
+        this.initChart();
+        window.addEventListener('resize', () => this.chart && this.chart.resize());
+        this.fetchData();
+    },
+    methods: {
+        initDefaultDate() {
+            const end = dayjs().subtract(1, 'day');
+            const start = end.subtract(13, 'day');
+            this.dateRange = [start.toDate(), end.toDate()];
+        },
+        handleShortcut(item) {
+            this.activeShortcut = item.label;
+            const end = dayjs().subtract(1, 'day');
+            let start;
+            if (item.val === 'year') {
+                start = dayjs().startOf('year');
+            } else if (item.label === '近半年') {
+                start = end.subtract(6, 'month');
+            } else {
+                start = end.subtract(item.val - 1, 'day');
+            }
+            this.dateRange = [start.toDate(), end.toDate()];
+            this.fetchData();
+        },
+        initChart() {
+            this.chart = echarts.init(document.getElementById('mainChart'));
+        },
+        fetchData() {
+            if (!this.dateRange || this.dateRange.length < 2) return;
+            const diffDays = dayjs(this.dateRange[1]).diff(dayjs(this.dateRange[0]), 'day');
+            
+            if (diffDays > 730) {
+                this.$message.warning('最大可选时间跨度为2年');
+                return;
+            }
+
+            // 模拟根据跨度决定粒度
+            let grain = '日';
+            if (diffDays > 90) grain = '月';
+            else if (diffDays > 31) grain = '周';
+
+            this.renderChart(diffDays, grain);
+        },
+        renderChart(count, grain) {
+            const xAxisData = [];
+            const uvData = [];
+            const pvData = [];
+            
+            // 模拟数据生成
+            for(let i=0; i<= (count > 15 ? 14 : count); i++) {
+                xAxisData.push((i+1) + '日');
+                uvData.push(Math.floor(Math.random() * 200) + 100);
+                pvData.push(Math.floor(Math.random() * 300) + 150);
+            }
+
+            const option = {
+                tooltip: { trigger: 'axis' },
+                legend: { bottom: 0, icon: 'circle' },
+                grid: { left: '3%', right: '4%', bottom: '10%', containLabel: true },
+                xAxis: { type: 'category', boundaryGap: false, data: xAxisData, axisLine: { lineStyle: { color: '#ccc' } } },
+                yAxis: { type: 'value', splitLine: { lineStyle: { type: 'solid', color: '#eee' } } },
+                series: [
+                    { name: 'UV', type: 'line', smooth: true, data: uvData, color: '#409EFF', label: { show: true, position: 'top' } },
+                    { name: 'PV', type: 'line', smooth: true, data: pvData, color: '#6ecbcd', label: { show: true, position: 'top' } }
+                ]
+            };
+            this.chart.setOption(option, true);
+        },
+        reset() {
+            this.project = '全部项目';
+            this.activeShortcut = '近14天';
+            this.initDefaultDate();
+            this.fetchData();
+        },
+        exportReport() {
+            this.$message.success('报表生成中...');
+        }
+    }
+});
+</script>
+</body>
+</html>
