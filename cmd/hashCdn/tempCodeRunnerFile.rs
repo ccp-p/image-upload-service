@@ -1,0 +1,2 @@
+
+    pub hash: String,
