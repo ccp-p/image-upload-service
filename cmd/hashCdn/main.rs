@@ -1578,4 +1578,10 @@ fn main() {
     }
     
     println!("\n{}\n⏱️  总运行时间: {:.2}s", "=".repeat(60), start.elapsed().as_secs_f64());
+    
+    // 等待用户按任意键退出
+    println!("\n按任意键退出...");
+    use std::io::{self, Read};
+    let mut _input = String::new();
+    io::stdin().read_line(&mut _input).ok();
 }
