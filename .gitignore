@@ -4,3 +4,4 @@
 *.exe~
 # targret
 **/target
+/cmd/autoRetract/*.html
