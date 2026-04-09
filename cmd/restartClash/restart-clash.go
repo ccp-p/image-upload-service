@@ -9,7 +9,7 @@ import (
 
 func main() {
 	// 替换为你的 Clash for Windows 路径
-	clashPath := `D:\software\commonTool\Clash.for.Windows-0.19.24-win\Clash for Windows.exe`
+	clashPath := `D:\software\commonTool\Clash.for.Windows-0.20.39-win\Clash for Windows.exe`
 
 	fmt.Println("正在关闭 Clash for Windows...")
 

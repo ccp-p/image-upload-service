@@ -1821,6 +1821,26 @@ func (dm *DeployManager) Run(autoCommit bool, htmlPath string, cdnDomain string)
     fmt.Println("🚀 开始部署操作...")
     fmt.Printf("📂 源路径: %s\n", dm.sourcePath)
     fmt.Printf("📂 目标路径: %s\n\n", dm.destPath)
+
+    // 如果处于晚20点到凌晨4点之间，先执行前置脚本
+    now := time.Now()
+    hour := now.Hour()
+    if hour >= 20 || hour < 4 {
+        scriptPath := filepath.Join(dm.sourcePath, filepath.FromSlash("scripts/bussiness/cdn.js"))
+        if fileExists(scriptPath) {
+            fmt.Printf("🌙 当前时间在20点到4点之间 (%02d:%02d)，执行CDN前置脚本: %s\n", hour, now.Minute(), scriptPath)
+            cmd := exec.Command("node", scriptPath)
+            cmd.Dir = dm.sourcePath
+            cmd.Stdout = os.Stdout
+            cmd.Stderr = os.Stderr
+            if err := cmd.Run(); err != nil {
+                fmt.Printf("⚠️ 执行前置脚本失败: %v\n", err)
+            } else {
+                fmt.Println("✅ 前置脚本执行完成")
+            }
+            fmt.Println()
+        }
+    }
     
     // 先更新SVN仓库
     if isSvnRepo(dm.destPath) {
