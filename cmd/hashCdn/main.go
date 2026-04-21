@@ -50,6 +50,7 @@ type DeployConfig struct {
     FilePaths         []string `json:"filePaths"`
     GitAuthors        []string `json:"gitAuthors"`
     CDNPathPrefix     string   `json:"cdnPathPrefix"`     // 新增：CDN URL中需要裁掉的前缀映射，例如 /2016tyjf/xhmqqthy/res/wap/
+    ForcePreScript    bool     `json:"-"`                 // 运行时覆盖：是否强制执行前置脚本
 }
 
 // VersionManager 版本管理器
@@ -1822,13 +1823,11 @@ func (dm *DeployManager) Run(autoCommit bool, htmlPath string, cdnDomain string)
     fmt.Printf("📂 源路径: %s\n", dm.sourcePath)
     fmt.Printf("📂 目标路径: %s\n\n", dm.destPath)
 
-    // 如果处于晚20点到凌晨4点之间，先执行前置脚本
-    now := time.Now()
-    hour := now.Hour()
-    if hour >= 20 || hour < 4 {
+    // 是否执行前置脚本
+    if dm.config.ForcePreScript {
         scriptPath := filepath.Join(dm.sourcePath, filepath.FromSlash("scripts/bussiness/cdn.js"))
         if fileExists(scriptPath) {
-            fmt.Printf("🌙 当前时间在20点到4点之间 (%02d:%02d)，执行CDN前置脚本: %s\n", hour, now.Minute(), scriptPath)
+            fmt.Printf("🔧 执行CDN前置脚本: %s\n", scriptPath)
             cmd := exec.Command("node", scriptPath)
             cmd.Dir = dm.sourcePath
             cmd.Stdout = os.Stdout
@@ -2169,6 +2168,7 @@ func main() {
     debugMode := flag.Bool("debug", false, "调试模式（显示详细日志）")
     deployOnly := flag.Bool("deploy", false, "仅执行部署（不处理hash）")
     deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
+    deployMode := flag.Int("mode", 0, "部署模式：1=copy, 2=copy-commit, 3=pre-script+copy, 4=pre-script+copy-commit")
     
     flag.Parse()
     
@@ -2185,6 +2185,29 @@ func main() {
     
     if *cdnDomain != "" {
         config.CDNDomain = *cdnDomain
+    }
+    
+    // 应用部署模式
+    if *deployMode > 0 {
+        config.Deploy.Enabled = true // 强制开启部署
+        switch *deployMode {
+        case 1:
+            config.Deploy.AutoCommit = false
+            config.Deploy.ForcePreScript = false
+            config.Deploy.Command = "copy"
+        case 2:
+            config.Deploy.AutoCommit = true
+            config.Deploy.ForcePreScript = false
+            config.Deploy.Command = "copy-commit"
+        case 3:
+            config.Deploy.AutoCommit = false
+            config.Deploy.ForcePreScript = true
+            config.Deploy.Command = "copy"
+        case 4:
+            config.Deploy.AutoCommit = true
+            config.Deploy.ForcePreScript = true
+            config.Deploy.Command = "copy-commit"
+        }
     }
     
     vm := NewVersionManager(*config, *debugMode)

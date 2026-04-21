@@ -32,11 +32,23 @@ if not exist "version.config.json" (
     exit /b 1
 )
 
-echo [信息] 读取配置文件: version.config.json
+echo.
+echo 请选择部署模式:
+echo [1] 默认的 copy
+echo [2] copy-commit (自动提交svn)
+echo [3] 执行前置脚本，然后 copy
+echo [4] 执行前置脚本，然后 copy-commit
+echo.
+
+set /p mode_input="请输入对应的数字 (默认=1): "
+if "%mode_input%"=="" set mode_input=1
+
+echo.
+echo [信息] 读取配置文件: version.config.json，使用模式: %mode_input%
 echo.
 
 REM 运行程序
-go run main.go -config=version.config.json
+go run main.go -config=version.config.json -mode=%mode_input%
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
