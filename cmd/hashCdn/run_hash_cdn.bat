@@ -38,6 +38,8 @@ echo [1] 默认的 copy
 echo [2] copy-commit (自动提交svn)
 echo [3] 执行前置脚本，然后 copy
 echo [4] 执行前置脚本，然后 copy-commit
+echo [5] 保持相对路径(不替换CDN)，然后 copy
+echo [6] 保持相对路径(不替换CDN)，然后 copy-commit
 echo.
 
 set /p mode_input="请输入对应的数字 (默认=1): "

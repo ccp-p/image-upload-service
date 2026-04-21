@@ -2168,7 +2168,7 @@ func main() {
     debugMode := flag.Bool("debug", false, "调试模式（显示详细日志）")
     deployOnly := flag.Bool("deploy", false, "仅执行部署（不处理hash）")
     deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
-    deployMode := flag.Int("mode", 0, "部署模式：1=copy, 2=copy-commit, 3=pre-script+copy, 4=pre-script+copy-commit")
+    deployMode := flag.Int("mode", 0, "部署模式：1=copy, 2=copy-commit, 3=pre-script+copy, 4=pre-script+copy-commit, 5=不替换CDN+copy, 6=不替换CDN+copy-commit")
     
     flag.Parse()
     
@@ -2207,6 +2207,16 @@ func main() {
             config.Deploy.AutoCommit = true
             config.Deploy.ForcePreScript = true
             config.Deploy.Command = "copy-commit"
+        case 5:
+            config.Deploy.AutoCommit = false
+            config.Deploy.ForcePreScript = false
+            config.Deploy.Command = "copy"
+            config.CDNDomain = "" // 不替换CDN
+        case 6:
+            config.Deploy.AutoCommit = true
+            config.Deploy.ForcePreScript = false
+            config.Deploy.Command = "copy-commit"
+            config.CDNDomain = "" // 不替换CDN
         }
     }
     
