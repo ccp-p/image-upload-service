@@ -24,6 +24,7 @@ type FileInfo struct {
 	category   string
 	targetDir  string
 	cssPath    string
+	jsPath     string
 	cssContent string
 }
 
@@ -93,6 +94,7 @@ func prepareFileInfo(basePath, fileName string) *FileInfo {
 	} else {
 		info.targetDir = filepath.Join(basePath, "images/xdrNormal", dateDir)
 		info.cssPath = filepath.Join(basePath, "css/xdrNormal.css")
+		info.jsPath = filepath.Join(basePath, "scripts/js/xdrNormal.js")
 		if strings.HasSuffix(nameOnly, "_not_start") {
 			info.category = "notStart"
 		} else if strings.Contains(nameOnly, "_xdr") {
@@ -145,6 +147,69 @@ func updateBatch(cssPath string, infos []*FileInfo) {
 
 	os.WriteFile(cssPath, []byte(contentStr), 0644)
 	fmt.Printf("[CSS] 已批量更新: %s\n", filepath.Base(cssPath))
+
+	// 3. 处理 JS 更新
+	updateJS(infos)
+}
+
+func updateJS(infos []*FileInfo) {
+	// 找到第一个有 jsPath 的 info
+	var jsPath string
+	var filteredInfos []*FileInfo
+	for _, info := range infos {
+		if info.jsPath != "" {
+			jsPath = info.jsPath
+			filteredInfos = append(filteredInfos, info)
+		}
+	}
+
+	if jsPath == "" || len(filteredInfos) == 0 {
+		return
+	}
+
+	data, err := os.ReadFile(jsPath)
+	if err != nil {
+		fmt.Printf("[错误] 读取 JS 失败 %s: %v\n", jsPath, err)
+		return
+	}
+	contentStr := string(data)
+
+	const jsArrayKey = "const PRODUCTS_MAP = ["
+	idx := strings.Index(contentStr, jsArrayKey)
+	if idx == -1 {
+		fmt.Printf("[错误] 未找到 PRODUCTS_MAP: %s\n", jsPath)
+		return
+	}
+
+	insertIdx := idx + len(jsArrayKey)
+	newEntries := ""
+	
+	// 用于在本次处理中去重
+	processedCodes := make(map[string]bool)
+
+	for _, info := range filteredInfos {
+		// 根据后缀清理 code
+		cleanCode := info.nameOnly
+		cleanCode = strings.TrimSuffix(cleanCode, "_not_start")
+		cleanCode = strings.TrimSuffix(cleanCode, "_xdr_r")
+		cleanCode = strings.TrimSuffix(cleanCode, "_r")
+		cleanCode = strings.TrimSuffix(cleanCode, "_xdr")
+
+		// 1. 检查是否在本次循环中已处理过该 code
+		// 2. 检查 JS 文件中是否已存在该 code
+		if processedCodes[cleanCode] || strings.Contains(contentStr, fmt.Sprintf("code: '%s'", cleanCode)) {
+			continue
+		}
+
+		processedCodes[cleanCode] = true
+		newEntries += fmt.Sprintf("\n    {id: 9999, code: '%s', comment: '新权益', isOwn: false},", cleanCode)
+	}
+
+	if newEntries != "" {
+		contentStr = contentStr[:insertIdx] + newEntries + contentStr[insertIdx:]
+		os.WriteFile(jsPath, []byte(contentStr), 0644)
+		fmt.Printf("[JS] 已更新: %s\n", filepath.Base(jsPath))
+	}
 }
 
 func generateNormalCSS(name, file string) string {
