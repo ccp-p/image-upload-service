@@ -90,6 +90,7 @@ func prepareFileInfo(basePath, fileName string) *FileInfo {
 		info.category = "signPrize"
 		info.targetDir = filepath.Join(basePath, "components/xdrsign/static")
 		info.cssPath = filepath.Join(basePath, "components/xdrsign/index.css")
+		info.jsPath = filepath.Join(basePath, "components/xdrsign/index.js")
 		info.cssContent = fmt.Sprintf(".level-sign-prize-wrapper #level-sign-prize-swiper .swiper-slide.%s {\n    background-image: url('../../components/xdrsign/static/%s');\n}\n", nameOnly, fileName)
 	} else {
 		info.targetDir = filepath.Join(basePath, "images/xdrNormal", dateDir)
@@ -153,62 +154,82 @@ func updateBatch(cssPath string, infos []*FileInfo) {
 }
 
 func updateJS(infos []*FileInfo) {
-	// 找到第一个有 jsPath 的 info
-	var jsPath string
-	var filteredInfos []*FileInfo
+	// 1. 按 jsPath 聚合 infos，处理同一个 JS 文件的多个条目
+	jsFileMap := make(map[string][]*FileInfo)
 	for _, info := range infos {
 		if info.jsPath != "" {
-			jsPath = info.jsPath
-			filteredInfos = append(filteredInfos, info)
+			jsFileMap[info.jsPath] = append(jsFileMap[info.jsPath], info)
 		}
 	}
 
-	if jsPath == "" || len(filteredInfos) == 0 {
-		return
-	}
-
-	data, err := os.ReadFile(jsPath)
-	if err != nil {
-		fmt.Printf("[错误] 读取 JS 失败 %s: %v\n", jsPath, err)
-		return
-	}
-	contentStr := string(data)
-
-	const jsArrayKey = "const PRODUCTS_MAP = ["
-	idx := strings.Index(contentStr, jsArrayKey)
-	if idx == -1 {
-		fmt.Printf("[错误] 未找到 PRODUCTS_MAP: %s\n", jsPath)
-		return
-	}
-
-	insertIdx := idx + len(jsArrayKey)
-	newEntries := ""
-	
-	// 用于在本次处理中去重
-	processedCodes := make(map[string]bool)
-
-	for _, info := range filteredInfos {
-		// 根据后缀清理 code
-		cleanCode := info.nameOnly
-		cleanCode = strings.TrimSuffix(cleanCode, "_not_start")
-		cleanCode = strings.TrimSuffix(cleanCode, "_xdr_r")
-		cleanCode = strings.TrimSuffix(cleanCode, "_r")
-		cleanCode = strings.TrimSuffix(cleanCode, "_xdr")
-
-		// 1. 检查是否在本次循环中已处理过该 code
-		// 2. 检查 JS 文件中是否已存在该 code
-		if processedCodes[cleanCode] || strings.Contains(contentStr, fmt.Sprintf("code: '%s'", cleanCode)) {
+	for jsPath, pathInfos := range jsFileMap {
+		data, err := os.ReadFile(jsPath)
+		if err != nil {
+			fmt.Printf("[错误] 读取 JS 失败 %s: %v\n", jsPath, err)
 			continue
 		}
+		contentStr := string(data)
 
-		processedCodes[cleanCode] = true
-		newEntries += fmt.Sprintf("\n    {id: 9999, code: '%s', comment: '新权益', isOwn: false},", cleanCode)
-	}
+		// 支持多种数组标识
+		arrayKeys := []string{
+			"const PRODUCTS_MAP = [",
+			"let SIGN_MAP = [",
+			"const SIGN_MAP = [",
+			"const PRIZE_ITEMS = [",
+		}
+		
+		updated := false
+		for _, jsArrayKey := range arrayKeys {
+			idx := strings.Index(contentStr, jsArrayKey)
+			if idx == -1 {
+				continue
+			}
 
-	if newEntries != "" {
-		contentStr = contentStr[:insertIdx] + newEntries + contentStr[insertIdx:]
-		os.WriteFile(jsPath, []byte(contentStr), 0644)
-		fmt.Printf("[JS] 已更新: %s\n", filepath.Base(jsPath))
+			insertIdx := idx + len(jsArrayKey)
+			newEntries := ""
+			
+			// 用于在本次处理中去重
+			processedCodes := make(map[string]bool)
+
+			for _, info := range pathInfos {
+				// 根据后缀清理 code
+				cleanCode := info.nameOnly
+				cleanCode = strings.TrimSuffix(cleanCode, "_not_start")
+				cleanCode = strings.TrimSuffix(cleanCode, "_xdr_r")
+				cleanCode = strings.TrimSuffix(cleanCode, "_r")
+				cleanCode = strings.TrimSuffix(cleanCode, "_xdr")
+
+				// 检查是否在当前数组中已存在（同时检查单双引号）
+				// 注意：这里我们只检查 jsArrayKey 之后的内容可能不够严谨，但通常数组里 code 唯一
+				// 为了更安全，我们检查整个 contentStr
+				if processedCodes[cleanCode] || 
+				   strings.Contains(contentStr, fmt.Sprintf("code: '%s'", cleanCode)) ||
+				   strings.Contains(contentStr, fmt.Sprintf("code: \"%s\"", cleanCode)) {
+					continue
+				}
+
+				processedCodes[cleanCode] = true
+				
+				// 根据数组类型选择不同的模板
+				if strings.Contains(jsArrayKey, "SIGN_MAP") {
+					newEntries += fmt.Sprintf("\n    { \"id\": 9999, \"code\": \"%s\", \"comment\": \"新权益\" },", cleanCode)
+				} else if strings.Contains(jsArrayKey, "PRIZE_ITEMS") {
+					newEntries += fmt.Sprintf("\n	    {id: 9999, code: '%s', comment: '新权益'},", cleanCode)
+				} else {
+					newEntries += fmt.Sprintf("\n    {id: 9999, code: '%s', comment: '新权益', isOwn: false},", cleanCode)
+				}
+			}
+
+			if newEntries != "" {
+				contentStr = contentStr[:insertIdx] + newEntries + contentStr[insertIdx:]
+				updated = true
+			}
+		}
+
+		if updated {
+			os.WriteFile(jsPath, []byte(contentStr), 0644)
+			fmt.Printf("[JS] 已更新: %s\n", filepath.Base(jsPath))
+		}
 	}
 }
 
