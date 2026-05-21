@@ -2,7 +2,7 @@ use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -92,6 +92,7 @@ pub struct ImageReference {
 // 2. 工具函数
 // ==========================================
 
+#[allow(dead_code)]
 fn file_exists(path: impl AsRef<Path>) -> bool {
     path.as_ref().exists()
 }
@@ -112,10 +113,12 @@ fn get_file_hash(path: impl AsRef<Path>, length: usize) -> io::Result<String> {
     Ok(hash_str)
 }
 
+#[allow(dead_code)]
 fn is_windows() -> bool {
     cfg!(target_os = "windows")
 }
 
+#[allow(dead_code)]
 fn is_darwin() -> bool {
     cfg!(target_os = "macos")
 }
@@ -526,7 +529,7 @@ impl VersionManager {
         }
 
         let mut original_hash = self.calculate_file_hash(&original_css_path)?;
-        let mut hashed_css_filename = self.add_hash_to_filename(&clean_filename, &original_hash);
+        let hashed_css_filename = self.add_hash_to_filename(&clean_filename, &original_hash);
         let mut hashed_css_path = css_dir.join(&hashed_css_filename);
 
         copy_file(&original_css_path, &hashed_css_path)?;
@@ -551,7 +554,6 @@ impl VersionManager {
                     if final_css_path != hashed_css_path {
                         let _ = fs::rename(&hashed_css_path, &final_css_path);
                         hashed_css_path = final_css_path;
-                        hashed_css_filename = final_css_filename;
                         original_hash = new_hash;
                     }
                 }
@@ -582,7 +584,7 @@ impl VersionManager {
         }
 
         let absolute_path = clean_path(html_dir.join(target_path));
-        let mut actual_path = self.find_file(&absolute_path).unwrap_or(absolute_path.clone());
+        let actual_path = self.find_file(&absolute_path).unwrap_or(absolute_path.clone());
 
         if !actual_path.exists() {
             return Err(io::Error::new(io::ErrorKind::NotFound, format!("文件不存在: {:?}", actual_path)));
@@ -715,15 +717,13 @@ impl VersionManager {
                                 }
 
                                 let new_filename = Path::new(new_hashed_path).file_name().unwrap_or_default().to_string_lossy().to_string();
-                                let mut new_path = String::new();
-
-                                if is_url {
-                                    new_path = if old_dir.is_empty() { new_filename } else { format!("{}/{}", old_dir, new_filename) };
+                                let mut new_path = if is_url {
+                                    if old_dir.is_empty() { new_filename } else { format!("{}/{}", old_dir, new_filename) }
                                 } else if old_dir != "." && old_dir != "/" && !old_dir.is_empty() {
-                                    new_path = clean_path_slashes(&format!("{}/{}", old_dir, new_filename));
+                                    clean_path_slashes(&format!("{}/{}", old_dir, new_filename))
                                 } else {
-                                    new_path = new_filename;
-                                }
+                                    new_filename
+                                };
 
                                 if old_path.starts_with("../") || old_path.starts_with("..\\") {
                                     if !new_path.starts_with("../") && !new_path.starts_with("..\\") {
@@ -786,15 +786,13 @@ impl VersionManager {
                                 }
 
                                 let new_filename = Path::new(new_hashed_path).file_name().unwrap_or_default().to_string_lossy().to_string();
-                                let mut new_path = String::new();
-
-                                if is_url {
-                                    new_path = if old_dir.is_empty() { new_filename } else { format!("{}/{}", old_dir, new_filename) };
+                                let mut new_path = if is_url {
+                                    if old_dir.is_empty() { new_filename } else { format!("{}/{}", old_dir, new_filename) }
                                 } else if old_dir != "." && old_dir != "/" && !old_dir.is_empty() {
-                                    new_path = clean_path_slashes(&format!("{}/{}", old_dir, new_filename));
+                                    clean_path_slashes(&format!("{}/{}", old_dir, new_filename))
                                 } else {
-                                    new_path = new_filename;
-                                }
+                                    new_filename
+                                };
 
                                 if old_path.starts_with("../") || old_path.starts_with("..\\") {
                                     if !new_path.starts_with("../") && !new_path.starts_with("..\\") {
@@ -890,11 +888,6 @@ impl VersionManager {
             println!("\n⚠️  没有内容需要更新");
         }
 
-        if self.config.deploy.enabled {
-            self.run_deploy();
-        } else {
-            self.run_node_copy_script();
-        }
         Ok(())
     }
 
@@ -1053,6 +1046,13 @@ impl VersionManager {
         println!("\n🔄 更新HTML中的资源引用...");
         println!("  📋 CSS: {} 项, JS: {} 项", resources.get("css").unwrap().len(), resources.get("js").unwrap().len());
         self.update_html_references(html_path, &resources)?;
+
+        if self.config.deploy.enabled {
+            self.run_deploy();
+        } else {
+            self.run_node_copy_script();
+        }
+
         println!("\n✨ 处理完成!");
         Ok(())
     }
@@ -1146,6 +1146,7 @@ pub struct DeployManager {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct FileVersion {
     path: PathBuf,
     name: String,
@@ -1559,6 +1560,8 @@ fn load_config(config_filename: &str) -> Config {
     }
 }
 fn main() {
+    // log 正使用rust版本 
+    println!("rust 🚀 hashCdn - 静态资源版本管理工具");
     let start = std::time::Instant::now();
     let args: Vec<String> = env::args().collect();
     let debug_mode = args.contains(&"--debug".to_string());
@@ -1578,10 +1581,1056 @@ fn main() {
     }
     
     println!("\n{}\n⏱️  总运行时间: {:.2}s", "=".repeat(60), start.elapsed().as_secs_f64());
-    
+
     // 等待用户按任意键退出
     println!("\n按任意键退出...");
-    use std::io::{self, Read};
+    use std::io;
     let mut _input = String::new();
     io::stdin().read_line(&mut _input).ok();
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    /// Helper: create a VersionManager with default config (hash_length = 8).
+    fn make_vm() -> VersionManager {
+        let config = Config {
+            hash_length: 8,
+            ..Config::default()
+        };
+        VersionManager::new(config, false)
+    }
+
+    // -------------------------------------------------------
+    // 1. get_file_hash: known content -> known MD5
+    // -------------------------------------------------------
+    #[test]
+    fn test_get_file_hash() {
+        // Create a temp file with known content.
+        let dir = std::env::temp_dir();
+        let path = dir.join("hash_test_input.txt");
+        {
+            let mut f = File::create(&path).expect("create temp file");
+            write!(f, "hello world").expect("write temp file");
+        }
+
+        // MD5("hello world") = 5eb63bbbe01eeed093cb22bb8f5acdc3
+        let hash = get_file_hash(&path, 8).expect("get_file_hash failed");
+        assert_eq!(hash, "5eb63bbb");
+
+        // Full-length hash (length=0 means no truncation).
+        let full = get_file_hash(&path, 0).expect("get_file_hash full failed");
+        assert_eq!(full, "5eb63bbbe01eeed093cb22bb8f5acdc3");
+
+        // Cleanup.
+        let _ = fs::remove_file(&path);
+    }
+
+    // -------------------------------------------------------
+    // 2. add_hash_to_filename: "style.css" + "abc12345"
+    // -------------------------------------------------------
+    #[test]
+    fn test_add_hash_to_filename() {
+        let vm = make_vm();
+        let result = vm.add_hash_to_filename("style.css", "abc12345");
+        assert_eq!(result, "style.abc12345.css");
+    }
+
+    // -------------------------------------------------------
+    // 3. remove_hash_from_filename: "style.abc12345.css" -> "style.css"
+    // -------------------------------------------------------
+    #[test]
+    fn test_remove_hash_from_filename() {
+        let vm = make_vm();
+        let result = vm.remove_hash_from_filename("style.abc12345.css");
+        assert_eq!(result, "style.css");
+    }
+
+    // -------------------------------------------------------
+    // 4. remove_hash_from_filename with no hash: "style.css" -> "style.css"
+    // -------------------------------------------------------
+    #[test]
+    fn test_remove_hash_from_filename_no_hash() {
+        let vm = make_vm();
+        let result = vm.remove_hash_from_filename("style.css");
+        assert_eq!(result, "style.css");
+    }
+
+    // -------------------------------------------------------
+    // 5. add_hash_to_filename with existing hash: replaces old hash
+    // -------------------------------------------------------
+    #[test]
+    fn test_add_hash_to_filename_with_existing_hash() {
+        let vm = make_vm();
+        // "abcdef12" is a valid hex hash; the function strips it from the stem
+        // and replaces it with the new hash.
+        let result = vm.add_hash_to_filename("style.abcdef12.css", "new567890");
+        assert_eq!(result, "style.new567890.css");
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    // Mutex to serialize tests that modify IS_HOME env var (process-wide state)
+    lazy_static::lazy_static! {
+        static ref IS_HOME_MUTEX: Mutex<()> = Mutex::new(());
+    }
+
+    /// Helper: create a temporary config file and return its path.
+    fn create_temp_config(filename: &str, content: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("hashcdn_config_tests");
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let path = dir.join(filename);
+        let mut f = File::create(&path).expect("failed to create temp config file");
+        f.write_all(content.as_bytes()).expect("failed to write temp config");
+        path
+    }
+
+    /// Helper: remove a temporary config file (ignore errors).
+    fn remove_temp_config(path: &Path) {
+        let _ = fs::remove_file(path);
+    }
+
+    /// Helper: run a closure with IS_HOME env var cleared, restoring afterwards.
+    fn with_clean_is_home<F: FnOnce()>(f: F) {
+        let _lock = IS_HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = env::var("IS_HOME").ok();
+        env::remove_var("IS_HOME");
+        f();
+        match saved {
+            Some(val) => env::set_var("IS_HOME", val),
+            None => { env::remove_var("IS_HOME"); }
+        }
+    }
+
+    // -------------------------------------------------------
+    // 1. Config deserialization
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_config_deserialize_valid_json() {
+        let json = r#"{
+            "rootDir": "/var/www",
+            "cdnDomain": "cdn.example.com",
+            "hashLength": 12,
+            "singleHTMLFile": "index.html",
+            "htmlFiles": ["a.html", "b.html"],
+            "excludeDirs": ["tmp", "cache"],
+            "homeHTMLFile": "home.html",
+            "companyHTMLFile": "company.html",
+            "includeComponents": ["header", "footer"],
+            "processMainResources": ["main.js"],
+            "replaceAllWithCDN": true,
+            "RollbackAfterDeploy": false,
+            "cdnExcludeFiles": ["favicon.ico"],
+            "deploy": {
+                "enabled": true,
+                "command": "git push",
+                "autoCommit": true,
+                "homeSourcePath": "/src/home",
+                "homeDestPath": "/dest/home",
+                "companySourcePath": "/src/company",
+                "companyDestPath": "/dest/company",
+                "filePaths": ["dist/app.js"],
+                "gitAuthors": ["alice", "bob"],
+                "cdnPathPrefix": "/static"
+            }
+        }"#;
+
+        let cfg: Config = serde_json::from_str(json).expect("deserialization should succeed");
+
+        assert_eq!(cfg.root_dir, "/var/www");
+        assert_eq!(cfg.cdn_domain, "cdn.example.com");
+        assert_eq!(cfg.hash_length, 12);
+        assert_eq!(cfg.single_html_file, "index.html");
+        assert_eq!(cfg.html_files, vec!["a.html", "b.html"]);
+        assert_eq!(cfg.exclude_dirs, vec!["tmp", "cache"]);
+        assert_eq!(cfg.home_html_file, "home.html");
+        assert_eq!(cfg.company_html_file, "company.html");
+        assert_eq!(cfg.include_components, vec!["header", "footer"]);
+        assert_eq!(cfg.process_main_resources, vec!["main.js"]);
+        assert!(cfg.replace_all_with_cdn);
+        assert!(!cfg.rollback_after_deploy);
+        assert_eq!(cfg.cdn_exclude_files, vec!["favicon.ico"]);
+
+        // Deploy sub-struct
+        assert!(cfg.deploy.enabled);
+        assert_eq!(cfg.deploy.command, "git push");
+        assert!(cfg.deploy.auto_commit);
+        assert_eq!(cfg.deploy.home_source_path, "/src/home");
+        assert_eq!(cfg.deploy.home_dest_path, "/dest/home");
+        assert_eq!(cfg.deploy.company_source_path, "/src/company");
+        assert_eq!(cfg.deploy.company_dest_path, "/dest/company");
+        assert_eq!(cfg.deploy.file_paths, vec!["dist/app.js"]);
+        assert_eq!(cfg.deploy.git_authors, vec!["alice", "bob"]);
+        assert_eq!(cfg.deploy.cdn_path_prefix, "/static");
+    }
+
+    #[test]
+    fn test_config_deserialize_empty_json_uses_serde_defaults() {
+        let cfg: Config = serde_json::from_str("{}").expect("empty JSON should succeed");
+        // serde default functions should fill in the defaults
+        assert_eq!(cfg.root_dir, ".");
+        assert_eq!(cfg.hash_length, 8);
+        assert_eq!(cfg.exclude_dirs, vec!["node_modules", ".git", "dist", "build"]);
+        assert!(cfg.cdn_domain.is_empty());
+        assert!(cfg.single_html_file.is_empty());
+        assert!(cfg.html_files.is_empty());
+    }
+
+    #[test]
+    fn test_config_roundtrip_serialize_deserialize() {
+        let original = Config {
+            root_dir: "/test".to_string(),
+            cdn_domain: "cdn.test.com".to_string(),
+            hash_length: 16,
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&original).expect("serialization should succeed");
+        let restored: Config = serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(restored.root_dir, "/test");
+        assert_eq!(restored.cdn_domain, "cdn.test.com");
+        assert_eq!(restored.hash_length, 16);
+    }
+
+    // -------------------------------------------------------
+    // 2. Default values
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_config_default_root_dir() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.root_dir, ".");
+    }
+
+    #[test]
+    fn test_config_default_hash_length() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.hash_length, 8);
+    }
+
+    #[test]
+    fn test_config_default_exclude_dirs() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.exclude_dirs.len(), 4);
+        assert!(cfg.exclude_dirs.contains(&"node_modules".to_string()));
+        assert!(cfg.exclude_dirs.contains(&".git".to_string()));
+        assert!(cfg.exclude_dirs.contains(&"dist".to_string()));
+        assert!(cfg.exclude_dirs.contains(&"build".to_string()));
+    }
+
+    #[test]
+    fn test_config_default_other_fields_are_empty_or_false() {
+        let cfg = Config::default();
+        assert!(cfg.cdn_domain.is_empty());
+        assert!(cfg.single_html_file.is_empty());
+        assert!(cfg.html_files.is_empty());
+        assert!(cfg.home_html_file.is_empty());
+        assert!(cfg.company_html_file.is_empty());
+        assert!(cfg.include_components.is_empty());
+        assert!(cfg.process_main_resources.is_empty());
+        assert!(!cfg.replace_all_with_cdn);
+        assert!(!cfg.rollback_after_deploy);
+        assert!(cfg.cdn_exclude_files.is_empty());
+    }
+
+    // -------------------------------------------------------
+    // 3. DeployConfig deserialization with camelCase fields
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_deploy_config_deserialize_camel_case() {
+        let json = r#"{
+            "enabled": true,
+            "command": "npm run deploy",
+            "autoCommit": true,
+            "homeSourcePath": "/home/src",
+            "homeDestPath": "/home/dest",
+            "companySourcePath": "/company/src",
+            "companyDestPath": "/company/dest",
+            "filePaths": ["index.html", "app.js"],
+            "gitAuthors": ["user1"],
+            "cdnPathPrefix": "/assets"
+        }"#;
+
+        let dc: DeployConfig = serde_json::from_str(json).expect("deploy deserialization should succeed");
+        assert!(dc.enabled);
+        assert_eq!(dc.command, "npm run deploy");
+        assert!(dc.auto_commit);
+        assert_eq!(dc.home_source_path, "/home/src");
+        assert_eq!(dc.home_dest_path, "/home/dest");
+        assert_eq!(dc.company_source_path, "/company/src");
+        assert_eq!(dc.company_dest_path, "/company/dest");
+        assert_eq!(dc.file_paths, vec!["index.html", "app.js"]);
+        assert_eq!(dc.git_authors, vec!["user1"]);
+        assert_eq!(dc.cdn_path_prefix, "/assets");
+    }
+
+    #[test]
+    fn test_deploy_config_default() {
+        let dc = DeployConfig::default();
+        assert!(!dc.enabled);
+        assert!(dc.command.is_empty());
+        assert!(!dc.auto_commit);
+        assert!(dc.home_source_path.is_empty());
+        assert!(dc.home_dest_path.is_empty());
+        assert!(dc.company_source_path.is_empty());
+        assert!(dc.company_dest_path.is_empty());
+        assert!(dc.file_paths.is_empty());
+        assert!(dc.git_authors.is_empty());
+        assert!(dc.cdn_path_prefix.is_empty());
+    }
+
+    #[test]
+    fn test_deploy_config_empty_json_uses_defaults() {
+        let dc: DeployConfig = serde_json::from_str("{}").expect("empty deploy JSON should succeed");
+        assert!(!dc.enabled);
+        assert!(dc.command.is_empty());
+        assert!(!dc.auto_commit);
+        assert!(dc.home_source_path.is_empty());
+    }
+
+    // -------------------------------------------------------
+    // 4. load_config function
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_load_config_valid_file() {
+        with_clean_is_home(|| {
+            let json = r#"{
+                "rootDir": "/project",
+                "hashLength": 10,
+                "excludeDirs": ["vendor"]
+            }"#;
+            let path = create_temp_config("test_load_valid.json", json);
+
+            let cfg = load_config(path.to_str().unwrap());
+
+            assert_eq!(cfg.root_dir, "/project");
+            assert_eq!(cfg.hash_length, 10);
+            assert_eq!(cfg.exclude_dirs, vec!["vendor"]);
+
+            remove_temp_config(&path);
+        });
+    }
+
+    #[test]
+    fn test_load_config_nonexistent_file_returns_defaults() {
+        with_clean_is_home(|| {
+            let cfg = load_config("nonexistent_file_12345_test.json");
+
+            // When file not found, load_config returns Config::default() (Rust Default, not serde defaults)
+            assert!(cfg.root_dir.is_empty());
+            assert_eq!(cfg.hash_length, 0);
+            assert!(cfg.exclude_dirs.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_load_config_empty_fields_filled_with_defaults() {
+        with_clean_is_home(|| {
+            // rootDir="", hashLength=0, excludeDirs=[] should be overridden by load_config
+            let json = r#"{"rootDir": "", "hashLength": 0, "excludeDirs": []}"#;
+            let path = create_temp_config("test_load_defaults.json", json);
+
+            let cfg = load_config(path.to_str().unwrap());
+
+            assert_eq!(cfg.root_dir, ".");
+            assert_eq!(cfg.hash_length, 8);
+            assert_eq!(cfg.exclude_dirs, vec!["node_modules", ".git", "dist", "build"]);
+
+            remove_temp_config(&path);
+        });
+    }
+
+    #[test]
+    fn test_load_config_invalid_json_returns_defaults() {
+        with_clean_is_home(|| {
+            let path = create_temp_config("test_load_invalid.json", "not valid json {{{");
+
+            let cfg = load_config(path.to_str().unwrap());
+
+            // serde_json::from_str fails -> unwrap_or_default() kicks in
+            assert_eq!(cfg.root_dir, ".");
+            assert_eq!(cfg.hash_length, 8);
+
+            remove_temp_config(&path);
+        });
+    }
+
+    // -------------------------------------------------------
+    // 5. Environment variable IS_HOME
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_is_home_1_selects_home_html_file() {
+        let _lock = IS_HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let json = r#"{
+            "homeHTMLFile": "home.html",
+            "companyHTMLFile": "company.html"
+        }"#;
+        let path = create_temp_config("test_is_home_1.json", json);
+
+        env::set_var("IS_HOME", "1");
+        let cfg = load_config(path.to_str().unwrap());
+        env::remove_var("IS_HOME");
+
+        assert_eq!(cfg.single_html_file, "home.html");
+
+        remove_temp_config(&path);
+    }
+
+    #[test]
+    fn test_is_home_not_set_selects_company_html_file() {
+        let _lock = IS_HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let json = r#"{
+            "homeHTMLFile": "home.html",
+            "companyHTMLFile": "company.html"
+        }"#;
+        let path = create_temp_config("test_is_home_0.json", json);
+
+        env::remove_var("IS_HOME");
+        let cfg = load_config(path.to_str().unwrap());
+
+        assert_eq!(cfg.single_html_file, "company.html");
+
+        remove_temp_config(&path);
+    }
+
+    #[test]
+    fn test_is_home_empty_string_behaves_as_not_home() {
+        let _lock = IS_HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let json = r#"{
+            "homeHTMLFile": "home.html",
+            "companyHTMLFile": "company.html"
+        }"#;
+        let path = create_temp_config("test_is_home_empty.json", json);
+
+        env::set_var("IS_HOME", "");
+        let cfg = load_config(path.to_str().unwrap());
+        env::remove_var("IS_HOME");
+
+        assert_eq!(cfg.single_html_file, "company.html");
+
+        remove_temp_config(&path);
+    }
+
+    #[test]
+    fn test_is_home_1_with_only_company_html_file() {
+        let _lock = IS_HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let json = r#"{
+            "companyHTMLFile": "company.html"
+        }"#;
+        let path = create_temp_config("test_is_home_only_company.json", json);
+
+        env::set_var("IS_HOME", "1");
+        let cfg = load_config(path.to_str().unwrap());
+        env::remove_var("IS_HOME");
+
+        // When IS_HOME=1 but homeHTMLFile is not set, single_html_file stays as deserialized (empty)
+        let _ = cfg.single_html_file;
+
+        remove_temp_config(&path);
+    }
+
+    #[test]
+    fn test_not_home_with_only_home_html_file() {
+        let _lock = IS_HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let json = r#"{
+            "homeHTMLFile": "home.html"
+        }"#;
+        let path = create_temp_config("test_not_home_only_home.json", json);
+
+        env::remove_var("IS_HOME");
+        let cfg = load_config(path.to_str().unwrap());
+
+        assert!(cfg.single_html_file.is_empty());
+
+        remove_temp_config(&path);
+    }
+
+    #[test]
+    fn test_is_home_neither_html_file_set() {
+        let _lock = IS_HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let json = r#"{"rootDir": "/tmp"}"#;
+        let path = create_temp_config("test_is_home_neither.json", json);
+
+        env::set_var("IS_HOME", "1");
+        let cfg = load_config(path.to_str().unwrap());
+        env::remove_var("IS_HOME");
+
+        assert!(cfg.single_html_file.is_empty());
+
+        remove_temp_config(&path);
+    }
+
+    // -------------------------------------------------------
+    // Bonus: utility function tests
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_clean_path_slashes() {
+        assert_eq!(clean_path_slashes("foo\\bar\\baz"), "foo/bar/baz");
+        assert_eq!(clean_path_slashes("foo/bar"), "foo/bar");
+        assert_eq!(clean_path_slashes(""), "");
+        assert_eq!(clean_path_slashes("no_slashes"), "no_slashes");
+    }
+
+    #[test]
+    fn test_file_exists_with_real_file() {
+        let path = create_temp_config("test_exists.txt", "hello");
+        assert!(file_exists(&path));
+        remove_temp_config(&path);
+        assert!(!file_exists(&path));
+    }
+
+    #[test]
+    fn test_file_exists_nonexistent_path() {
+        assert!(!file_exists("/nonexistent/path/that/does/not/exist.txt"));
+    }
+}
+
+#[cfg(test)]
+mod html_tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    fn make_vm_with_components(include_components: Vec<String>) -> VersionManager {
+        let config = Config {
+            include_components,
+            ..Config::default()
+        };
+        VersionManager::new(config, false)
+    }
+
+    // -------------------------------------------------------
+    // 1. should_process_component: matching component
+    // -------------------------------------------------------
+    #[test]
+    fn test_should_process_component_matching() {
+        let vm = make_vm_with_components(vec!["header".to_string()]);
+        // Path contains "/header/" so it should match
+        assert!(vm.should_process_component("components/header/style.css"));
+    }
+
+    // -------------------------------------------------------
+    // 2. should_process_component: non-matching component
+    // -------------------------------------------------------
+    #[test]
+    fn test_should_process_component_non_matching() {
+        let vm = make_vm_with_components(vec!["header".to_string()]);
+        // "footer" is not in include_components
+        assert!(!vm.should_process_component("components/footer/style.css"));
+    }
+
+    // -------------------------------------------------------
+    // 3. should_process_component: empty include list
+    // -------------------------------------------------------
+    #[test]
+    fn test_should_process_component_empty_include_list() {
+        let vm = make_vm_with_components(vec![]);
+        // Empty include list means accept everything
+        assert!(vm.should_process_component("any/path/style.css"));
+        assert!(vm.should_process_component("components/footer/app.js"));
+    }
+
+    // -------------------------------------------------------
+    // 4. collect_resources_from_html: collects component CSS/JS
+    // -------------------------------------------------------
+    #[test]
+    fn test_collect_resources_from_html_collects_components() {
+        let dir = std::env::temp_dir().join("hashcdn_html_tests");
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let html_path = dir.join("test_collect.html");
+        {
+            let mut f = File::create(&html_path).expect("create temp html");
+            write!(
+                f,
+                r#"<!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" href="components/header/style.css">
+    <link rel="stylesheet" href="https://cdn.example.com/external.css">
+    <link rel="stylesheet" href="main.css">
+</head>
+<body>
+    <script src="components/header/script.js"></script>
+    <script src="https://cdn.example.com/external.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>"#
+            )
+            .expect("write temp html");
+        }
+
+        let vm = make_vm_with_components(vec![]);
+        let resources = vm
+            .collect_resources_from_html(&html_path)
+            .expect("collect_resources failed");
+
+        // Only paths containing "components" should be collected
+        assert_eq!(resources["css"].len(), 1);
+        assert!(resources["css"].contains(&"components/header/style.css".to_string()));
+        assert_eq!(resources["js"].len(), 1);
+        assert!(resources["js"].contains(&"components/header/script.js".to_string()));
+
+        let _ = fs::remove_file(&html_path);
+    }
+
+    // -------------------------------------------------------
+    // 5. collect_resources_from_html: empty HTML (no resources)
+    // -------------------------------------------------------
+    #[test]
+    fn test_collect_resources_from_html_empty() {
+        let dir = std::env::temp_dir().join("hashcdn_html_tests");
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let html_path = dir.join("test_collect_empty.html");
+        {
+            let mut f = File::create(&html_path).expect("create temp html");
+            write!(f, "<html><body><p>No resources here</p></body></html>")
+                .expect("write temp html");
+        }
+
+        let vm = make_vm_with_components(vec![]);
+        let resources = vm
+            .collect_resources_from_html(&html_path)
+            .expect("collect_resources failed");
+
+        assert!(resources["css"].is_empty());
+        assert!(resources["js"].is_empty());
+
+        let _ = fs::remove_file(&html_path);
+    }
+
+    // -------------------------------------------------------
+    // 6. collect_resources_from_html: filters by include_components
+    // -------------------------------------------------------
+    #[test]
+    fn test_collect_resources_from_html_with_include_filter() {
+        let dir = std::env::temp_dir().join("hashcdn_html_tests");
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let html_path = dir.join("test_collect_filter.html");
+        {
+            let mut f = File::create(&html_path).expect("create temp html");
+            write!(
+                f,
+                r#"<!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" href="components/header/style.css">
+    <link rel="stylesheet" href="components/footer/style.css">
+</head>
+<body>
+    <script src="components/sidebar/app.js"></script>
+</body>
+</html>"#
+            )
+            .expect("write temp html");
+        }
+
+        // Only include "header"
+        let vm = make_vm_with_components(vec!["header".to_string()]);
+        let resources = vm
+            .collect_resources_from_html(&html_path)
+            .expect("collect_resources failed");
+
+        assert_eq!(resources["css"].len(), 1);
+        assert!(resources["css"].contains(&"components/header/style.css".to_string()));
+        // footer and sidebar should be filtered out
+        assert!(resources["js"].is_empty());
+
+        let _ = fs::remove_file(&html_path);
+    }
+
+    // -------------------------------------------------------
+    // 7. update_html_references: updates CSS and JS references
+    // -------------------------------------------------------
+    #[test]
+    fn test_update_html_references_updates_paths() {
+        let dir = std::env::temp_dir().join("hashcdn_html_tests");
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let html_path = dir.join("test_update.html");
+        {
+            let mut f = File::create(&html_path).expect("create temp html");
+            write!(
+                f,
+                r#"<!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" href="components/header/style.css">
+</head>
+<body>
+    <script src="components/header/script.js"></script>
+</body>
+</html>"#
+            )
+            .expect("write temp html");
+        }
+
+        let mut resources: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let mut css_map = HashMap::new();
+        css_map.insert(
+            "components/header/style.css".to_string(),
+            "components/header/style.abc12345.css".to_string(),
+        );
+        resources.insert("css".to_string(), css_map);
+
+        let mut js_map = HashMap::new();
+        js_map.insert(
+            "components/header/script.js".to_string(),
+            "components/header/script.def67890.js".to_string(),
+        );
+        resources.insert("js".to_string(), js_map);
+
+        let vm = make_vm_with_components(vec![]);
+        vm.update_html_references(&html_path, &resources)
+            .expect("update_html_references failed");
+
+        let content = fs::read_to_string(&html_path).expect("read updated html");
+        assert!(
+            content.contains("style.abc12345.css"),
+            "CSS reference should be updated with hash"
+        );
+        assert!(
+            content.contains("script.def67890.js"),
+            "JS reference should be updated with hash"
+        );
+        // Original paths should no longer be present
+        assert!(
+            !content.contains("style.css\""),
+            "Original CSS path should be replaced"
+        );
+        assert!(
+            !content.contains("script.js\""),
+            "Original JS path should be replaced"
+        );
+
+        let _ = fs::remove_file(&html_path);
+    }
+
+    // -------------------------------------------------------
+    // 8. update_html_references: no matching resources (no-op)
+    // -------------------------------------------------------
+    #[test]
+    fn test_update_html_references_no_match() {
+        let dir = std::env::temp_dir().join("hashcdn_html_tests");
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let html_path = dir.join("test_update_nomatch.html");
+        let original_content = r#"<!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" href="main.css">
+</head>
+<body>
+    <script src="app.js"></script>
+</body>
+</html>"#;
+        {
+            let mut f = File::create(&html_path).expect("create temp html");
+            write!(f, "{}", original_content).expect("write temp html");
+        }
+
+        // Provide resources that don't match anything in the HTML
+        let mut resources: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let mut css_map = HashMap::new();
+        css_map.insert(
+            "components/sidebar/theme.css".to_string(),
+            "components/sidebar/theme.aaa11111.css".to_string(),
+        );
+        resources.insert("css".to_string(), css_map);
+
+        let vm = make_vm_with_components(vec![]);
+        vm.update_html_references(&html_path, &resources)
+            .expect("update_html_references failed");
+
+        let content = fs::read_to_string(&html_path).expect("read html");
+        // Content should remain unchanged since nothing matched
+        assert!(content.contains("main.css"));
+        assert!(content.contains("app.js"));
+
+        let _ = fs::remove_file(&html_path);
+    }
+}
+
+#[cfg(test)]
+mod css_tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    fn make_vm() -> VersionManager {
+        let config = Config {
+            hash_length: 8,
+            ..Config::default()
+        };
+        VersionManager::new(config, false)
+    }
+
+    // -------------------------------------------------------
+    // 1. collect_images_from_css: basic collection of local images
+    // -------------------------------------------------------
+    #[test]
+    fn test_collect_images_from_css_basic() {
+        let dir = std::env::temp_dir().join("css_test_collect_basic");
+        let _ = fs::create_dir_all(&dir);
+
+        let css_content = r#"
+.icon { background: url(icon.png); }
+.logo { background: url(logo.svg); }
+"#;
+        let css_path = dir.join("style.css");
+        {
+            let mut f = File::create(&css_path).expect("create css");
+            write!(f, "{}", css_content).expect("write css");
+        }
+        File::create(dir.join("icon.png")).unwrap();
+        File::create(dir.join("logo.svg")).unwrap();
+
+        let vm = make_vm();
+        let images = vm.collect_images_from_css(&css_path).expect("collect failed");
+
+        assert_eq!(images.len(), 2);
+        let originals: Vec<&str> = images.iter().map(|i| i.original_path.as_str()).collect();
+        assert!(originals.contains(&"icon.png"));
+        assert!(originals.contains(&"logo.svg"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------
+    // 2. collect_images_from_css: skips external URLs
+    // -------------------------------------------------------
+    #[test]
+    fn test_collect_images_from_css_skips_external_urls() {
+        let dir = std::env::temp_dir().join("css_test_collect_external");
+        let _ = fs::create_dir_all(&dir);
+
+        let css_content = r#"
+.a { background: url(http://example.com/a.png); }
+.b { background: url(https://example.com/b.png); }
+.c { background: url(data:image/png;base64,abc); }
+.d { background: url(//cdn.example.com/d.png); }
+.e { background: url(local.png); }
+"#;
+        let css_path = dir.join("style.css");
+        {
+            let mut f = File::create(&css_path).expect("create css");
+            write!(f, "{}", css_content).expect("write css");
+        }
+        File::create(dir.join("local.png")).unwrap();
+
+        let vm = make_vm();
+        let images = vm.collect_images_from_css(&css_path).expect("collect failed");
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].original_path, "local.png");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------
+    // 3. collect_images_from_css: only returns images that exist on disk
+    // -------------------------------------------------------
+    #[test]
+    fn test_collect_images_from_css_only_existing_files() {
+        let dir = std::env::temp_dir().join("css_test_collect_existing");
+        let _ = fs::create_dir_all(&dir);
+
+        let css_content = r#"
+.a { background: url(exists.png); }
+.b { background: url(missing.png); }
+"#;
+        let css_path = dir.join("style.css");
+        {
+            let mut f = File::create(&css_path).expect("create css");
+            write!(f, "{}", css_content).expect("write css");
+        }
+        File::create(dir.join("exists.png")).unwrap();
+        // missing.png is NOT created
+
+        let vm = make_vm();
+        let images = vm.collect_images_from_css(&css_path).expect("collect failed");
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].original_path, "exists.png");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------
+    // 4. update_css_image_references: simple filename replacement
+    // -------------------------------------------------------
+    #[test]
+    fn test_update_css_image_references_simple() {
+        let dir = std::env::temp_dir().join("css_test_update_simple");
+        let _ = fs::create_dir_all(&dir);
+
+        let css_content = r#"
+.icon { background: url(icon.png); }
+.logo { background: url(logo.svg); }
+"#;
+        let css_path = dir.join("style.css");
+        {
+            let mut f = File::create(&css_path).expect("create css");
+            write!(f, "{}", css_content).expect("write css");
+        }
+
+        let mut image_map = HashMap::new();
+        image_map.insert("icon.png".to_string(), "icon.abc12345.png".to_string());
+        image_map.insert("logo.svg".to_string(), "logo.def67890.svg".to_string());
+
+        let vm = make_vm();
+        vm.update_css_image_references(&css_path, &image_map).expect("update failed");
+
+        let updated = fs::read_to_string(&css_path).expect("read updated css");
+        assert!(updated.contains("icon.abc12345.png"));
+        assert!(updated.contains("logo.def67890.svg"));
+        assert!(!updated.contains("icon.png"));
+        assert!(!updated.contains("logo.svg"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------
+    // 5. update_css_image_references: preserves quote style
+    // -------------------------------------------------------
+    #[test]
+    fn test_update_css_image_references_preserves_quotes() {
+        let dir = std::env::temp_dir().join("css_test_update_quotes");
+        let _ = fs::create_dir_all(&dir);
+
+        let css_content = r#"
+.a { background: url("double.png"); }
+.b { background: url('single.png'); }
+.c { background: url(unquoted.png); }
+"#;
+        let css_path = dir.join("style.css");
+        {
+            let mut f = File::create(&css_path).expect("create css");
+            write!(f, "{}", css_content).expect("write css");
+        }
+
+        let mut image_map = HashMap::new();
+        image_map.insert("double.png".to_string(), "double.hh.png".to_string());
+        image_map.insert("single.png".to_string(), "single.hh.png".to_string());
+        image_map.insert("unquoted.png".to_string(), "unquoted.hh.png".to_string());
+
+        let vm = make_vm();
+        vm.update_css_image_references(&css_path, &image_map).expect("update failed");
+
+        let updated = fs::read_to_string(&css_path).expect("read updated css");
+        assert!(updated.contains(r#"url("double.hh.png")"#), "double quotes should be preserved: {}", updated);
+        assert!(updated.contains("url('single.hh.png')"), "single quotes should be preserved: {}", updated);
+        assert!(updated.contains("url(unquoted.hh.png)"), "no quotes should remain no quotes: {}", updated);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------
+    // 6. update_css_image_references: preserves external URLs
+    // -------------------------------------------------------
+    #[test]
+    fn test_update_css_image_references_preserves_external_urls() {
+        let dir = std::env::temp_dir().join("css_test_update_external");
+        let _ = fs::create_dir_all(&dir);
+
+        let css_content = r#"
+.a { background: url(http://example.com/remote.png); }
+.b { background: url(local.png); }
+"#;
+        let css_path = dir.join("style.css");
+        {
+            let mut f = File::create(&css_path).expect("create css");
+            write!(f, "{}", css_content).expect("write css");
+        }
+
+        let mut image_map = HashMap::new();
+        image_map.insert("local.png".to_string(), "local.hh.png".to_string());
+
+        let vm = make_vm();
+        vm.update_css_image_references(&css_path, &image_map).expect("update failed");
+
+        let updated = fs::read_to_string(&css_path).expect("read updated css");
+        assert!(updated.contains("http://example.com/remote.png"), "external URL should be unchanged: {}", updated);
+        assert!(updated.contains("local.hh.png"), "local URL should be updated: {}", updated);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------
+    // 7. Various url() formats: quotes, subdirectories
+    // -------------------------------------------------------
+    #[test]
+    fn test_collect_images_from_css_various_url_formats() {
+        let dir = std::env::temp_dir().join("css_test_collect_formats");
+        let images_subdir = dir.join("images");
+        let _ = fs::create_dir_all(&images_subdir);
+
+        let css_content = r#"
+.a { background: url(unquoted.png); }
+.b { background: url('single.png'); }
+.c { background: url("double.png"); }
+.d { background: url(images/sub.png); }
+"#;
+        let css_path = dir.join("style.css");
+        {
+            let mut f = File::create(&css_path).expect("create css");
+            write!(f, "{}", css_content).expect("write css");
+        }
+        File::create(dir.join("unquoted.png")).unwrap();
+        File::create(dir.join("single.png")).unwrap();
+        File::create(dir.join("double.png")).unwrap();
+        File::create(images_subdir.join("sub.png")).unwrap();
+
+        let vm = make_vm();
+        let images = vm.collect_images_from_css(&css_path).expect("collect failed");
+
+        assert_eq!(images.len(), 4);
+        let originals: Vec<&str> = images.iter().map(|i| i.original_path.as_str()).collect();
+        assert!(originals.contains(&"unquoted.png"), "should find unquoted url: {:?}", originals);
+        assert!(originals.contains(&"single.png"), "should find single-quoted url: {:?}", originals);
+        assert!(originals.contains(&"double.png"), "should find double-quoted url: {:?}", originals);
+        assert!(originals.contains(&"images/sub.png"), "should find subdirectory url: {:?}", originals);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------
+    // 8. update_css_image_references with subdirectory paths
+    // -------------------------------------------------------
+    #[test]
+    fn test_update_css_image_references_with_subdirectory() {
+        let dir = std::env::temp_dir().join("css_test_update_subdir");
+        let _ = fs::create_dir_all(&dir);
+
+        let css_content = r#"
+.a { background: url(images/photo.png); }
+"#;
+        let css_path = dir.join("style.css");
+        {
+            let mut f = File::create(&css_path).expect("create css");
+            write!(f, "{}", css_content).expect("write css");
+        }
+
+        let mut image_map = HashMap::new();
+        image_map.insert("images/photo.png".to_string(), "photo.abc12345.png".to_string());
+
+        let vm = make_vm();
+        vm.update_css_image_references(&css_path, &image_map).expect("update failed");
+
+        let updated = fs::read_to_string(&css_path).expect("read updated css");
+        assert!(updated.contains("images/photo.abc12345.png"), "subdirectory path should be preserved: {}", updated);
+        assert!(!updated.contains("images/photo.png"), "original should be replaced: {}", updated);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
