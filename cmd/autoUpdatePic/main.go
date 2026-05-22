@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -81,12 +83,12 @@ func prepareFileInfo(basePath, fileName string) *FileInfo {
 		nameOnly: nameOnly,
 	}
 
-	if width == 220 && height == 220 {
+	if width >= 215 && width <= 225 && height >= 215 && height <= 225 {
 		info.category = "popQy"
 		info.targetDir = filepath.Join(basePath, "components/xdrsign/static/popQy")
 		info.cssPath = filepath.Join(basePath, "components/xdrsign/index.css")
 		info.cssContent = fmt.Sprintf(".level-sign-popup .level-sign-popup-prize.%s {\n    background-image: url('../../components/xdrsign/static/popQy/%s');\n}\n", nameOnly, fileName)
-	} else if width == 200 && height == 208 {
+	} else if width >= 195 && width <= 205 && height >= 203 && height <= 213 {
 		info.category = "signPrize"
 		info.targetDir = filepath.Join(basePath, "components/xdrsign/static")
 		info.cssPath = filepath.Join(basePath, "components/xdrsign/index.css")
@@ -109,6 +111,7 @@ func prepareFileInfo(basePath, fileName string) *FileInfo {
 }
 
 func updateBatch(cssPath string, infos []*FileInfo) {
+	fmt.Printf("[CSS] 准备处理文件: %s, 条目数: %d\n", filepath.Base(cssPath), len(infos))
 	data, err := os.ReadFile(cssPath)
 	if err != nil {
 		fmt.Printf("[错误] 读取 CSS 失败 %s: %v\n", cssPath, err)
@@ -124,6 +127,7 @@ func updateBatch(cssPath string, infos []*FileInfo) {
 		"normalPrize": ".level-award-prize .item",
 	}
 
+	updatedCount := 0
 	for _, info := range infos {
 		// 1. 移动文件
 		os.MkdirAll(info.targetDir, 0755)
@@ -131,11 +135,13 @@ func updateBatch(cssPath string, infos []*FileInfo) {
 		fmt.Printf("[移动] %s -> %s\n", info.fileName, info.targetDir)
 
 		// 2. 内存中构造新 CSS
-		if strings.Contains(contentStr, info.nameOnly) {
+		searchKey := searchKeys[info.category]
+		// 改进判断逻辑：结合分类前缀检查，防止不同分类使用相同图片名导致跳过
+		if strings.Contains(contentStr, fmt.Sprintf("%s.%s", searchKey, info.nameOnly)) {
+			fmt.Printf("[CSS] 跳过 %s (分类 %s 已存在该样式)\n", info.nameOnly, info.category)
 			continue
 		}
 
-		searchKey := searchKeys[info.category]
 		lastIdx := strings.LastIndex(contentStr, searchKey)
 		insertIdx := len(contentStr)
 		if lastIdx != -1 {
@@ -143,11 +149,20 @@ func updateBatch(cssPath string, infos []*FileInfo) {
 				insertIdx = lastIdx + endBraceIdx + 1
 			}
 		}
+
 		contentStr = contentStr[:insertIdx] + "\n" + info.cssContent + contentStr[insertIdx:]
+		updatedCount++
+		fmt.Printf("[CSS] 已添加样式: %s (分类: %s)\n", info.nameOnly, info.category)
 	}
 
-	os.WriteFile(cssPath, []byte(contentStr), 0644)
-	fmt.Printf("[CSS] 已批量更新: %s\n", filepath.Base(cssPath))
+	if updatedCount > 0 {
+		err = os.WriteFile(cssPath, []byte(contentStr), 0644)
+		if err != nil {
+			fmt.Printf("[错误] 写入 CSS 报错 %s: %v\n", cssPath, err)
+		} else {
+			fmt.Printf("[CSS] 已成功更新 %d 条样式: %s\n", updatedCount, filepath.Base(cssPath))
+		}
+	}
 
 	// 3. 处理 JS 更新
 	updateJS(infos)
@@ -187,6 +202,10 @@ func updateJS(infos []*FileInfo) {
 
 			insertIdx := idx + len(jsArrayKey)
 			newEntries := ""
+
+			// 获取当前数组中的最大 ID
+			currentMaxID := getMaxID(contentStr, idx)
+			nextID := currentMaxID + 1
 			
 			// 用于在本次处理中去重
 			processedCodes := make(map[string]bool)
@@ -199,12 +218,13 @@ func updateJS(infos []*FileInfo) {
 				cleanCode = strings.TrimSuffix(cleanCode, "_r")
 				cleanCode = strings.TrimSuffix(cleanCode, "_xdr")
 
-				// 检查是否在当前数组中已存在（同时检查单双引号）
-				// 注意：这里我们只检查 jsArrayKey 之后的内容可能不够严谨，但通常数组里 code 唯一
-				// 为了更安全，我们检查整个 contentStr
-				if processedCodes[cleanCode] || 
-				   strings.Contains(contentStr, fmt.Sprintf("code: '%s'", cleanCode)) ||
-				   strings.Contains(contentStr, fmt.Sprintf("code: \"%s\"", cleanCode)) {
+				// 检查是否在内容中已存在（多重匹配方案）
+				quotedSingle := fmt.Sprintf("'%s'", cleanCode)
+				quotedDouble := fmt.Sprintf("\"%s\"", cleanCode)
+
+				if processedCodes[cleanCode] ||
+					strings.Contains(contentStr, quotedSingle) ||
+					strings.Contains(contentStr, quotedDouble) {
 					continue
 				}
 
@@ -212,12 +232,13 @@ func updateJS(infos []*FileInfo) {
 				
 				// 根据数组类型选择不同的模板
 				if strings.Contains(jsArrayKey, "SIGN_MAP") {
-					newEntries += fmt.Sprintf("\n    { \"id\": 9999, \"code\": \"%s\", \"comment\": \"新权益\" },", cleanCode)
+					newEntries += fmt.Sprintf("\n    { \"id\": %d, \"code\": \"%s\", \"comment\": \"新权益\" },", nextID, cleanCode)
 				} else if strings.Contains(jsArrayKey, "PRIZE_ITEMS") {
-					newEntries += fmt.Sprintf("\n	    {id: 9999, code: '%s', comment: '新权益'},", cleanCode)
+					newEntries += fmt.Sprintf("\n	    {id: %d, code: '%s', comment: '新权益'},", nextID, cleanCode)
 				} else {
-					newEntries += fmt.Sprintf("\n    {id: 9999, code: '%s', comment: '新权益', isOwn: false},", cleanCode)
+					newEntries += fmt.Sprintf("\n    {id: %d, code: '%s', comment: '新权益', isOwn: false},", nextID, cleanCode)
 				}
+				nextID++
 			}
 
 			if newEntries != "" {
@@ -280,4 +301,28 @@ func moveFile(src, dst string) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
+}
+
+func getMaxID(content string, arrayStartIdx int) int {
+	// 找到数组结束位置 ]
+	endIdx := strings.Index(content[arrayStartIdx:], "]")
+	if endIdx == -1 {
+		return 0
+	}
+	arrayContent := content[arrayStartIdx : arrayStartIdx+endIdx]
+
+	// 匹配 id: 123 或 "id": 123 或 id: '123'
+	re := regexp.MustCompile(`["']?id["']?\s*:\s*["']?(\d+)["']?`)
+	matches := re.FindAllStringSubmatch(arrayContent, -1)
+
+	maxID := 0
+	for _, match := range matches {
+		if len(match) > 1 {
+			id, _ := strconv.Atoi(match[1])
+			if id > maxID && id < 9999 { // 排除掉之前可能存在的占位符 9999
+				maxID = id
+			}
+		}
+	}
+	return maxID
 }
