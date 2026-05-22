@@ -232,7 +232,7 @@ func updateJS(infos []*FileInfo) {
 				
 				// 根据数组类型选择不同的模板
 				if strings.Contains(jsArrayKey, "SIGN_MAP") {
-					newEntries += fmt.Sprintf("\n    { \"id\": %d, \"code\": \"%s\", \"comment\": \"新权益\" },", nextID, cleanCode)
+					newEntries += fmt.Sprintf("\n	    {id: %d, code: '%s', comment: '新权益'},", nextID, cleanCode)
 				} else if strings.Contains(jsArrayKey, "PRIZE_ITEMS") {
 					newEntries += fmt.Sprintf("\n	    {id: %d, code: '%s', comment: '新权益'},", nextID, cleanCode)
 				} else {
