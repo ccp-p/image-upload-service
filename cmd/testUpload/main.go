@@ -1,405 +1,320 @@
 package main
 
 import (
-	"encoding/json"
+	"archive/zip"
 	"fmt"
-	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
-	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
-	"time"
+	"sync"
+	"unicode"
 )
 
-// Config 配置
 const (
-	SourceDir     = `C:\Users\83795\Downloads\compressed`
+	OutputDir = `D:\download\archive`
 )
-var CacheFileName = "image_path_map.json"
 
-// TargetFileInfo 目标文件信息
-type TargetFileInfo struct {
-	Path   string `json:"path"`
-	Width  int    `json:"width"`
-	Height int    `json:"height"`
-	Size   int64  `json:"size"`
+var ProjectPaths = []string{
+	`D:\project\cx_project\china_mobile\chartityProject\gitSourceCode\charity-open-fronted\pc\dev`,
+	`D:\project\cx_project\china_mobile\chartityProject\gitSourceCode\charity-open-fronted\wap\dev`,
+	`D:\project\cx_project\china_mobile\chartityProject\gitSourceCode\charity-open-fronted\wap\AnnualReport`,
+	`D:\project\cx_project\china_mobile\chartityProject\gitSourceCode\charity-manage-fronted\dev`,
+	`D:\project\cx_project\china_mobile\chartityProject\gitSourceCode\charity-open-fronted\pc\yiqijuan`,
 }
 
-// CacheData 缓存数据结构
-type CacheData struct {
-	TotalCount int                         `json:"totalCount"`
-	LastUpdate time.Time                   `json:"lastUpdate"`
-	Mapping    map[string][]TargetFileInfo `json:"mapping"`
+// 忽略的目录和文件
+var IgnoreList = []string{
+	"node_modules",
+	".git",
+	".svn",
+	".idea",
+	".vscode",
+	"dist",
+	"build",
+	".DS_Store",
+	"Thumbs.db",
+	"*.log",
 }
 
 func main() {
-	// 1. 确定 BasePath
-	isHome := os.Getenv("IS_HOME") == "1"
-	var destBasePath string
-	if isHome {
-		destBasePath = `D:\job_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
-		CacheFileName = "image_path_map_home.json"
-	} else {
-		destBasePath = `D:\project\cx_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
-	}
-
-	fmt.Printf("当前环境: %v\n目标根目录: %s\n", isHome, destBasePath)
-
-	// 2. 检查并更新缓存
-	cache, err := ensureCache(destBasePath)
-	if err != nil {
-		fmt.Printf("缓存处理失败: %v\n", err)
+	// 确保输出目录存在
+	if err := os.MkdirAll(OutputDir, 0755); err != nil {
+		fmt.Printf("创建输出目录失败: %v\n", err)
 		return
 	}
 
-	// 3. 处理压缩图片
-	processCompressedImages(SourceDir, cache, destBasePath)
+	var wg sync.WaitGroup
+
+	for _, projectPath := range ProjectPaths {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			processProject(path)
+		}(projectPath)
+	}
+
+	wg.Wait()
+	fmt.Println("\n所有项目处理完成!")
 }
 
-// ensureCache 确保缓存是最新的
-func ensureCache(basePath string) (*CacheData, error) {
-	// 扫描当前目录获取图片总数
-	staticList:= []string{
-		"components/xdrsign/static",
-		"images/xdrNormal/202505",
-		"components/xdrInvite/static",
+func processProject(projectPath string) {
+	// 检查目录是否存在
+	info, err := os.Stat(projectPath)
+	if err != nil || !info.IsDir() {
+		fmt.Printf("❌ 目录不存在: %s\n", projectPath)
+		return
 	}
-	currentCount := 0
-	for _, subPath := range staticList {
-		fullPath := filepath.Join(basePath, subPath)
-		currentCount += countImages(fullPath)
-	}
-	fmt.Printf("当前目录图片总数: %d\n", currentCount)
 
-	// 尝试读取缓存
-	cache, err := loadCache()
-	if err == nil {
-		if cache.TotalCount == currentCount {
-			fmt.Println("缓存有效，直接使用")
-			return cache, nil
-		}
-		fmt.Printf("缓存过期 (缓存: %d, 实际: %d)，重新扫描...\n", cache.TotalCount, currentCount)
-	} else {
-		fmt.Println("缓存不存在或读取失败，开始扫描...")
+	// 查找有 package.json 的项目根目录
+	projectRoot := findProjectRoot(projectPath)
+	if projectRoot == "" {
+		fmt.Printf("⚠️  不是前端项目 (无package.json): %s\n", projectPath)
+		return
 	}
-    newCache := &CacheData{
-		Mapping: make(map[string][]TargetFileInfo),
-		TotalCount: 0,
+
+	// 生成 zip 文件名
+	zipName := generateZipName(projectRoot, projectPath)
+	zipPath := filepath.Join(OutputDir, zipName+".zip")
+
+	fmt.Printf("📦 开始打包: %s\n", projectPath)
+	fmt.Printf("   输出: %s\n", zipPath)
+
+	fmt.Printf("   项目根目录: %s\n", projectRoot)
+
+	// 创建 zip 文件
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		fmt.Printf("❌ 创建zip文件失败: %v\n", err)
+		return
 	}
-	// 重新构建缓存
-	for _, subPath := range staticList {
-		fullPath:= filepath.Join(basePath, subPath)
-		subCache := buildCache(fullPath)
-		// 合并子缓存
-		for k, v := range subCache.Mapping {
-			newCache.Mapping[k] = append(newCache.Mapping[k], v...)
-		}
-	}
-	newCache.TotalCount = currentCount // 确保计数一致
-	if err := saveCache(newCache); err != nil {
-		fmt.Printf("警告: 保存缓存失败: %v\n", err)
-	}
-	return newCache, nil
-}
-func isHashImageFileName(filename string) bool {
-	// afterGetEquityPop.88ade0f6.png
-	hashPattern := `\.[a-f0-9]{6,}\.(png|jpg|jpeg|gif)$`
-	isHashImg, _ := regexp.MatchString(hashPattern, filename)
-	return isHashImg
-}
-// countImages 快速计算图片数量
-func countImages(root string) int {
-	count := 0
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	defer zipFile.Close()
+
+	writer := zip.NewWriter(zipFile)
+	defer writer.Close()
+
+	// 统计
+	fileCount := 0
+
+	// 遍历项目目录
+	err = filepath.Walk(projectRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
 			return nil
 		}
-		// is hash 1.2a351e.png
-		
-		if isImage(path) && !isHashImageFileName(info.Name()) {
-			count++
+
+		// 获取相对路径
+		relPath, _ := filepath.Rel(projectRoot, path)
+		if relPath == "." {
+			return nil
 		}
+
+		// 检查是否应该忽略
+		if shouldIgnore(path, info) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// 如果是目录，跳过（zip 会自动创建目录结构）
+		if info.IsDir() {
+			return nil
+		}
+
+		// 添加文件到 zip
+		if err := addFileToZip(writer, path, relPath); err != nil {
+			fmt.Printf("   ⚠️  跳过文件 %s: %v\n", relPath, err)
+			return nil
+		}
+
+		fileCount++
+		if fileCount%100 == 0 {
+			fmt.Printf("   已处理 %d 个文件...\n", fileCount)
+		}
+
 		return nil
 	})
-	return count
-}
 
-// buildCache 构建路径映射
-func buildCache(root string) *CacheData {
-	mapping := make(map[string][]TargetFileInfo)
-	count := 0
-
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		if !isImage(path) || isHashImageFileName(info.Name()) {
-			return nil
-		}
-
-		count++
-		width, height := getImageDimensions(path)
-		
-		fileInfo := TargetFileInfo{
-			Path:   path,
-			Width:  width,
-			Height: height,
-			Size:   info.Size(),
-		}
-
-		filename := info.Name()
-		mapping[filename] = append(mapping[filename], fileInfo)
-		
-		if count%100 == 0 {
-			fmt.Printf("\r已扫描: %d", count)
-		}
-		return nil
-	})
-	fmt.Println()
-
-	return &CacheData{
-		TotalCount: count,
-		LastUpdate: time.Now(),
-		Mapping:    mapping,
-	}
-}
-
-// processCompressedImages 处理源目录下的图片
-func processCompressedImages(sourceDir string, cache *CacheData, destBasePath string) {
-	files, err := os.ReadDir(sourceDir)
 	if err != nil {
-		fmt.Printf("读取源目录失败: %v\n", err)
+		fmt.Printf("❌ 打包失败: %v\n", err)
 		return
 	}
 
-	fmt.Println("开始处理图片移动...")
-	for _, file := range files {
-		if file.IsDir() || !isImage(file.Name()) {
-			continue
-		}
+	// 获取 zip 文件大小
+	zipInfo, _ := os.Stat(zipPath)
+	sizeMB := float64(zipInfo.Size()) / 1024 / 1024
 
-		sourcePath := filepath.Join(sourceDir, file.Name())
-		width, height := getImageDimensions(sourcePath)
-		sourceSize, _ := getFileSize(sourcePath)
-
-		candidates, ok := cache.Mapping[file.Name()]
-		if !ok {
-			fmt.Printf("❌ 未找到目标: %s\n", file.Name())
-			continue
-		}
-
-		// 筛选匹配的候选文件
-		var matched []TargetFileInfo
-		// 1. 优先匹配宽高
-		for _, c := range candidates {
-			if c.Width == width && c.Height == height {
-				matched = append(matched, c)
-			}
-		}
-		// matched
-		fmt.Printf("🔍 处理: %s (Size: %d, %dx%d), 候选数: %d, 匹配数: %d\n", file.Name(), sourceSize, width, height, len(candidates), len(matched))
-
-		targetPath := ""
-		if len(matched) == 1 {
-			targetPath = matched[0].Path
-		} else if len(matched) > 1 {
-			// 尝试通过大小进一步区分（仅当源文件和目标文件大小时）
-			fmt.Printf("⚠️  存在歧义 (%d 个匹配): %s (Size: %d, %dx%d)\n", len(matched), file.Name(), sourceSize, width, height)
-			for _, m := range matched {
-				fmt.Printf("   - 候选: %s (Size: %d, %dx%d)\n", m.Path, m.Size, m.Width, m.Height)
-			}
-			// 简单的策略：如果无法区分，跳过
-			continue
-		} else {
-			// 宽高都不匹配
-			// 尝试回退到文件名匹配（如果有且仅有一个同名文件）
-			if len(candidates) == 1 {
-				fmt.Printf("⚠️  宽高不匹配但仅有一个同名文件，强制匹配: %s\n", file.Name())
-				targetPath = candidates[0].Path
-			} else {
-				fmt.Printf("❌ 宽高不匹配且有多个同名文件: %s\n", file.Name())
-				continue
-			}
-		}
-
-		if targetPath != "" {
-			err := moveFile(sourcePath, targetPath)
-			if err != nil {
-				fmt.Printf("❌ 移动失败 %s -> %s: %v\n", file.Name(), targetPath, err)
-			} else {
-				fmt.Printf("✅ 移动成功: %s -> %s\n", file.Name(), targetPath)
-				// 新增：更新对应 CSS
-				updateCSSAfterMove(targetPath, width, height, destBasePath)
-			}
-		}
-	}
+	fmt.Printf("✅ 打包完成: %s -> %s\n", projectPath, zipName)
+	fmt.Printf("   文件数: %d, 大小: %.2f MB\n", fileCount, sizeMB)
 }
 
-// updateCSSAfterMove 更新 CSS 中的 rem 值
-func updateCSSAfterMove(imagePath string, width, height int, basePath string) {
-	cssPath := getCSSPath(imagePath, basePath)
-	if cssPath == "" {
-		return
+func findProjectRoot(dir string) string {
+	// 先检查当前目录
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		return dir
 	}
 
-	content, err := os.ReadFile(cssPath)
-	if err != nil {
-		fmt.Printf("  ⚠️  读取CSS失败 %s: %v\n", cssPath, err)
-		return
+	// 向上查找父目录
+	parent := filepath.Dir(dir)
+	if parent == dir {
+		return "" // 已到根目录
 	}
 
-	lines := strings.Split(string(content), "\n")
-	filename := filepath.Base(imagePath)
-	remBase:=200.0
-	newWidthRem := fmt.Sprintf("%.2frem", float64(width)/remBase)
-	newHeightRem := fmt.Sprintf("%.2frem", float64(height)/remBase)
-
-	reWidth := regexp.MustCompile(`(width\s*:\s*)([\d\.]+)rem`)
-	reHeight := regexp.MustCompile(`(height\s*:\s*)([\d\.]+)rem`)
-
-	updated := false
-	for i, line := range lines {
-		if strings.Contains(line, filename) {
-			// 找到文件名所在行，向上向下各搜索 10 行（通常在一个样式块内）
-			start := i - 10
-			if start < 0 {
-				start = 0
-			}
-			end := i + 10
-			if end >= len(lines) {
-				end = len(lines) - 1
-			}
-
-			for j := start; j <= end; j++ {
-				// 检查该范围内是否包含 width 或 height
-				if reWidth.MatchString(lines[j]) {
-					lines[j] = reWidth.ReplaceAllString(lines[j], `${1}`+newWidthRem)
-					updated = true
-				}
-				if reHeight.MatchString(lines[j]) {
-					lines[j] = reHeight.ReplaceAllString(lines[j], `${1}`+newHeightRem)
-					updated = true
-				}
-				// 如果遇到闭合括号，说明样式块结束，可提前停止当前范围搜索（可选）
-				if strings.Contains(lines[j], "}") && j > i {
-					break
-				}
-			}
-		}
+	// 检查父目录
+	if _, err := os.Stat(filepath.Join(parent, "package.json")); err == nil {
+		return parent
 	}
 
-	if updated {
-		newContent := strings.Join(lines, "\n")
-		if err := os.WriteFile(cssPath, []byte(newContent), 0644); err != nil {
-			fmt.Printf("  ❌ 更新CSS写入失败: %v\n", err)
-		} else {
-			fmt.Printf("  ✨ 已根据行定位更新 CSS: %s (w:%d, h:%d)\n", filepath.Base(cssPath), width, height)
-		}
-	} else {
-		fmt.Printf("  ❓ 在 CSS 中未找到 %s 相关的宽高定义\n", filename)
-	}
-}
-
-// getCSSPath 根据图片路径获取 CSS 路径
-func getCSSPath(imagePath, basePath string) string {
-	relPath, _ := filepath.Rel(basePath, imagePath)
-	relPath = filepath.ToSlash(relPath)
-
-	mapping := map[string]string{
-		"components/xdrsign/static":   "components/xdrsign/index.css",
-		"components/xdrInvite/static": "components/xdrInvite/index.css",
-		"images/xdrNormal/202505":     "css/xdrNormal.css",
-	}
-
-	for dir, css := range mapping {
-		if strings.HasPrefix(relPath, dir) {
-			return filepath.Join(basePath, css)
-		}
-	}
 	return ""
 }
 
-// 辅助函数
+func generateZipName(projectRoot, projectPath string) string {
+	// 获取 projectPath 相对于 projectRoot 的子路径
+	relPath, err := filepath.Rel(projectRoot, projectPath)
+	if err != nil || relPath == "." {
+		// projectPath 就是 projectRoot，使用项目目录名
+		relPath = filepath.Base(projectRoot)
+	}
 
-func isImage(filename string) bool {
-	ext := strings.ToLower(filepath.Ext(filename))
-	return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif"
+	// 将子路径按分隔符分割
+	parts := strings.Split(relPath, string(filepath.Separator))
+
+	// 如果子路径只有一级，需要加上父目录名来区分
+	// 例如: charity-manage-fronted\dev -> manageDev
+	if len(parts) <= 1 {
+		// 获取 projectRoot 的父目录名
+		parentDir := filepath.Base(filepath.Dir(projectRoot))
+		parentParts := strings.FieldsFunc(parentDir, func(r rune) bool {
+			return r == '-' || r == '_' || r == ' '
+		})
+
+		// 取最后1-2个有意义的词
+		if len(parentParts) > 2 {
+			parentParts = parentParts[len(parentParts)-2:]
+		}
+
+		// 转换为驼峰并加入
+		for _, p := range parentParts {
+			p = strings.ToLower(p)
+			if p != "charity" && p != "fronted" && p != "open" && p != "manage" {
+				parts = append([]string{p}, parts...)
+			}
+		}
+
+		// 如果还是只有原始目录名，加上 "manage" 或 "open" 前缀
+		if len(parts) == 1 {
+			if strings.Contains(projectRoot, "manage") {
+				parts = append([]string{"manage"}, parts...)
+			} else if strings.Contains(projectRoot, "open") {
+				// 不加前缀，保持原样
+			}
+		}
+	}
+
+	// 转换为驼峰命名
+	var camelParts []string
+	for _, part := range parts {
+		if part != "." && part != "" {
+			camelParts = append(camelParts, toCamelCase(part))
+		}
+	}
+
+	// 拼接并首字母小写
+	result := strings.Join(camelParts, "")
+	if len(result) > 0 {
+		runes := []rune(result)
+		runes[0] = unicode.ToLower(runes[0])
+		result = string(runes)
+	}
+
+	return result
 }
 
-func getImageDimensions(path string) (int, int) {
-	file, err := os.Open(path)
-	if err != nil {
-		return 0, 0
-	}
-	defer file.Close()
+func toCamelCase(s string) string {
+	// 按连字符、下划线、空格分割
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == '-' || r == '_' || r == ' '
+	})
 
-	config, _, err := image.DecodeConfig(file)
-	if err != nil {
-		return 0, 0
+	var result strings.Builder
+	for _, part := range parts {
+		if len(part) == 0 {
+			continue
+		}
+		// 首字母大写
+		runes := []rune(part)
+		runes[0] = unicode.ToUpper(runes[0])
+		result.WriteString(string(runes))
 	}
-	return config.Width, config.Height
+
+	return result.String()
 }
 
-func getFileSize(path string) (int64, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, err
+func shouldIgnore(path string, info os.FileInfo) bool {
+	name := info.Name()
+
+	for _, ignore := range IgnoreList {
+		// 检查通配符
+		if strings.HasPrefix(ignore, "*") {
+			suffix := ignore[1:]
+			if strings.HasSuffix(name, suffix) {
+				return true
+			}
+			continue
+		}
+
+		// 精确匹配目录名或文件名
+		if name == ignore {
+			return true
+		}
 	}
-	return info.Size(), nil
+
+	return false
 }
 
-func loadCache() (*CacheData, error) {
-	file, err := os.Open(CacheFileName)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var data CacheData
-	if err := json.NewDecoder(file).Decode(&data); err != nil {
-		return nil, err
-	}
-	return &data, nil
-}
-
-func saveCache(data *CacheData) error {
-	file, err := os.Create(CacheFileName)
+func addFileToZip(zipWriter *zip.Writer, filePath, relPath string) error {
+	// 打开文件
+	file, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(data)
-}
-
-func moveFile(src, dst string) error {
-	// 跨盘符移动需要 Copy + Remove
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer destFile.Close()
-
-	_, err = io.Copy(destFile, sourceFile)
+	// 获取文件信息
+	info, err := file.Stat()
 	if err != nil {
 		return err
 	}
 
-	// 关闭文件后删除源文件
-	sourceFile.Close()
-	destFile.Close()
-	
-	return os.Remove(src)
+	// 创建 zip 文件头
+	header, err := zip.FileInfoHeader(info)
+	if err != nil {
+		return err
+	}
+
+	// 使用相对路径
+	header.Name = filepath.ToSlash(relPath)
+	header.Method = zip.Deflate
+
+	// 创建 writer
+	writer, err := zipWriter.CreateHeader(header)
+	if err != nil {
+		return err
+	}
+
+	// 复制文件内容
+	buf := make([]byte, 32*1024) // 32KB buffer
+	for {
+		n, readErr := file.Read(buf)
+		if n > 0 {
+			if _, werr := writer.Write(buf[:n]); werr != nil {
+				return werr
+			}
+		}
+		if readErr != nil {
+			if readErr.Error() == "EOF" {
+				return nil
+			}
+			return readErr
+		}
+	}
 }

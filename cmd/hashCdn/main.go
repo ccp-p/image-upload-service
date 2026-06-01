@@ -34,6 +34,7 @@ type Config struct {
     ReplaceAllWithCDN bool     `json:"replaceAllWithCDN"` // 替换所有资源为CDN路径
     // 新增：部署相关配置
     RollbackAfterDeploy bool   `json:"rollbackAfterDeploy"` // 部署后回滚HTML
+    GitCommitAfterRollback bool `json:"gitCommitAfterRollback"` // 回滚后执行git commit和push
     CDNExcludeFiles []string   `json:"cdnExcludeFiles"`     // CDN替换排除的文件列表
     Deploy          DeployConfig `json:"deploy"`            // 部署配置
 }
@@ -1992,8 +1993,13 @@ func (vm *VersionManager) runDeploy() {
     // 回滚HTML文件
     if vm.config.RollbackAfterDeploy && vm.config.SingleHTMLFile != "" {
         vm.rollbackHTMLFile(vm.config.SingleHTMLFile)
+
+        // 如果设置了回滚后git commit和push
+        if vm.config.GitCommitAfterRollback {
+            vm.gitCommitAndPushAfterRollback(vm.config.SingleHTMLFile)
+        }
     }
-    
+
     // 更新folderOpened状态
     vm.folderOpened = dm.folderOpened
 }
@@ -2070,6 +2076,101 @@ func (vm *VersionManager) rollbackHTMLFile(htmlPath string) error {
 
 	fmt.Printf("\n✅ HTML文件已回滚到CDN替换前的状态\n")
 	return nil
+}
+
+// gitCommitAndPushAfterRollback 在回滚HTML后执行全量git commit和push
+func (vm *VersionManager) gitCommitAndPushAfterRollback(htmlPath string) error {
+	absPath, _ := filepath.Abs(htmlPath)
+	dir := filepath.Dir(absPath)
+
+	fmt.Printf("\n🔄 正在执行Git提交和推送...\n")
+	fmt.Printf("  📂 工作目录: %s\n", dir)
+
+	// 检查git是否存在
+	if _, err := exec.LookPath("git"); err != nil {
+		fmt.Printf("⚠️  未找到git命令，跳过提交\n")
+		return nil
+	}
+
+	// 1. 获取最新的git commit hash作为提交信息
+	hash, _, err := vm.getLatestGitCommitForRollback(dir)
+	if err != nil {
+		fmt.Printf("⚠️  获取Git提交信息失败: %v\n", err)
+		// 使用时间戳作为备选提交信息
+		hash = time.Now().Format("20060102150405")
+	}
+
+	// 2. 执行 git add -A (全量添加)
+	fmt.Printf("  📁 执行 git add -A...\n")
+	addCmd := exec.Command("git", "add", "-A")
+	addCmd.Dir = dir
+	if output, err := addCmd.CombinedOutput(); err != nil {
+		fmt.Printf("❌ Git add 失败: %v\n", err)
+		fmt.Printf("   Output: %s\n", string(output))
+		return err
+	}
+
+	// 3. 检查是否有变更需要提交
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = dir
+	statusOutput, err := statusCmd.Output()
+	if err != nil {
+		fmt.Printf("❌ 获取Git状态失败: %v\n", err)
+		return err
+	}
+
+	if strings.TrimSpace(string(statusOutput)) == "" {
+		fmt.Printf("  ℹ️  没有变更需要提交\n")
+		return nil
+	}
+
+	// 4. 执行 git commit
+	fmt.Printf("  📝 执行 git commit -m \"%s\"...\n", hash)
+	commitCmd := exec.Command("git", "commit", "-m", hash)
+	commitCmd.Dir = dir
+	if output, err := commitCmd.CombinedOutput(); err != nil {
+		fmt.Printf("❌ Git commit 失败: %v\n", err)
+		fmt.Printf("   Output: %s\n", string(output))
+		return err
+	}
+	fmt.Printf("  ✅ Git commit 成功\n")
+
+	// 5. 执行 git push
+	fmt.Printf("  🚀 执行 git push...\n")
+	pushCmd := exec.Command("git", "push")
+	pushCmd.Dir = dir
+	pushCmd.Stdout = os.Stdout
+	pushCmd.Stderr = os.Stderr
+	if err := pushCmd.Run(); err != nil {
+		fmt.Printf("❌ Git push 失败: %v\n", err)
+		return err
+	}
+	fmt.Printf("  ✅ Git push 成功\n")
+
+	fmt.Printf("\n🎉 Git提交和推送完成！\n")
+	return nil
+}
+
+// getLatestGitCommitForRollback 获取指定目录的最新git提交hash
+func (vm *VersionManager) getLatestGitCommitForRollback(dir string) (string, string, error) {
+	if !isGitRepo(dir) {
+		return "", "", fmt.Errorf("目录不是Git仓库: %s", dir)
+	}
+
+	cmd := exec.Command("git", "log", "-1", "--pretty=format:%h|%s")
+	cmd.Dir = dir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", err
+	}
+
+	parts := strings.SplitN(string(output), "|", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("无法解析Git提交信息")
+	}
+
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
 }
 
 // openFolder 打开文件夹（避免重复打开）
@@ -2168,7 +2269,7 @@ func main() {
     debugMode := flag.Bool("debug", false, "调试模式（显示详细日志）")
     deployOnly := flag.Bool("deploy", false, "仅执行部署（不处理hash）")
     deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
-    deployMode := flag.Int("mode", 0, "部署模式：1=copy, 2=copy-commit, 3=pre-script+copy, 4=pre-script+copy-commit, 5=不替换CDN+copy, 6=不替换CDN+copy-commit")
+    deployMode := flag.Int("mode", 0, "部署模式：1=copy, 2=copy-commit, 3=pre-script+copy, 4=pre-script+copy-commit, 5=不替换CDN+copy, 6=不替换CDN+copy-commit, 7=不替换CDN+copy-commit+回滚HTML+git commit&push")
     
     flag.Parse()
     
@@ -2217,6 +2318,13 @@ func main() {
             config.Deploy.ForcePreScript = false
             config.Deploy.Command = "copy-commit"
             config.CDNDomain = "" // 不替换CDN
+        case 7:
+            config.Deploy.AutoCommit = true
+            config.Deploy.ForcePreScript = false
+            config.Deploy.Command = "copy-commit"
+            config.CDNDomain = "" // 不替换CDN
+            config.RollbackAfterDeploy = true // 回滚HTML
+            config.GitCommitAfterRollback = true // 回滚后执行git commit和push
         }
     }
     
