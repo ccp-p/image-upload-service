@@ -2135,7 +2135,18 @@ func (vm *VersionManager) gitCommitAndPushAfterRollback(htmlPath string) error {
 	}
 	fmt.Printf("  ✅ Git commit 成功\n")
 
-	// 5. 执行 git push
+	// 5. 执行 git pull --rebase 同步远程更改
+	fmt.Printf("  🔄 执行 git pull --rebase 同步远程更改...\n")
+	pullCmd := exec.Command("git", "pull", "--rebase")
+	pullCmd.Dir = dir
+	pullCmd.Stdout = os.Stdout
+	pullCmd.Stderr = os.Stderr
+	if err := pullCmd.Run(); err != nil {
+		fmt.Printf("⚠️  Git pull 失败: %v\n", err)
+		fmt.Printf("   继续尝试推送...\n")
+	}
+
+	// 6. 执行 git push
 	fmt.Printf("  🚀 执行 git push...\n")
 	pushCmd := exec.Command("git", "push")
 	pushCmd.Dir = dir
