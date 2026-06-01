@@ -34,13 +34,14 @@ if not exist "version.config.json" (
 
 echo.
 echo 请选择部署模式:
-echo [1] 默认的 copy
-echo [2] copy-commit (自动提交svn)
-echo [3] 执行前置脚本，然后 copy
-echo [4] 执行前置脚本，然后 copy-commit
-echo [5] 保持相对路径(不替换CDN)，然后 copy
-echo [6] 保持相对路径(不替换CDN)，然后 copy-commit
-echo [7] 保持相对路径(不替换CDN)，然后 copy-commit，提交git
+REM [1] 默认的 copy
+REM [2] copy-commit (自动提交svn)
+echo [1] 执行前置脚本，然后 copy
+echo [2] 执行前置脚本，然后 copy-commit
+echo [3] 执行前置脚本，然后 copy-commit，提交git (HTML回滚后)
+echo [4] 保持相对路径(不替换CDN)，然后 copy
+echo [5] 保持相对路径(不替换CDN)，然后 copy-commit
+echo [6] 保持相对路径(不替换CDN)，然后 copy-commit，提交git
 echo.
 
 set /p mode_input="请输入对应的数字 (默认=1): "
