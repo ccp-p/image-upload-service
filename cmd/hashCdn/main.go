@@ -217,30 +217,32 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
     if vm.debugMode {
         fmt.Printf("  🔍 查找旧hash文件: %s%s (当前hash: %s)\n", basename, ext, currentHash)
     }
-    
+
     pattern := fmt.Sprintf(`^%s\.[a-f0-9]{8}%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext))
     re := regexp.MustCompile(pattern)
-    
+
     files, err := os.ReadDir(dir)
     if err != nil {
         return err
     }
-    
+
     var deletedCount int
     for _, file := range files {
         if !file.IsDir() {
             filename := file.Name()
-            
+
             if re.MatchString(filename) {
                 expectedPattern := fmt.Sprintf(`^%s\.([a-f0-9]{8})%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext))
                 hashRe := regexp.MustCompile(expectedPattern)
                 hashMatches := hashRe.FindStringSubmatch(filename)
-                
+
                 if len(hashMatches) >= 2 {
                     extractedHash := hashMatches[1]
-                    
+
                     if extractedHash != currentHash {
                         oldFilePath := filepath.Join(dir, filename)
+                        // 先通知SVN删除，再删除本地文件
+                        vm.svnDeleteFile(oldFilePath)
                         if err := os.Remove(oldFilePath); err != nil {
                             fmt.Printf("    ⚠️  删除失败: %s\n", filename)
                         } else {
@@ -252,12 +254,36 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
             }
         }
     }
-    
+
     if vm.debugMode && deletedCount > 0 {
         fmt.Printf("  ✅ 共删除 %d 个旧文件\n", deletedCount)
     }
-    
+
     return nil
+}
+
+// svnDeleteFile 通知SVN删除文件（如果在SVN仓库中）
+func (vm *VersionManager) svnDeleteFile(filePath string) {
+    if _, err := exec.LookPath("svn"); err != nil {
+        return
+    }
+
+    dir := filepath.Dir(filePath)
+    filename := filepath.Base(filePath)
+
+    cmd := exec.Command("svn", "delete", "--keep-local", filename)
+    cmd.Dir = dir
+
+    if output, err := cmd.CombinedOutput(); err != nil {
+        if vm.debugMode {
+            fmt.Printf("      ⚠️  SVN delete 失败: %s (%v)\n", filename, err)
+            fmt.Printf("      Output: %s\n", string(output))
+        }
+    } else {
+        if vm.debugMode {
+            fmt.Printf("    📝 SVN delete: %s\n", filename)
+        }
+    }
 }
 // processHTMLFile 处理单个HTML文件及其关联资源
 func (vm *VersionManager) processHTMLFile(htmlPath string) error {
@@ -1502,33 +1528,59 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
     destFileName := filepath.Base(destPath)
     ext := filepath.Ext(destFileName)
     basename := strings.TrimSuffix(destFileName, ext)
-    
+
     if !fileExists(destDir) {
         return 0
     }
-    
+
     files, err := os.ReadDir(destDir)
     if err != nil {
         return 0
     }
-    
+
     hashPattern := regexp.MustCompile(fmt.Sprintf(`^%s\.[a-zA-Z0-9]+%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext)))
-    
+
     deletedCount := 0
     for _, file := range files {
         if file.Name() == destFileName || file.Name() == keepFileName {
             continue
         }
-        
+
         if hashPattern.MatchString(file.Name()) {
             filePath := filepath.Join(destDir, file.Name())
+            // 先通知SVN删除，再删除本地文件
+            dm.svnDeleteFile(filePath)
             if err := os.Remove(filePath); err == nil {
                 deletedCount++
             }
         }
     }
-    
+
     return deletedCount
+}
+
+// svnDeleteFile 通知SVN删除文件（如果在SVN仓库中）
+func (dm *DeployManager) svnDeleteFile(filePath string) {
+    if _, err := exec.LookPath("svn"); err != nil {
+        return
+    }
+
+    dir := filepath.Dir(filePath)
+    filename := filepath.Base(filePath)
+
+    cmd := exec.Command("svn", "delete", "--keep-local", filename)
+    cmd.Dir = dir
+
+    if output, err := cmd.CombinedOutput(); err != nil {
+        if dm.debugMode {
+            fmt.Printf("      ⚠️  SVN delete 失败: %s (%v)\n", filename, err)
+            fmt.Printf("      Output: %s\n", string(output))
+        }
+    } else {
+        if dm.debugMode {
+            fmt.Printf("    📝 SVN delete: %s\n", filename)
+        }
+    }
 }
 
 // copyFileWithVersions 复制文件（包括hash版本）
