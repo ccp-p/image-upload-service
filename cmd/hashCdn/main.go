@@ -2160,6 +2160,7 @@ func (vm *VersionManager) gitCommitAndPushAfterRollback(htmlPath string) error {
 		// 使用时间戳作为备选提交信息
 		hash = time.Now().Format("20060102150405")
 	}
+    hash = "hash化"
 
 	// 2. 执行 git add -A (全量添加)
 	fmt.Printf("  📁 执行 git add -A...\n")
