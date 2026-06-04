@@ -1871,7 +1871,7 @@ func (dm *DeployManager) openFolder() {
 }
 
 // Run 执行部署
-func (dm *DeployManager) Run(autoCommit bool, htmlPath string, cdnDomain string) error {
+func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath string, cdnDomain string) error {
     fmt.Println("🚀 开始部署操作...")
     fmt.Printf("📂 源路径: %s\n", dm.sourcePath)
     fmt.Printf("📂 目标路径: %s\n\n", dm.destPath)
@@ -1952,21 +1952,30 @@ func (dm *DeployManager) Run(autoCommit bool, htmlPath string, cdnDomain string)
     
     // 自动提交
     if autoCommit && isSvnRepo(dm.destPath) {
-        hash, message, err := dm.getLatestGitCommit()
-        if err != nil {
-            fmt.Printf("⚠️  获取Git提交信息失败: %v\n", err)
-            fmt.Println("💡 请手动提交SVN更改")
+        svnMessage := ""
+        if commitMessage != "" {
+            // 使用自定义提交信息
+            svnMessage = commitMessage
+            fmt.Printf("\n📝 使用自定义提交信息: %s\n", svnMessage)
         } else {
-            svnMessage := message
-            fmt.Printf("\n📝 Git提交: %s - %s\n", hash, message)
-            fmt.Println("⏳ 2秒后开始提交...")
-            time.Sleep(2 * time.Second)
-            
-            if err := dm.svnCommit(svnMessage); err != nil {
-                fmt.Printf("❌ 自动提交失败: %v\n", err)
-            } else {
-                fmt.Println("🎉 自动提交完成！")
+            // 使用Git最新提交信息
+            hash, message, err := dm.getLatestGitCommit()
+            if err != nil {
+                fmt.Printf("⚠️  获取Git提交信息失败: %v\n", err)
+                fmt.Println("💡 请手动提交SVN更改")
+                return nil
             }
+            svnMessage = message
+            fmt.Printf("\n📝 Git提交: %s - %s\n", hash, message)
+        }
+
+        fmt.Println("⏳ 2秒后开始提交...")
+        time.Sleep(2 * time.Second)
+
+        if err := dm.svnCommit(svnMessage); err != nil {
+            fmt.Printf("❌ 自动提交失败: %v\n", err)
+        } else {
+            fmt.Println("🎉 自动提交完成！")
         }
     }
     
@@ -2036,8 +2045,8 @@ func (vm *VersionManager) runDeploy() {
     if vm.config.Deploy.Command == "copy-commit" {
         autoCommit = true
     }
-    
-    if err := dm.Run(autoCommit, vm.config.SingleHTMLFile, vm.config.CDNDomain); err != nil {
+
+    if err := dm.Run(autoCommit, "", vm.config.SingleHTMLFile, vm.config.CDNDomain); err != nil {
         fmt.Printf("❌ 部署失败: %v\n", err)
         return
     }
@@ -2333,7 +2342,8 @@ func main() {
     deployOnly := flag.Bool("deploy", false, "仅执行部署（不处理hash）")
     deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
     deployMode := flag.Int("mode", 0, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push")
-    
+    commitMessage := flag.String("message", "", "自定义SVN提交信息（不指定则使用Git最新提交信息）")
+
     flag.Parse()
     
     config, err := loadConfig(*configPath)
@@ -2401,8 +2411,8 @@ func main() {
         
         dm := NewDeployManager(config.Deploy, *debugMode)
         autoCommit := *deployCommit || config.Deploy.AutoCommit || config.Deploy.Command == "copy-commit"
-        
-        if err := dm.Run(autoCommit, vm.config.SingleHTMLFile, vm.config.CDNDomain); err != nil {
+
+        if err := dm.Run(autoCommit, *commitMessage, vm.config.SingleHTMLFile, vm.config.CDNDomain); err != nil {
             fmt.Printf("❌ 部署失败: %v\n", err)
             os.Exit(1)
         }

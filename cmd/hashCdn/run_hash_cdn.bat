@@ -47,12 +47,26 @@ echo.
 set /p mode_input="请输入对应的数字 (默认=1): "
 if "%mode_input%"=="" set mode_input=1
 
+set "message_flag="
+REM 模式 2/3/5/6 涉及自动提交，提示用户输入自定义提交信息
+if "%mode_input%"=="2" goto ask_message
+if "%mode_input%"=="3" goto ask_message
+if "%mode_input%"=="5" goto ask_message
+if "%mode_input%"=="6" goto ask_message
+goto run
+
+:ask_message
+set /p custom_message="请输入提交信息 (留空则使用Git最新提交信息): "
+if not "%custom_message%"=="" set message_flag=-message "%custom_message%"
+goto run
+
+:run
 echo.
 echo [信息] 读取配置文件: version.config.json，使用模式: %mode_input%
 echo.
 
 REM 运行程序
-go run main.go -config=version.config.json -mode=%mode_input%
+go run main.go -config=version.config.json -mode=%mode_input% %message_flag%
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
