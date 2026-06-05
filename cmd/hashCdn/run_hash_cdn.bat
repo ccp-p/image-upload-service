@@ -63,6 +63,10 @@ goto run
 :run
 echo.
 echo [信息] 读取配置文件: version.config.json，使用模式: %mode_input%
+echo [调试] mode_input = "%mode_input%"
+echo [调试] custom_message = "%custom_message%"
+echo [调试] message_flag = "%message_flag%"
+echo [调试] 完整命令: go run main.go -config=version.config.json -mode=%mode_input% %message_flag%
 echo.
 
 REM 运行程序
