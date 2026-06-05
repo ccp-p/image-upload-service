@@ -61,6 +61,7 @@ type VersionManager struct {
     mu             sync.Mutex
     debugMode      bool
     folderOpened   bool // 记录文件夹是否已打开
+    commitMessage  string // 自定义提交信息
 }
 
 // FileInfo 文件信息
@@ -2034,19 +2035,25 @@ func (vm *VersionManager) runDeploy() {
     if !vm.config.Deploy.Enabled {
         return
     }
-    
+
     fmt.Println("\n" + strings.Repeat("=", 60))
     fmt.Println("🚀 开始部署流程")
     fmt.Println(strings.Repeat("=", 60))
-    
+
     dm := NewDeployManager(vm.config.Deploy, vm.debugMode)
-    
+
     autoCommit := vm.config.Deploy.AutoCommit
     if vm.config.Deploy.Command == "copy-commit" {
         autoCommit = true
     }
 
-    if err := dm.Run(autoCommit, "", vm.config.SingleHTMLFile, vm.config.CDNDomain); err != nil {
+    // 使用自定义提交信息（如果有）
+    commitMsg := vm.commitMessage
+    if commitMsg != "" {
+        fmt.Printf("📝 使用自定义提交信息: %s\n", commitMsg)
+    }
+
+    if err := dm.Run(autoCommit, commitMsg, vm.config.SingleHTMLFile, vm.config.CDNDomain); err != nil {
         fmt.Printf("❌ 部署失败: %v\n", err)
         return
     }
@@ -2401,8 +2408,12 @@ func main() {
     }
     
     vm := NewVersionManager(*config, *debugMode)
-    
-    
+
+    // 设置自定义提交信息
+    if *commitMessage != "" {
+        vm.commitMessage = *commitMessage
+    }
+
     // 仅部署模式
     if *deployOnly || *deployCommit {
         if !config.Deploy.Enabled {
