@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,41 @@ import (
 	"sync"
 	"time"
 )
+
+// 包级正则：编译一次，全局复用
+var (
+	reHashInFilename = regexp.MustCompile(`^(.+)\.([a-f0-9]{8})\.(css|js|jpg|jpeg|png|gif|svg|webp|ico)$`)
+	reOldHashSuffix  = regexp.MustCompile(`\.[a-f0-9]{8}$`)
+	reCSSUrlCollect  = regexp.MustCompile(`url\(['"]?([^'")\s]+)['"]?\)`)
+	reCSSUrlReplace  = regexp.MustCompile(`url\(\s*(['"]?)([^'")\s]+)(['"]?)\s*\)`)
+	reHTMLCSSLink    = regexp.MustCompile(`<link[^>]*href\s*=\s*['"]([^'"]+\.css)['"]`)
+	reHTMLJSScript   = regexp.MustCompile(`<script[^>]*src\s*=\s*['"]([^'"]+\.js)['"]`)
+	reHTMLComment    = regexp.MustCompile(`(?s)<!--.*?-->`)
+
+	// CDN 全局替换用的正则（编译一次）
+	reCDNCSS = regexp.MustCompile(`(<link[^>]*href\s*=\s*['"])([^'"]+)(['"][^>]*>)`)
+	reCDNJS  = regexp.MustCompile(`(<script[^>]*src\s*=\s*['"])([^'"]+)(['"][^>]*>)`)
+
+	// 动态正则缓存：避免同一 pattern 重复编译
+	regexCache sync.Map
+)
+
+// getRegex 从缓存获取编译好的正则，未命中则编译并缓存
+func getRegex(pattern string) *regexp.Regexp {
+	if v, ok := regexCache.Load(pattern); ok {
+		return v.(*regexp.Regexp)
+	}
+	re := regexp.MustCompile(pattern)
+	regexCache.Store(pattern, re)
+	return re
+}
+
+// logf 统一的日志输出，非 debug 模式下静默
+func (vm *VersionManager) logf(format string, args ...interface{}) {
+	if vm.debugMode {
+		fmt.Printf(format, args...)
+	}
+}
 
 // Config 配置结构
 type Config struct {
@@ -57,11 +93,12 @@ type DeployConfig struct {
 // VersionManager 版本管理器
 type VersionManager struct {
     config         Config
-    processedFiles map[string]bool
+    processedFiles map[string]string // key=文件路径, value=hash值（缓存避免重复计算）
     mu             sync.Mutex
     debugMode      bool
     folderOpened   bool // 记录文件夹是否已打开
     commitMessage  string // 自定义提交信息
+    excludeMap     map[string]struct{} // 预构建的 CDN 排除文件 map
 }
 
 // FileInfo 文件信息
@@ -81,12 +118,18 @@ type ImageReference struct {
 
 // NewVersionManager 创建版本管理器
 func NewVersionManager(config Config, debugMode bool) *VersionManager {
-    return &VersionManager{
+    vm := &VersionManager{
         config:         config,
-        processedFiles: make(map[string]bool),
+        processedFiles: make(map[string]string),
         debugMode:      debugMode,
         folderOpened:   false,
+        excludeMap:     make(map[string]struct{}, len(config.CDNExcludeFiles)),
     }
+    // 预构建 CDN 排除文件 map
+    for _, f := range config.CDNExcludeFiles {
+        vm.excludeMap[f] = struct{}{}
+    }
+    return vm
 }
 
 // gitAddFile 执行 git add 命令
@@ -190,14 +233,10 @@ func (vm *VersionManager) calculateFileHash(filePath string) (string, error) {
 
 // removeHashFromFilename 从文件名中移除hash
 func (vm *VersionManager) removeHashFromFilename(filename string) string {
-    // 匹配格式: filename.hash.ext
-    re := regexp.MustCompile(`^(.+)\.([a-f0-9]{8})\.(css|js|jpg|jpeg|png|gif|svg|webp|ico)$`)
-    matches := re.FindStringSubmatch(filename)
-    
+    matches := reHashInFilename.FindStringSubmatch(filename)
     if len(matches) == 4 {
         return matches[1] + "." + matches[3]
     }
-    
     return filename
 }
 
@@ -205,22 +244,16 @@ func (vm *VersionManager) removeHashFromFilename(filename string) string {
 func (vm *VersionManager) addHashToFilename(filename, hash string) string {
     ext := filepath.Ext(filename)
     basename := strings.TrimSuffix(filename, ext)
-    
-    // 移除可能存在的旧hash
-    re := regexp.MustCompile(`\.[a-f0-9]{8}$`)
-    cleanBasename := re.ReplaceAllString(basename, "")
-    
+    cleanBasename := reOldHashSuffix.ReplaceAllString(basename, "")
     return fmt.Sprintf("%s.%s%s", cleanBasename, hash, ext)
 }
 
 // findAndDeleteOldHashFiles 查找并删除旧的hash文件
 func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentHash string) error {
-    if vm.debugMode {
-        fmt.Printf("  🔍 查找旧hash文件: %s%s (当前hash: %s)\n", basename, ext, currentHash)
-    }
+    vm.logf("  🔍 查找旧hash文件: %s%s (当前hash: %s)\n", basename, ext, currentHash)
 
-    pattern := fmt.Sprintf(`^%s\.[a-f0-9]{8}%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext))
-    re := regexp.MustCompile(pattern)
+    hashPattern := fmt.Sprintf(`^%s\.([a-f0-9]{8})%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext))
+    re := getRegex(hashPattern)
 
     files, err := os.ReadDir(dir)
     if err != nil {
@@ -229,35 +262,25 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
 
     var deletedCount int
     for _, file := range files {
-        if !file.IsDir() {
-            filename := file.Name()
-
-            if re.MatchString(filename) {
-                expectedPattern := fmt.Sprintf(`^%s\.([a-f0-9]{8})%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext))
-                hashRe := regexp.MustCompile(expectedPattern)
-                hashMatches := hashRe.FindStringSubmatch(filename)
-
-                if len(hashMatches) >= 2 {
-                    extractedHash := hashMatches[1]
-
-                    if extractedHash != currentHash {
-                        oldFilePath := filepath.Join(dir, filename)
-                        // 先通知SVN删除，再删除本地文件
-                        vm.svnDeleteFile(oldFilePath)
-                        if err := os.Remove(oldFilePath); err != nil {
-                            fmt.Printf("    ⚠️  删除失败: %s\n", filename)
-                        } else {
-                            fmt.Printf("    🗑️  已删除: %s\n", filename)
-                            deletedCount++
-                        }
-                    }
-                }
+        if file.IsDir() {
+            continue
+        }
+        filename := file.Name()
+        hashMatches := re.FindStringSubmatch(filename)
+        if len(hashMatches) >= 2 && hashMatches[1] != currentHash {
+            oldFilePath := filepath.Join(dir, filename)
+            vm.svnDeleteFile(oldFilePath)
+            if err := os.Remove(oldFilePath); err != nil {
+                fmt.Printf("    ⚠️  删除失败: %s\n", filename)
+            } else {
+                fmt.Printf("    🗑️  已删除: %s\n", filename)
+                deletedCount++
             }
         }
     }
 
-    if vm.debugMode && deletedCount > 0 {
-        fmt.Printf("  ✅ 共删除 %d 个旧文件\n", deletedCount)
+    if deletedCount > 0 {
+        vm.logf("  ✅ 共删除 %d 个旧文件\n", deletedCount)
     }
 
     return nil
@@ -489,35 +512,38 @@ func (vm *VersionManager) processMultipleHTMLFiles(htmlPaths []string) {
 
 // findAllHTMLFiles 扫描目录查找所有HTML文件
 func (vm *VersionManager) findAllHTMLFiles() []string {
+    // 预构建排除目录 map
+    excludeDirs := make(map[string]struct{}, len(vm.config.ExcludeDirs))
+    for _, d := range vm.config.ExcludeDirs {
+        excludeDirs[d] = struct{}{}
+    }
+
     var htmlFiles []string
-    
-    err := filepath.Walk(vm.config.RootDir, func(path string, info os.FileInfo, err error) error {
+
+    err := filepath.WalkDir(vm.config.RootDir, func(path string, d fs.DirEntry, err error) error {
         if err != nil {
             return err
         }
-        
-        // 跳过排除的目录
-        if info.IsDir() {
-            for _, excludeDir := range vm.config.ExcludeDirs {
-                if info.Name() == excludeDir {
-                    return filepath.SkipDir
-                }
+
+        if d.IsDir() {
+            if _, ok := excludeDirs[d.Name()]; ok {
+                return filepath.SkipDir
             }
             return nil
         }
-        
+
         if filepath.Ext(path) == ".html" {
             relPath, _ := filepath.Rel(vm.config.RootDir, path)
             htmlFiles = append(htmlFiles, relPath)
         }
-        
+
         return nil
     })
-    
+
     if err != nil {
         fmt.Printf("⚠️  扫描目录失败: %v\n", err)
     }
-    
+
     return htmlFiles
 }
 
@@ -529,20 +555,11 @@ func fileExists(path string) bool {
 }
 
 func copyFile(src, dst string) error {
-    sourceFile, err := os.Open(src)
+    data, err := os.ReadFile(src)
     if err != nil {
         return err
     }
-    defer sourceFile.Close()
-    
-    destFile, err := os.Create(dst)
-    if err != nil {
-        return err
-    }
-    defer destFile.Close()
-    
-    _, err = io.Copy(destFile, sourceFile)
-    return err
+    return os.WriteFile(dst, data, 0644)
 }
 // renameFileWithHash 重命名文件（如果hash改变）
 func (vm *VersionManager) renameFileWithHash(filePath string) (*FileInfo, error) {
@@ -619,36 +636,31 @@ func (vm *VersionManager) collectImagesFromCSS(cssPath string) ([]ImageReference
     if err != nil {
         return nil, err
     }
-    
+
     cssDir := filepath.Dir(cssPath)
     var images []ImageReference
-    
-    // 匹配 url() 中的路径
-    re := regexp.MustCompile(`url\(['"]?([^'")\s]+)['"]?\)`)
-    matches := re.FindAllStringSubmatch(string(content), -1)
-    
+
+    matches := reCSSUrlCollect.FindAllStringSubmatch(string(content), -1)
+
     for _, match := range matches {
         if len(match) < 2 {
             continue
         }
-        
+
         imagePath := match[1]
-        
-        // 跳过绝对URL和data URI
-        if strings.HasPrefix(imagePath, "http") || 
-           strings.HasPrefix(imagePath, "data:") || 
+
+        if strings.HasPrefix(imagePath, "http") ||
+           strings.HasPrefix(imagePath, "data:") ||
            strings.HasPrefix(imagePath, "//") {
             continue
         }
-        
-        // 移除查询字符串和hash
+
         imagePath = strings.Split(imagePath, "?")[0]
         imagePath = strings.Split(imagePath, "#")[0]
-        
-        // 计算绝对路径
+
         absolutePath := filepath.Join(cssDir, filepath.FromSlash(imagePath))
         absolutePath = filepath.Clean(absolutePath)
-        
+
         if fileExists(absolutePath) {
             relativePath, _ := filepath.Rel(cssDir, absolutePath)
             images = append(images, ImageReference{
@@ -658,7 +670,7 @@ func (vm *VersionManager) collectImagesFromCSS(cssPath string) ([]ImageReference
             })
         }
     }
-    
+
     return images, nil
 }
 
@@ -669,71 +681,52 @@ func (vm *VersionManager) updateCSSImageReferences(cssPath string, imageMap map[
     if err != nil {
         return err
     }
-    
+
     contentStr := string(content)
     updated := false
-    
-    // 匹配 url() 中的路径
-    re := regexp.MustCompile(`url\(\s*(['"]?)([^'")\s]+)(['"]?)\s*\)`)
-    
-    newContent := re.ReplaceAllStringFunc(contentStr, func(match string) string {
-        submatches := re.FindStringSubmatch(match)
+
+    // 预归一化 imageMap 的 key（优化点3：避免循环内重复 ReplaceAll）
+    normalizedMap := make(map[string]string, len(imageMap))
+    for k, v := range imageMap {
+        normalizedMap[strings.ReplaceAll(k, "\\", "/")] = v
+    }
+
+    newContent := reCSSUrlReplace.ReplaceAllStringFunc(contentStr, func(match string) string {
+        submatches := reCSSUrlReplace.FindStringSubmatch(match)
         if len(submatches) < 4 {
             return match
         }
-        
+
         openingQuote := submatches[1]
         originalPath := submatches[2]
         closingQuote := submatches[3]
-        
-        // 跳过绝对URL和data URI
-        if strings.HasPrefix(originalPath, "http") || 
-           strings.HasPrefix(originalPath, "data:") || 
+
+        if strings.HasPrefix(originalPath, "http") ||
+           strings.HasPrefix(originalPath, "data:") ||
            strings.HasPrefix(originalPath, "//") {
             return match
         }
-        
-        // 移除查询字符串和hash用于匹配
+
         cleanPath := strings.Split(originalPath, "?")[0]
         cleanPath = strings.Split(cleanPath, "#")[0]
-        
-        // 标准化路径分隔符为正斜杠进行比较
         normalizedPath := strings.ReplaceAll(cleanPath, "\\", "/")
-        
-        // 在 imageMap 中查找匹配的路径
-        var newFilename string
-        var foundKey string
-        
-        for key, value := range imageMap {
-            // 标准化 key 的路径分隔符
-            normalizedKey := strings.ReplaceAll(key, "\\", "/")
-            
-            // 精确匹配完整路径
-            if normalizedPath == normalizedKey {
-                newFilename = value
-                foundKey = key
-                break
-            }
-        }
-        
-        if newFilename == "" {
-            // 没有找到匹配项，保持原样
+
+        // O(1) 查找
+        newFilename, found := normalizedMap[normalizedPath]
+        if !found {
             return match
         }
-        
-        // 构建新路径：保持原有的目录结构，只替换文件名
+
         dir := filepath.Dir(originalPath)
-        // 确保使用正斜杠
         dir = strings.ReplaceAll(dir, "\\", "/")
-        
+
         var newPath string
         if dir == "." {
             newPath = newFilename
         } else {
             newPath = dir + "/" + newFilename
         }
-        
-        // 确保引号一致
+
         if openingQuote != closingQuote {
             if openingQuote != "" && closingQuote == "" {
                 closingQuote = openingQuote
@@ -741,61 +734,54 @@ func (vm *VersionManager) updateCSSImageReferences(cssPath string, imageMap map[
                 openingQuote = closingQuote
             }
         }
-        
+
         result := fmt.Sprintf("url(%s%s%s)", openingQuote, newPath, closingQuote)
-        
+
         if match != result {
             updated = true
-            oldFilename := filepath.Base(foundKey)
-            if(vm.debugMode){
-
-            fmt.Printf("    🔄 %s -> %s\n", oldFilename, newFilename)
-            }
-
+            vm.logf("    🔄 %s -> %s\n", filepath.Base(originalPath), newFilename)
         }
-        
+
         return result
     })
-    
+
     contentStr = newContent
-    
+
     if updated {
         return os.WriteFile(cssPath, []byte(contentStr), 0644)
     }
-    
+
     return nil
 }
 
 // findFile 查找文件（支持带hash版本）
 func (vm *VersionManager) findFile(basePath string) string {
-    // 先检查原始路径
     if fileExists(basePath) {
         return basePath
     }
-    
-    // 查找带hash的版本
+
     dir := filepath.Dir(basePath)
     name := filepath.Base(basePath)
     ext := filepath.Ext(name)
     nameWithoutExt := strings.TrimSuffix(name, ext)
-    
+
     if !fileExists(dir) {
         return ""
     }
-    
+
     files, err := os.ReadDir(dir)
     if err != nil {
         return ""
     }
-    
-    pattern := regexp.MustCompile(fmt.Sprintf(`^%s\.[a-f0-9]{8}\%s$`, regexp.QuoteMeta(nameWithoutExt), regexp.QuoteMeta(ext)))
-    
+
+    pattern := getRegex(fmt.Sprintf(`^%s\.[a-f0-9]{8}\%s$`, regexp.QuoteMeta(nameWithoutExt), regexp.QuoteMeta(ext)))
+
     for _, file := range files {
         if pattern.MatchString(file.Name()) {
             return filepath.Join(dir, file.Name())
         }
     }
-    
+
     return ""
 }
 
@@ -805,10 +791,9 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
     if err != nil {
         return nil, err
     }
-    
+
     htmlBasename := strings.TrimSuffix(filepath.Base(htmlPath), ".html")
-    
-    // 判断当前HTML是否为主资源文件
+
     shouldProcessMain := false
     for _, name := range vm.config.ProcessMainResources {
         if name == filepath.Base(htmlPath) || name == htmlBasename {
@@ -816,24 +801,21 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
             break
         }
     }
-    
+
     resources := map[string][]string{
         "css": {},
         "js":  {},
     }
-    
+
     contentStr := string(content)
-    
+
     // 收集CSS文件
-    cssRe := regexp.MustCompile(`<link[^>]*href\s*=\s*['"]([^'"]+\.css)['"]`)
-    cssMatches := cssRe.FindAllStringSubmatch(contentStr, -1)
+    cssMatches := reHTMLCSSLink.FindAllStringSubmatch(contentStr, -1)
     for _, match := range cssMatches {
         if len(match) >= 2 {
             cssPath := match[1]
             isExternal := strings.HasPrefix(cssPath, "http") || strings.HasPrefix(cssPath, "//")
-            
-            // 如果是外部URL且当前是主资源页面，跳过
-            // 如果是外部URL但不是主资源页面且不包含components，跳过
+
             if isExternal {
                 if shouldProcessMain || !strings.Contains(cssPath, "components") {
                     continue
@@ -841,24 +823,22 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
             } else if !strings.Contains(cssPath, "components") {
                 continue
             }
-            
-            // 检查是否应该处理此组件
+
             if !vm.shouldProcessComponent(cssPath) {
                 continue
             }
-            
+
             resources["css"] = append(resources["css"], cssPath)
         }
     }
-    
+
     // 收集JS文件
-    jsRe := regexp.MustCompile(`<script[^>]*src\s*=\s*['"]([^'"]+\.js)['"]`)
-    jsMatches := jsRe.FindAllStringSubmatch(contentStr, -1)
+    jsMatches := reHTMLJSScript.FindAllStringSubmatch(contentStr, -1)
     for _, match := range jsMatches {
         if len(match) >= 2 {
             jsPath := match[1]
             isExternal := strings.HasPrefix(jsPath, "http") || strings.HasPrefix(jsPath, "//")
-            
+
             if isExternal {
                 if shouldProcessMain || !strings.Contains(jsPath, "components") {
                     continue
@@ -866,21 +846,20 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
             } else if !strings.Contains(jsPath, "components") {
                 continue
             }
-            
+
             if !vm.shouldProcessComponent(jsPath) {
                 continue
             }
-            
+
             resources["js"] = append(resources["js"], jsPath)
         }
     }
-    
+
     return resources, nil
 }
 
 // processComponentResource 处理组件资源（JS或CSS）
 func (vm *VersionManager) processComponentResource(htmlDir, relativePath string) (*FileInfo, error) {
-    // 处理可能的外部URL：尝试从中提取相对路径部分（从components开始）
     targetPath := relativePath
     if strings.HasPrefix(relativePath, "http") || strings.HasPrefix(relativePath, "//") {
         idx := strings.Index(relativePath, "components/")
@@ -891,48 +870,54 @@ func (vm *VersionManager) processComponentResource(htmlDir, relativePath string)
 
     absolutePath := filepath.Join(htmlDir, filepath.FromSlash(targetPath))
     absolutePath = filepath.Clean(absolutePath)
-    
-    // 查找实际文件（可能是带hash的版本）
+
     actualPath := vm.findFile(absolutePath)
     if actualPath == "" {
         actualPath = absolutePath
     }
-    
+
     if !fileExists(actualPath) {
         return nil, fmt.Errorf("文件不存在: %s", actualPath)
     }
-    
-    // 检查是否已经处理过
+
+    // 检查是否已经处理过（使用缓存的 hash，避免重复计算）
     vm.mu.Lock()
-    if vm.processedFiles[actualPath] {
+    if cachedHash, ok := vm.processedFiles[actualPath]; ok {
         vm.mu.Unlock()
-        hash, err := vm.calculateFileHash(actualPath)
-        if err != nil {
-            return nil, err
-        }
         dir := filepath.Dir(actualPath)
         filename := filepath.Base(actualPath)
         cleanFilename := vm.removeHashFromFilename(filename)
-        hashedFilename := vm.addHashToFilename(cleanFilename, hash)
+        hashedFilename := vm.addHashToFilename(cleanFilename, cachedHash)
         hashedPath := filepath.Join(dir, hashedFilename)
-        
         return &FileInfo{
             OriginalPath: actualPath,
             HashedPath:   hashedPath,
-            Hash:         hash,
+            Hash:         cachedHash,
             Renamed:      true,
         }, nil
     }
-    vm.processedFiles[actualPath] = true
+    vm.processedFiles[actualPath] = "" // 占位，防止递归处理
     vm.mu.Unlock()
-    
+
     // 处理CSS文件时，先处理其中的图片引用
     if strings.HasSuffix(strings.ToLower(actualPath), ".css") {
-        return vm.processComponentCSS(actualPath)
+        info, err := vm.processComponentCSS(actualPath)
+        if err == nil {
+            vm.mu.Lock()
+            vm.processedFiles[actualPath] = info.Hash
+            vm.mu.Unlock()
+        }
+        return info, err
     }
-    
+
     // 处理JS文件
-    return vm.renameFileWithHash(actualPath)
+    info, err := vm.renameFileWithHash(actualPath)
+    if err == nil {
+        vm.mu.Lock()
+        vm.processedFiles[actualPath] = info.Hash
+        vm.mu.Unlock()
+    }
+    return info, err
 }
 
 // processComponentCSS 处理组件CSS文件（包括其中的图片）
@@ -962,39 +947,43 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
     
     if len(images) > 0 {
         fmt.Printf("    📸 处理 %d 个图片引用\n", len(images))
-        
+
         for _, image := range images {
-            // 使用原始路径作为key（标准化为正斜杠）
             originalPathKey := strings.ReplaceAll(image.OriginalPath, "\\", "/")
-            
+
             vm.mu.Lock()
-            if vm.processedFiles[image.AbsolutePath] {
+            if cachedHash, ok := vm.processedFiles[image.AbsolutePath]; ok {
                 vm.mu.Unlock()
-                // 查找已存在的带hash文件
-                hash, err := vm.calculateFileHash(image.AbsolutePath)
-                if err != nil {
-                    continue
-                }
-                // 找到实际的带hash文件
-                dir := filepath.Dir(image.AbsolutePath)
-                oldImageFilename := filepath.Base(image.AbsolutePath)
-                cleanImageFilename := vm.removeHashFromFilename(oldImageFilename)
-                newImageFilename := vm.addHashToFilename(cleanImageFilename, hash)
-                
-                // 验证带hash的文件是否存在
-                hashedPath := filepath.Join(dir, newImageFilename)
-                if fileExists(hashedPath) {
-                    imageMap[originalPathKey] = newImageFilename
+                // 使用缓存的 hash，避免重复读文件计算
+                if cachedHash != "" {
+                    dir := filepath.Dir(image.AbsolutePath)
+                    cleanImageFilename := vm.removeHashFromFilename(filepath.Base(image.AbsolutePath))
+                    newImageFilename := vm.addHashToFilename(cleanImageFilename, cachedHash)
+                    hashedPath := filepath.Join(dir, newImageFilename)
+                    if fileExists(hashedPath) {
+                        imageMap[originalPathKey] = newImageFilename
+                    } else {
+                        actualHashedFile := vm.findFile(filepath.Join(dir, cleanImageFilename))
+                        if actualHashedFile != "" {
+                            imageMap[originalPathKey] = filepath.Base(actualHashedFile)
+                        }
+                    }
                 } else {
-                    // 尝试查找任意带hash的版本
-                    actualHashedFile := vm.findFile(filepath.Join(dir, cleanImageFilename))
-                    if actualHashedFile != "" {
-                        imageMap[originalPathKey] = filepath.Base(actualHashedFile)
+                    // hash 尚未计算完成（正在被另一个路径处理），回退到重算
+                    hash, err := vm.calculateFileHash(image.AbsolutePath)
+                    if err != nil {
+                        continue
+                    }
+                    dir := filepath.Dir(image.AbsolutePath)
+                    cleanImageFilename := vm.removeHashFromFilename(filepath.Base(image.AbsolutePath))
+                    newImageFilename := vm.addHashToFilename(cleanImageFilename, hash)
+                    if fileExists(filepath.Join(dir, newImageFilename)) {
+                        imageMap[originalPathKey] = newImageFilename
                     }
                 }
                 continue
             }
-            vm.processedFiles[image.AbsolutePath] = true
+            vm.processedFiles[image.AbsolutePath] = "" // 占位
             vm.mu.Unlock()
             
             info, err := vm.renameFileWithHash(image.AbsolutePath)
@@ -1004,12 +993,14 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
             }
             
             newImageFilename := filepath.Base(info.HashedPath)
-            // 使用原始CSS中的路径作为key
             imageMap[originalPathKey] = newImageFilename
-            
-            if vm.debugMode {
-                fmt.Printf("      📎 映射: %s -> %s\n", originalPathKey, newImageFilename)
-            }
+
+            // 缓存图片 hash
+            vm.mu.Lock()
+            vm.processedFiles[image.AbsolutePath] = info.Hash
+            vm.mu.Unlock()
+
+            vm.logf("      📎 映射: %s -> %s\n", originalPathKey, newImageFilename)
             // 移除: relPath, _ := filepath.Rel(vm.config.RootDir, image.AbsolutePath)
             // 移除: vm.versionMap[relPath] = info.Hash
         }
@@ -1033,15 +1024,11 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
     if len(imageMap) > 0 {
         if vm.debugMode {
             fmt.Printf("    📋 图片映射表 (%d 项):\n", len(imageMap))
-            if(vm.debugMode){
-
             for k, v := range imageMap {
                 fmt.Printf("      %s -> %s\n", k, v)
             }
-            }
-
         }
-        
+
         if err := vm.updateCSSImageReferences(hashedCssPath, imageMap); err != nil {
             fmt.Printf("      ⚠️  更新CSS图片引用失败: %v\n", err)
         }
@@ -1083,249 +1070,145 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
     }, nil
 }
 
-// updateHTMLReferences 更新HTML中的资源引用
-func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[string]map[string]string) error {
+func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[string]map[string]string) error { 
     content, err := os.ReadFile(htmlPath)
     if err != nil {
         return err
     }
-    
+
     contentStr := string(content)
     updated := false
-    
+
+    // 提取通用的资源替换逻辑（CSS和JS共用）
+    // tagAttr 示例: `<link[^>]*href\s*=\s*` 或 `<script[^>]*src\s*=\s*`
+    replaceResource := func(resMap map[string]string, tagAttr string, resType string) {
+        for originalRelPath, newHashedPath := range resMap {
+            escapedPath := regexp.QuoteMeta(originalRelPath)
+            escapedPath = strings.ReplaceAll(escapedPath, "/", `[/\\]`)
+
+            patterns := []string{
+                fmt.Sprintf(`(%s['"])(%s)(['"][^>]*>)`, tagAttr, escapedPath),
+                fmt.Sprintf(`(%s['"])(\.{1,2}[/\\]%s)(['"][^>]*>)`, tagAttr, escapedPath),
+            }
+
+            matched := false
+            for _, pattern := range patterns {
+                re := getRegex(pattern)
+                if re.MatchString(contentStr) {
+                    newContent := re.ReplaceAllStringFunc(contentStr, func(match string) string {
+                        submatches := re.FindStringSubmatch(match)
+                        if len(submatches) >= 4 {
+                            prefix := submatches[1]
+                            oldPath := submatches[2]
+                            suffix := submatches[3]
+
+                            var oldDir string
+                            isUrl := strings.HasPrefix(originalRelPath, "http") || strings.HasPrefix(originalRelPath, "//")
+                            if isUrl {
+                                lastSlash := strings.LastIndex(originalRelPath, "/")
+                                if lastSlash != -1 {
+                                    oldDir = originalRelPath[:lastSlash]
+                                }
+                            } else {
+                                oldDir = filepath.Dir(originalRelPath)
+                            }
+
+                            newFilename := filepath.Base(newHashedPath)
+
+                            var newPath string
+                            if isUrl {
+                                if oldDir != "" {
+                                    newPath = oldDir + "/" + newFilename
+                                } else {
+                                    newPath = newFilename
+                                }
+                            } else if oldDir != "." && oldDir != "/" {
+                                newPath = filepath.Join(oldDir, newFilename)
+                                newPath = strings.ReplaceAll(newPath, `\`, "/")
+                            } else {
+                                newPath = newFilename
+                            }
+
+                            if strings.HasPrefix(oldPath, "../") || strings.HasPrefix(oldPath, "..\\") {
+                                if !strings.HasPrefix(newPath, "../") && !strings.HasPrefix(newPath, "..\\") {
+                                    newPath = "../" + newPath
+                                }
+                            } else if strings.HasPrefix(oldPath, "./") || strings.HasPrefix(oldPath, ".\\") {
+                                if !strings.HasPrefix(newPath, "./") && !strings.HasPrefix(newPath, ".\\") {
+                                    newPath = "./" + newPath
+                                }
+                            }
+
+                            if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") && !vm.shouldExcludeFromCDN(newPath) {
+                                cleanNewPath := strings.TrimPrefix(newPath, "./")
+                                cleanNewPath = strings.TrimPrefix(cleanNewPath, "../")
+                                newPath = vm.config.CDNDomain + "/" + cleanNewPath
+                            }
+
+                            result := fmt.Sprintf("%s%s%s", prefix, newPath, suffix)
+
+                            if match != result {
+                                updated = true
+                                matched = true
+                                fmt.Printf("  ✅ %s: %s -> %s\n", resType, filepath.Base(oldPath), filepath.Base(newPath))
+                            }
+                            return result
+                        }
+                        return match
+                    })
+
+                    contentStr = newContent
+                    if matched {
+                        break
+                    }
+                }
+            }
+
+            if !matched {
+                vm.logf("  ⚠️  未匹配%s: %s\n", resType, originalRelPath)
+            }
+        }
+    }
+
     // 处理CSS引用
     if cssMap, ok := resources["css"]; ok {
-        for originalRelPath, newHashedPath := range cssMap {
-             vm.removeHashFromFilename(filepath.Base(originalRelPath))
-            
-            escapedPath := regexp.QuoteMeta(originalRelPath)
-            escapedPath = strings.ReplaceAll(escapedPath, "/", `[/\\]`)
-            
-            patterns := []string{
-                fmt.Sprintf(`(<link[^>]*href\s*=\s*['"])(%s)(['"][^>]*>)`, escapedPath),
-                fmt.Sprintf(`(<link[^>]*href\s*=\s*['"])(\.{1,2}[/\\]%s)(['"][^>]*>)`, escapedPath),
-            }
-            
-            matched := false
-            for _, pattern := range patterns {
-                re := regexp.MustCompile(pattern)
-                if re.MatchString(contentStr) {
-                    newContent := re.ReplaceAllStringFunc(contentStr, func(match string) string {
-                        submatches := re.FindStringSubmatch(match)
-                        if len(submatches) >= 4 {
-                            prefix := submatches[1]
-                            oldPath := submatches[2]
-                            suffix := submatches[3]
-                            
-                            // 提取原始路径的目录部分
-                            var oldDir string
-                            isUrl := strings.HasPrefix(originalRelPath, "http") || strings.HasPrefix(originalRelPath, "//")
-                            if isUrl {
-                                lastSlash := strings.LastIndex(originalRelPath, "/")
-                                if lastSlash != -1 {
-                                    oldDir = originalRelPath[:lastSlash]
-                                }
-                            } else {
-                                oldDir = filepath.Dir(originalRelPath)
-                            }
-                            
-                            newFilename := filepath.Base(newHashedPath)
-                            
-                            // 构建新路径，保持原有的目录结构
-                            var newPath string
-                            if isUrl {
-                                if oldDir != "" {
-                                    newPath = oldDir + "/" + newFilename
-                                } else {
-                                    newPath = newFilename
-                                }
-                            } else if oldDir != "." && oldDir != "/" {
-                                newPath = filepath.Join(oldDir, newFilename)
-                                newPath = strings.ReplaceAll(newPath, `\`, "/")
-                            } else {
-                                newPath = newFilename
-                            }
-                            
-                            // 如果原始路径是相对路径（以./或../开头），保持相对路径格式
-                            if strings.HasPrefix(oldPath, "../") || strings.HasPrefix(oldPath, "..\\") {
-                                // 保持../格式
-                                if !strings.HasPrefix(newPath, "../") && !strings.HasPrefix(newPath, "..\\") {
-                                    newPath = "../" + newPath
-                                }
-                            } else if strings.HasPrefix(oldPath, "./") || strings.HasPrefix(oldPath, ".\\") {
-                                // 保持./格式
-                                if !strings.HasPrefix(newPath, "./") && !strings.HasPrefix(newPath, ".\\") {
-                                    newPath = "./" + newPath
-                                }
-                            }
-                            
-                            // 🔥 检查是否排除CDN替换
-                            if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") && !vm.shouldExcludeFromCDN(newPath) {
-                                cleanNewPath := strings.TrimPrefix(newPath, "./")
-                                cleanNewPath = strings.TrimPrefix(cleanNewPath, "../")
-                                newPath = vm.config.CDNDomain + "/" + cleanNewPath
-                            }
-                            
-                            result := fmt.Sprintf("%s%s%s", prefix, newPath, suffix)
-                            
-                            if match != result {
-                                updated = true
-                                matched = true
-                                fmt.Printf("  ✅ CSS: %s -> %s\n", filepath.Base(oldPath), filepath.Base(newPath))
-                            }
-                            return result
-                        }
-                        return match
-                    })
-                    
-                    contentStr = newContent
-                    if matched {
-                        break
-                    }
-                }
-            }
-            
-            if !matched && vm.debugMode {
-                fmt.Printf("  ⚠️  未匹配CSS: %s\n", originalRelPath)
-            }
-        }
+        replaceResource(cssMap, `<link[^>]*href\s*=\s*`, "CSS")
     }
-    
+
     // 处理JS引用
     if jsMap, ok := resources["js"]; ok {
-        for originalRelPath, newHashedPath := range jsMap {
-            vm.removeHashFromFilename(filepath.Base(originalRelPath))
-            
-            escapedPath := regexp.QuoteMeta(originalRelPath)
-            escapedPath = strings.ReplaceAll(escapedPath, "/", `[/\\]`)
-            
-            patterns := []string{
-                fmt.Sprintf(`(<script[^>]*src\s*=\s*['"])(%s)(['"][^>]*>)`, escapedPath),
-                fmt.Sprintf(`(<script[^>]*src\s*=\s*['"])(\.{1,2}[/\\]%s)(['"][^>]*>)`, escapedPath),
-            }
-            
-            matched := false
-            for _, pattern := range patterns {
-                re := regexp.MustCompile(pattern)
-                if re.MatchString(contentStr) {
-                    newContent := re.ReplaceAllStringFunc(contentStr, func(match string) string {
-                        submatches := re.FindStringSubmatch(match)
-                        if len(submatches) >= 4 {
-                            prefix := submatches[1]
-                            oldPath := submatches[2]
-                            suffix := submatches[3]
-                            
-                            // 提取原始路径的目录部分
-                            var oldDir string
-                            isUrl := strings.HasPrefix(originalRelPath, "http") || strings.HasPrefix(originalRelPath, "//")
-                            if isUrl {
-                                lastSlash := strings.LastIndex(originalRelPath, "/")
-                                if lastSlash != -1 {
-                                    oldDir = originalRelPath[:lastSlash]
-                                }
-                            } else {
-                                oldDir = filepath.Dir(originalRelPath)
-                            }
-                            
-                            newFilename := filepath.Base(newHashedPath)
-                            
-                            // 构建新路径，保持原有的目录结构
-                            var newPath string
-                            if isUrl {
-                                if oldDir != "" {
-                                    newPath = oldDir + "/" + newFilename
-                                } else {
-                                    newPath = newFilename
-                                }
-                            } else if oldDir != "." && oldDir != "/" {
-                                newPath = filepath.Join(oldDir, newFilename)
-                                newPath = strings.ReplaceAll(newPath, `\`, "/")
-                            } else {
-                                newPath = newFilename
-                            }
-                            
-                            // 如果原始路径是相对路径（以./或../开头），保持相对路径格式
-                            if strings.HasPrefix(oldPath, "../") || strings.HasPrefix(oldPath, "..\\") {
-                                // 保持../格式
-                                if !strings.HasPrefix(newPath, "../") && !strings.HasPrefix(newPath, "..\\") {
-                                    newPath = "../" + newPath
-                                }
-                            } else if strings.HasPrefix(oldPath, "./") || strings.HasPrefix(oldPath, ".\\") {
-                                // 保持./格式
-                                if !strings.HasPrefix(newPath, "./") && !strings.HasPrefix(newPath, ".\\") {
-                                    newPath = "./" + newPath
-                                }
-                            }
-                            
-                            // 🔥 检查是否排除CDN替换
-                            if vm.config.CDNDomain != "" && !strings.HasPrefix(newPath, "http") && !vm.shouldExcludeFromCDN(newPath) {
-                                cleanNewPath := strings.TrimPrefix(newPath, "./")
-                                cleanNewPath = strings.TrimPrefix(cleanNewPath, "../")
-                                newPath = vm.config.CDNDomain + "/" + cleanNewPath
-                            }
-                            
-                            result := fmt.Sprintf("%s%s%s", prefix, newPath, suffix)
-                            
-                            if match != result {
-                                updated = true
-                                matched = true
-                                fmt.Printf("  ✅ JS: %s -> %s\n", filepath.Base(oldPath), filepath.Base(newPath))
-                            }
-                            return result
-                        }
-                        return match
-                    })
-                    
-                    contentStr = newContent
-                    if matched {
-                        break
-                    }
-                }
-            }
-            
-            if !matched && vm.debugMode {
-                fmt.Printf("  ⚠️  未匹配JS: %s\n", originalRelPath)
-            }
-        }
+        replaceResource(jsMap, `<script[^>]*src\s*=\s*`, "JS")
     }
-    
-    // 新增：处理剩余的普通资源（非hash），替换为CDN路径
-    if vm.config.CDNDomain != ""  {
+
+    // 处理剩余的普通资源（非hash），替换为CDN路径
+    if vm.config.CDNDomain != "" {
         // 处理CSS
-        cssPattern := `(<link[^>]*href\s*=\s*['"])([^'"]+)(['"][^>]*>)`
-        cssRe := regexp.MustCompile(cssPattern)
-        contentStr = cssRe.ReplaceAllStringFunc(contentStr, func(match string) string {
-            submatches := cssRe.FindStringSubmatch(match)
+        contentStr = reCDNCSS.ReplaceAllStringFunc(contentStr, func(match string) string {
+            submatches := reCDNCSS.FindStringSubmatch(match)
             if len(submatches) >= 4 {
                 prefix := submatches[1]
                 path := submatches[2]
                 suffix := submatches[3]
-                
-                // 只处理 .css 文件
+
                 if !strings.Contains(path, ".css") {
                     return match
                 }
-
-                // 跳过绝对路径
                 if strings.HasPrefix(path, "http") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "data:") {
                     return match
                 }
-
-                // 🔥 检查是否排除CDN替换
                 if vm.shouldExcludeFromCDN(path) {
                     return match
                 }
 
-                // 清理路径
                 cleanPath := path
                 for strings.HasPrefix(cleanPath, "./") || strings.HasPrefix(cleanPath, "../") {
                     cleanPath = strings.TrimPrefix(cleanPath, "./")
                     cleanPath = strings.TrimPrefix(cleanPath, "../")
                 }
                 cleanPath = strings.TrimPrefix(cleanPath, "/")
-                
+
                 newPath := vm.config.CDNDomain + "/" + cleanPath
-                
+
                 if newPath != path {
                     updated = true
                     fmt.Printf("  🌍 CDN(CSS): %s -> %s\n", filepath.Base(path), newPath)
@@ -1336,40 +1219,32 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
         })
 
         // 处理JS
-        jsPattern := `(<script[^>]*src\s*=\s*['"])([^'"]+)(['"][^>]*>)`
-        jsRe := regexp.MustCompile(jsPattern)
-        contentStr = jsRe.ReplaceAllStringFunc(contentStr, func(match string) string {
-            submatches := jsRe.FindStringSubmatch(match)
+        contentStr = reCDNJS.ReplaceAllStringFunc(contentStr, func(match string) string {
+            submatches := reCDNJS.FindStringSubmatch(match)
             if len(submatches) >= 4 {
                 prefix := submatches[1]
                 path := submatches[2]
                 suffix := submatches[3]
-                
-                // 只处理 .js 文件
+
                 if !strings.Contains(path, ".js") {
                     return match
                 }
-
-                // 跳过绝对路径
                 if strings.HasPrefix(path, "http") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "data:") {
                     return match
                 }
-
-                // 🔥 检查是否排除CDN替换
                 if vm.shouldExcludeFromCDN(path) {
                     return match
                 }
 
-                // 清理路径
                 cleanPath := path
                 for strings.HasPrefix(cleanPath, "./") || strings.HasPrefix(cleanPath, "../") {
                     cleanPath = strings.TrimPrefix(cleanPath, "./")
                     cleanPath = strings.TrimPrefix(cleanPath, "../")
                 }
                 cleanPath = strings.TrimPrefix(cleanPath, "/")
-                
+
                 newPath := vm.config.CDNDomain + "/" + cleanPath
-                
+
                 if newPath != path {
                     updated = true
                     fmt.Printf("  🌍 CDN(JS): %s -> %s\n", filepath.Base(path), newPath)
@@ -1388,7 +1263,7 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
     } else {
         fmt.Printf("\n⚠️  没有内容需要更新\n")
     }
-    
+
     // 执行部署脚本（如果启用）
     if vm.config.Deploy.Enabled {
         vm.runDeploy()
@@ -1481,13 +1356,13 @@ func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
         return versions
     }
     
-    hashPattern := regexp.MustCompile(fmt.Sprintf(`^%s\.[a-zA-Z0-9]+%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext)))
-    
+    hashPattern := getRegex(fmt.Sprintf(`^%s\.[a-zA-Z0-9]+%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext)))
+
     for _, file := range files {
         if file.Name() == fileName {
             continue
         }
-        
+
         if hashPattern.MatchString(file.Name()) {
             filePath := filepath.Join(dir, file.Name())
             hash, _ := getFileHash(filePath)
@@ -1501,7 +1376,7 @@ func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
             })
         }
     }
-    
+
     // 按修改时间排序（最新的在前）
     for i := 0; i < len(versions)-1; i++ {
         for j := i + 1; j < len(versions); j++ {
@@ -1539,7 +1414,7 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
         return 0
     }
 
-    hashPattern := regexp.MustCompile(fmt.Sprintf(`^%s\.[a-zA-Z0-9]+%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext)))
+    hashPattern := getRegex(fmt.Sprintf(`^%s\.[a-zA-Z0-9]+%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext)))
 
     deletedCount := 0
     for _, file := range files {
@@ -1993,14 +1868,10 @@ func (dm *DeployManager) validateCDNResources(htmlPath string, cdnDomain string)
         return err
     }
 
-    // 1. 移除 HTML 注释内容，避免处理被注释掉的标签
-    reComments := regexp.MustCompile(`(?s)<!--.*?-->`)
-    cleanContent := reComments.ReplaceAllString(string(content), "")
+    cleanContent := reHTMLComment.ReplaceAllString(string(content), "")
 
-    // 2. 在清理后的内容中匹配 CDN 域名开头的资源路径
-    // 修改：排除反引号 \x60，防止匹配到模板字符串内容
     pattern := regexp.QuoteMeta(cdnDomain) + "(/[^\\s'\"\\x60]+)"
-    re := regexp.MustCompile(pattern)
+    re := getRegex(pattern)
     matches := re.FindAllStringSubmatch(cleanContent, -1)
 
     for _, match := range matches {
@@ -2074,22 +1945,24 @@ func (vm *VersionManager) runDeploy() {
 
 // shouldExcludeFromCDN 检查文件是否应该排除CDN替换
 func (vm *VersionManager) shouldExcludeFromCDN(filePath string) bool {
-
-    if len(vm.config.CDNExcludeFiles) == 0 {
+    if len(vm.excludeMap) == 0 {
         return false
     }
-    
+
     filename := filepath.Base(filePath)
-    // 移除查询参数
     if idx := strings.Index(filename, "?"); idx != -1 {
         filename = filename[:idx]
     }
-    
-    for _, excludeFile := range vm.config.CDNExcludeFiles {
-        if filename == excludeFile || strings.Contains(filePath, excludeFile) {
-            if vm.debugMode {
-                fmt.Printf("    🚫 排除CDN替换: %s\n", filename)
-            }
+
+    // O(1) 查找
+    if _, ok := vm.excludeMap[filename]; ok {
+        vm.logf("    🚫 排除CDN替换: %s\n", filename)
+        return true
+    }
+    // 退化为路径包含检查（无法用 map 优化，但频率低）
+    for excludeFile := range vm.excludeMap {
+        if strings.Contains(filePath, excludeFile) {
+            vm.logf("    🚫 排除CDN替换: %s\n", filename)
             return true
         }
     }
