@@ -2355,6 +2355,8 @@ func main() {
     flag.Parse()
     
     config, err := loadConfig(*configPath)
+    fmt.Printf("📂 加载配置文件: %s\n", *configPath)
+    // configlog
     startTime := time.Now()
 
     if err != nil {
