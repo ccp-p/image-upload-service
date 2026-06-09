@@ -42,6 +42,8 @@ echo [3] 执行前置脚本，然后 copy-commit，提交git (HTML回滚后)
 echo [4] 保持相对路径(不替换CDN)，然后 copy
 echo [5] 保持相对路径(不替换CDN)，然后 copy-commit
 echo [6] 保持相对路径(不替换CDN)，然后 copy-commit，提交git
+echo [7] 仅部署，不处理hash，然后 copy
+echo [8] 仅部署，不处理hash，然后 copy-commit
 echo.
 
 set /p mode_input="请输入对应的数字 (默认=1): "
@@ -53,6 +55,7 @@ if "%mode_input%"=="2" goto ask_message
 if "%mode_input%"=="3" goto ask_message
 if "%mode_input%"=="5" goto ask_message
 if "%mode_input%"=="6" goto ask_message
+if "%mode_input%"=="8" goto ask_message
 goto run
 
 :ask_message
@@ -63,6 +66,21 @@ goto run
 :run
 echo.
 echo [信息] 读取配置文件: version.config.json，使用模式: %mode_input%
+
+REM 模式 7/8 使用 -deploy/-deploy-commit 参数，不走 -mode
+if "%mode_input%"=="7" (
+    echo [调试] 完整命令: go run main.go -config=version.config.json -deploy %message_flag%
+    echo.
+    go run main.go -config=version.config.json -deploy %message_flag%
+    goto check_result
+)
+if "%mode_input%"=="8" (
+    echo [调试] 完整命令: go run main.go -config=version.config.json -deploy-commit %message_flag%
+    echo.
+    go run main.go -config=version.config.json -deploy-commit %message_flag%
+    goto check_result
+)
+
 echo [调试] mode_input = "%mode_input%"
 echo [调试] custom_message = "%custom_message%"
 echo [调试] message_flag = "%message_flag%"
@@ -71,6 +89,8 @@ echo.
 
 REM 运行程序
 go run main.go -config=version.config.json -mode=%mode_input% %message_flag%
+
+:check_result
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
