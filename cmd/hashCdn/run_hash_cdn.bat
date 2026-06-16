@@ -88,7 +88,8 @@ echo [调试] 完整命令: go run main.go -config=version.config.json -mode=%mo
 echo.
 
 REM 运行程序
-go run main.go -config=version.config.json -mode=%mode_input% %message_flag%
+hashCdn.exe -config=version.config.json -mode=%mode_input% %message_flag%
+@REM go run main.go -config=version.config.json -mode=%mode_input% %message_flag%
 
 :check_result
 

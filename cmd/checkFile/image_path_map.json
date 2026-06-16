@@ -1,5 +1,5 @@
 {
-  "totalCount": 837,
+  "totalCount": 844,
   "lastUpdate": "0001-01-01T00:00:00Z",
   "mapping": {
     "afterGetEquityPop.png": [
@@ -24,6 +24,14 @@
         "width": 546,
         "height": 690,
         "size": 72953
+      }
+    ],
+    "afterGetEquityPop4.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\afterGetEquityPop4.png",
+        "width": 546,
+        "height": 690,
+        "size": 123230
       }
     ],
     "bar_bg.png": [
@@ -951,7 +959,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\jd-click-bg.png",
         "width": 647,
         "height": 613,
-        "size": 60273
+        "size": 75364
       }
     ],
     "jd_anime.gif": [
@@ -1226,12 +1234,28 @@
         "size": 37138
       }
     ],
+    "level-enjoy-bg-migu.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-enjoy-bg-migu.png",
+        "width": 1448,
+        "height": 796,
+        "size": 199506
+      }
+    ],
     "level-enjoy-bg.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-enjoy-bg.png",
         "width": 1446,
         "height": 878,
-        "size": 146410
+        "size": 137477
+      }
+    ],
+    "level-enjoy-get-migu.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-enjoy-get-migu.png",
+        "width": 534,
+        "height": 140,
+        "size": 12214
       }
     ],
     "level-enjoy-get.png": [
@@ -1240,6 +1264,22 @@
         "width": 368,
         "height": 120,
         "size": 3033
+      }
+    ],
+    "level-enjoy-use-migu.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-enjoy-use-migu.png",
+        "width": 534,
+        "height": 140,
+        "size": 10535
+      }
+    ],
+    "level-enjoy-use.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-enjoy-use.png",
+        "width": 368,
+        "height": 120,
+        "size": 2757
       }
     ],
     "level-enjoy-watch.png": [
@@ -1960,8 +2000,16 @@
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\rule_bg.png",
         "width": 579,
-        "height": 3266,
-        "size": 145313
+        "height": 3169,
+        "size": 140544
+      }
+    ],
+    "rule_bg_backup.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\rule_bg_backup.png",
+        "width": 579,
+        "height": 2981,
+        "size": 131429
       }
     ],
     "rule_bg_wechat.png": [
@@ -3006,6 +3054,14 @@
         "width": 450,
         "height": 88,
         "size": 18636
+      }
+    ],
+    "top-bg-ball.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\top-bg-ball.png",
+        "width": 1500,
+        "height": 4896,
+        "size": 264317
       }
     ],
     "top-bg-n.png": [
