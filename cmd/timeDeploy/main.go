@@ -21,9 +21,7 @@ import (
 // ============================================================
 
 const (
-	scheduleHour   = 21
-	scheduleMinute = 30
-	svnLogCount    = 3
+	svnLogCount = 3
 
 	checkURL      = `https://qqt.cmicrwx.cn/2016tyjf_huido/xhmqqthy/res/wap/xdrNormal.html`
 	checkInterval = 1 * time.Minute
@@ -118,11 +116,11 @@ func logf(format string, args ...interface{}) {
 	fmt.Printf("[%s] %s", nowStr(), fmt.Sprintf(format, args...))
 }
 
+// newCmd 仅创建命令并设置工作目录
+// ✅ 修复：不再在此处绑定 Stdout/Stderr，避免与 CombinedOutput/Output 冲突
 func newCmd(dir, name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	return cmd
 }
 
@@ -145,8 +143,14 @@ func executeDeploy(cfg EnvConfig) (string, error) {
 	cmd := newCmd(absDir, "go", "run", "main.go",
 		"-config=version.config.json", "-mode=3", "-message", "切cdn")
 
-	output, err := cmd.CombinedOutput()
-	outputStr := string(output)
+	// ✅ 使用 MultiWriter 同时输出到控制台和 buffer
+	var buf bytes.Buffer
+	tee := io.MultiWriter(os.Stdout, &buf)
+	cmd.Stdout = tee
+	cmd.Stderr = tee
+
+	err = cmd.Run()
+	outputStr := buf.String()
 
 	if err != nil {
 		return outputStr, fmt.Errorf("部署命令执行失败: %w\n输出: %s", err, outputStr)
@@ -489,10 +493,10 @@ func buildFullNotifyContent(deployOutput string, logs []LogEntry, checkResult Ch
 }
 
 // ============================================================
-//  三种运行模式
+//  三种运行模式（返回 bool 表示任务是否已完成）
 // ============================================================
 
-func modeDeploy() {
+func modeDeploy() bool {
 	logf("===== 模式: 仅部署 =====\n")
 	cfg := getEnvConfig()
 
@@ -530,9 +534,10 @@ func modeDeploy() {
 		logf("通知失败: %v\n", err)
 	}
 	logf("===== 部署流程结束 =====\n")
+	return true
 }
 
-func modeCheck() {
+func modeCheck() bool {
 	logf("===== 模式: 仅检测更新 =====\n")
 	cfg := getEnvConfig()
 	result := runCheck(cfg)
@@ -542,9 +547,11 @@ func modeCheck() {
 		logf("通知失败: %v\n", err)
 	}
 	logf("===== 检测流程结束 =====\n")
+
+	return result.Found
 }
 
-func modeFull() {
+func modeFull() bool {
 	logf("===== 模式: 部署 + 检测 =====\n")
 	cfg := getEnvConfig()
 
@@ -560,7 +567,7 @@ func modeFull() {
 		title := fmt.Sprintf("⚠️ 部署异常 - %s", nowStr())
 		content := fmt.Sprintf("## 部署执行失败\n\n```\n%s\n```\n\n错误: %v", deployOutput, err)
 		_ = sendNotification(title, content)
-		return
+		return false
 	}
 
 	logs, err := getRecentSvnLogs(cfg)
@@ -579,6 +586,8 @@ func modeFull() {
 		logf("通知失败: %v\n", err)
 	}
 	logf("===== 完整流程结束 =====\n")
+
+	return result.Found
 }
 
 // ============================================================
@@ -587,8 +596,16 @@ func modeFull() {
 
 func main() {
 	mode := flag.String("mode", "full", "运行模式: deploy=仅部署, check=仅检测, full=部署+检测")
-	now := flag.Bool("now", false, "立即执行一次，不等待定时")
+	nowFlag := flag.Bool("now", false, "立即执行一次，不等待定时")
+	timeStr := flag.String("time", "2130", "定时执行时间(HHMM格式)，如 2130=21:30, 905=09:05")
 	flag.Parse()
+
+	scheduleHour, scheduleMinute, err := parseScheduleTime(*timeStr)
+	if err != nil {
+		logf("❌ 时间参数解析失败: %v\n", err)
+		logf("用法示例: -time=2130 (表示每天 21:30 执行)\n")
+		os.Exit(1)
+	}
 
 	logf("定时脚本启动\n")
 	logf("  模式: %s\n", *mode)
@@ -598,7 +615,7 @@ func main() {
 		logf("[警告] 环境变量 PUSH_PLUS 未设置，通知功能不可用\n")
 	}
 
-	var runFunc func()
+	var runFunc func() bool
 	switch *mode {
 	case "deploy":
 		runFunc = modeDeploy
@@ -611,10 +628,14 @@ func main() {
 		runFunc = modeFull
 	}
 
-	if *now {
+	if *nowFlag {
 		logf("检测到 --now 参数，立即执行\n")
-		runFunc()
-		return
+		done := runFunc()
+		if done {
+			logf("✅ 任务已完成，程序退出\n")
+			return
+		}
+		logf("⏳ 本次未完成，进入定时循环...\n")
 	}
 
 	for {
@@ -631,6 +652,41 @@ func main() {
 
 		timer := time.NewTimer(wait)
 		<-timer.C
-		runFunc()
+
+		done := runFunc()
+		if done {
+			logf("✅ 检测到文件已更新，任务完成，程序自动退出\n")
+			return
+		}
+		logf("⏳ 本次未检测到更新，将继续等待下一次定时执行...\n")
 	}
+}
+
+// parseScheduleTime 解析 HHMM 格式的时间字符串
+func parseScheduleTime(timeStr string) (int, int, error) {
+	timeStr = strings.TrimSpace(timeStr)
+	if timeStr == "" {
+		return 0, 0, fmt.Errorf("时间参数不能为空")
+	}
+
+	var hour, minute int
+	switch len(timeStr) {
+	case 3:
+		hour = int(timeStr[0] - '0')
+		minute = int(timeStr[1]-'0')*10 + int(timeStr[2]-'0')
+	case 4:
+		hour = int(timeStr[0]-'0')*10 + int(timeStr[1]-'0')
+		minute = int(timeStr[2]-'0')*10 + int(timeStr[3]-'0')
+	default:
+		return 0, 0, fmt.Errorf("时间格式错误: %q，请使用3~4位数字(如 905 或 2130)", timeStr)
+	}
+
+	if hour < 0 || hour > 23 {
+		return 0, 0, fmt.Errorf("小时数无效: %d (应为 0-23)", hour)
+	}
+	if minute < 0 || minute > 59 {
+		return 0, 0, fmt.Errorf("分钟数无效: %d (应为 0-59)", minute)
+	}
+
+	return hour, minute, nil
 }
