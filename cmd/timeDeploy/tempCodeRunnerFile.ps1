@@ -29,13 +29,13 @@ function Show-Menu {
     Write-Host ""
     Write-Host "  Select schedule time:"
     Write-Host ""
-    Write-Host "    [1] 21:00 (actual: 20:55)"
-    Write-Host "    [2] 21:30 (actual: 21:25)"
-    Write-Host "    [3] 22:00 (actual: 21:55)"
-    Write-Host "    [4] 24:00 (actual: 23:55)"
-    Write-Host "    [5] Custom time"
-    Write-Host "    [6] Run now (--now)"
-    Write-Host "    [7] Check update only (no deploy)"
+    Write-Host "    [1] 21:30 (default)"
+    Write-Host "    [2] 22:00"
+    Write-Host "    [3] 23:00"
+    Write-Host "    [4] 09:00 (next morning)"
+    Write-Host "    [5] 14:00 (afternoon)"
+    Write-Host "    [6] Custom time"
+    Write-Host "    [7] Run now (--now)"
     Write-Host "    [0] Exit"
     Write-Host ""
     Write-Host "============================================"
@@ -47,25 +47,25 @@ function Get-ScheduleTime {
         $choice = Read-Host "Enter option"
 
         switch ($choice) {
-            "1" { return @{ Time = "2055"; Now = $false; CheckOnly = $false } }
-            "2" { return @{ Time = "2125"; Now = $false; CheckOnly = $false } }
-            "3" { return @{ Time = "2155"; Now = $false; CheckOnly = $false } }
-            "4" { return @{ Time = "2355"; Now = $false; CheckOnly = $false } }
-            "5" {
+            "1" { return @{ Time = "2130"; Now = $false } }
+            "2" { return @{ Time = "2200"; Now = $false } }
+            "3" { return @{ Time = "2300"; Now = $false } }
+            "4" { return @{ Time = "900";  Now = $false } }
+            "5" { return @{ Time = "1400"; Now = $false } }
+            "6" {
                 Clear-Host
                 Write-Host "============================================"
                 Write-Host "         Custom Time (HHMM format)"
                 Write-Host "============================================"
                 Write-Host ""
                 Write-Host "  Example: 2130 = 21:30, 905 = 09:05"
-                Write-Host "  Note: Custom time runs at exact input."
                 Write-Host ""
                 $custom = Read-Host "Enter time"
 
                 if ($custom -match '^\d{3,4}$') {
                     $numVal = [int]$custom
                     if ($numVal -le 2359) {
-                        return @{ Time = $custom; Now = $false; CheckOnly = $false }
+                        return @{ Time = $custom; Now = $false }
                     } else {
                         Write-Host "`nTime out of range. Max is 2359." -ForegroundColor Yellow
                         Start-Sleep -Seconds 2
@@ -75,8 +75,7 @@ function Get-ScheduleTime {
                     Start-Sleep -Seconds 2
                 }
             }
-            "6" { return @{ Time = "2125"; Now = $true; CheckOnly = $false } }
-            "7" { return @{ Time = ""; Now = $true; CheckOnly = $true } }
+            "7" { return @{ Time = "2130"; Now = $true } }
             "0" { exit 0 }
             default {
                 Write-Host "`nInvalid option, please try again..." -ForegroundColor Yellow
@@ -87,13 +86,6 @@ function Get-ScheduleTime {
 }
 
 function Get-RunMode {
-    param([bool]$CheckOnly)
-
-    # 如果是纯检测模式，直接返回 check，跳过菜单
-    if ($CheckOnly) {
-        return "check"
-    }
-
     Clear-Host
     Write-Host "============================================"
     Write-Host "           Select Run Mode"
@@ -121,7 +113,7 @@ function Get-RunMode {
 # ===================== Main Loop =====================
 while ($true) {
     $schedule = Get-ScheduleTime
-    $mode = Get-RunMode -CheckOnly $schedule.CheckOnly
+    $mode = Get-RunMode
 
     # Confirm
     Clear-Host
@@ -129,14 +121,12 @@ while ($true) {
     Write-Host "             Confirm Start"
     Write-Host "============================================"
     Write-Host ""
-    if ($schedule.CheckOnly) {
-        Write-Host "  Mode: Check Update Only (Run Now)" -ForegroundColor Cyan
-    } elseif ($schedule.Now) {
+    if ($schedule.Now) {
         Write-Host "  Mode: Run Now ($mode)" -ForegroundColor Cyan
     } else {
         $timeStr = $schedule.Time.PadLeft(4, '0')
         $displayTime = "$($timeStr.Substring(0,2)):$($timeStr.Substring(2,2))"
-        Write-Host "  Scheduled Time: $displayTime" -ForegroundColor Cyan
+        Write-Host "  Time: $displayTime" -ForegroundColor Cyan
         Write-Host "  Mode: $mode" -ForegroundColor Cyan
     }
     Write-Host ""
@@ -150,16 +140,9 @@ while ($true) {
     Write-Host "============================================"
 
     # Build arguments
-    $goArgs = @("run", "main.go", "-mode=$mode")
-    
-    if ($schedule.CheckOnly) {
-        # 纯检测模式强制使用 --now 且不传 -time
+    $goArgs = @("run", "main.go", "-mode=$mode", "-time=$($schedule.Time)")
+    if ($schedule.Now) {
         $goArgs += "--now"
-    } else {
-        $goArgs += "-time=$($schedule.Time)"
-        if ($schedule.Now) {
-            $goArgs += "--now"
-        }
     }
 
     # Execute go command
