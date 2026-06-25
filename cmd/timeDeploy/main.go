@@ -141,7 +141,7 @@ func executeDeploy(cfg EnvConfig) (string, error) {
 	logf("  工作目录: %s\n", absDir)
 
 	cmd := newCmd(absDir, "go", "run", "main.go",
-		"-config=version.config.json", "-mode=3", "-message", "切cdn")
+		"-config=version.config.json", "-mode=2", "-message", "切cdn")
 
 	// ✅ 使用 MultiWriter 同时输出到控制台和 buffer
 	var buf bytes.Buffer
