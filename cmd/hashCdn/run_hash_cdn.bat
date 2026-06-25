@@ -36,26 +36,31 @@ echo.
 echo 请选择部署模式:
 REM [1] 默认的 copy
 REM [2] copy-commit (自动提交svn)
-echo [1] 执行前置脚本，然后 copy
-echo [2] 执行前置脚本，然后 copy-commit
-echo [3] 执行前置脚本，然后 copy-commit，提交git (HTML回滚后)
+echo [1] copy(常态化的走cdn，不包括盲盒组件)
+echo [2] copy-commit（常态化的走cdn，不包括盲盒组件）
+echo [3] copy-commit，提交git (HTML回滚后)
 echo [4] 保持相对路径(不替换CDN)，然后 copy
 echo [5] 保持相对路径(不替换CDN)，然后 copy-commit
 echo [6] 保持相对路径(不替换CDN)，然后 copy-commit，提交git
-echo [7] 仅部署，不处理hash，然后 copy
-echo [8] 仅部署，不处理hash，然后 copy-commit
+echo [7] copy (盲盒组件走cdn)
+echo [8] copy-commit (盲盒组件走cdn)
+echo [9] copy-commit，提交git (盲盒组件走cdn，HTML回滚后)
+echo [10] 仅部署，不处理hash，然后 copy
+echo [11] 仅部署，不处理hash，然后 copy-commit
 echo.
 
 set /p mode_input="请输入对应的数字 (默认=1): "
 if "%mode_input%"=="" set mode_input=1
 
 set "message_flag="
-REM 模式 2/3/5/6 涉及自动提交，提示用户输入自定义提交信息
+REM 模式 2/3/5/6/8/9 涉及自动提交，提示用户输入自定义提交信息
 if "%mode_input%"=="2" goto ask_message
-if "%mode_input%"=="3" goto ask_message
+if "%mode_input%"=="3" goto ask_messag7e
 if "%mode_input%"=="5" goto ask_message
 if "%mode_input%"=="6" goto ask_message
 if "%mode_input%"=="8" goto ask_message
+if "%mode_input%"=="9" goto ask_message
+if "%mode_input%"=="11" goto ask_message
 goto run
 
 :ask_message
@@ -67,17 +72,17 @@ goto run
 echo.
 echo [信息] 读取配置文件: version.config.json，使用模式: %mode_input%
 
-REM 模式 7/8 使用 -deploy/-deploy-commit 参数，不走 -mode
-if "%mode_input%"=="7" (
-    echo [调试] 完整命令: go run main.go -config=version.config.json -deploy %message_flag%
+REM 模式 10/11 使用 -deploy/-deploy-commit 参数，不走 -mode
+if "%mode_input%"=="10" (
+    echo [调试] 完整命令: hashCdn.exe -config=version.config.json -deploy %message_flag%
     echo.
-    go run main.go -config=version.config.json -deploy %message_flag%
+    hashCdn.exe -config=version.config.json -deploy %message_flag%
     goto check_result
 )
-if "%mode_input%"=="8" (
-    echo [调试] 完整命令: go run main.go -config=version.config.json -deploy-commit %message_flag%
+if "%mode_input%"=="11" (
+    echo [调试] 完整命令: hashCdn.exe -config=version.config.json -deploy-commit %message_flag%
     echo.
-    go run main.go -config=version.config.json -deploy-commit %message_flag%
+    hashCdn.exe -config=version.config.json -deploy-commit %message_flag%
     goto check_result
 )
 

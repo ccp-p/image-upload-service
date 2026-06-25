@@ -2297,7 +2297,7 @@ func main() {
 	debugMode := flag.Bool("debug", false, "调试模式（显示详细日志）")
 	deployOnly := flag.Bool("deploy", false, "仅执行部署（不处理hash）")
 	deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
-	deployMode := flag.Int("mode", 0, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push")
+	deployMode := flag.Int("mode", 7, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles)")
 	commitMessage := flag.String("message", "", "自定义SVN提交信息（不指定则使用Git最新提交信息）")
 
 	flag.Parse()
@@ -2325,15 +2325,15 @@ func main() {
 		switch *deployMode {
 		case 1:
 			config.Deploy.AutoCommit = false
-			config.Deploy.ForcePreScript = true
+			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy"
 		case 2:
 			config.Deploy.AutoCommit = true
-			config.Deploy.ForcePreScript = true
+			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy-commit"
 		case 3:
 			config.Deploy.AutoCommit = true
-			config.Deploy.ForcePreScript = true
+			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy-commit"
 			config.RollbackAfterDeploy = true    // 回滚HTML
 			config.GitCommitAfterRollback = true // 回滚后执行git commit和push
@@ -2354,6 +2354,23 @@ func main() {
 			config.CDNDomain = ""                // 不替换CDN
 			config.RollbackAfterDeploy = true    // 回滚HTML
 			config.GitCommitAfterRollback = true // 回滚后执行git commit和push
+		case 7:
+			config.Deploy.AutoCommit = false
+			config.Deploy.ForcePreScript = false
+			config.Deploy.Command = "copy"
+			config.CDNExcludeFiles = []string{} // 清空CDN排除文件
+		case 8:
+			config.Deploy.AutoCommit = true
+			config.Deploy.ForcePreScript = false
+			config.Deploy.Command = "copy-commit"
+			config.CDNExcludeFiles = []string{} // 清空CDN排除文件
+		case 9:
+			config.Deploy.AutoCommit = true
+			config.Deploy.ForcePreScript = false
+			config.Deploy.Command = "copy-commit"
+			config.RollbackAfterDeploy = true    // 回滚HTML
+			config.GitCommitAfterRollback = true // 回滚后执行git commit和push
+			config.CDNExcludeFiles = []string{}  // 清空CDN排除文件
 		}
 	}
 
