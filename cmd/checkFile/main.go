@@ -254,7 +254,10 @@ func updateCSSAfterMove(imagePath string, width, height int, basePath string) {
 
 	lines := strings.Split(string(content), "\n")
 	filename := filepath.Base(imagePath)
-	remBase:=200.0
+	remBase:=100.0
+	if(width > 1000){
+		remBase = 200.0
+	}
 	newWidthRem := fmt.Sprintf("%.2frem", float64(width)/remBase)
 	newHeightRem := fmt.Sprintf("%.2frem", float64(height)/remBase)
 
