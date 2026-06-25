@@ -37,7 +37,7 @@ echo 请选择部署模式:
 REM [1] 默认的 copy
 REM [2] copy-commit (自动提交svn)
 echo [1] copy(常态化的走cdn，不包括盲盒组件)
-echo [2] copy-commit（常态化的走cdn，不包括盲盒组件）
+echo [2] copy-commit（常态化的走cdn，不包括盲盒组件)
 echo [3] copy-commit，提交git (HTML回滚后)
 echo [4] 保持相对路径(不替换CDN)，然后 copy
 echo [5] 保持相对路径(不替换CDN)，然后 copy-commit
