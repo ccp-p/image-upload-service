@@ -2475,6 +2475,8 @@ func main() {
 			config.CDNExcludeFiles = []string{}  // 清空CDN排除文件
 		}
 	}
+	// deployMode
+	fmt.Printf("📋 部署模式: %d\n", *deployMode)
 
 	vm := NewVersionManager(*config, *debugMode)
 
