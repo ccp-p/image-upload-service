@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -1307,11 +1308,12 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 
 // DeployManager 部署管理器
 type DeployManager struct {
-	config       DeployConfig
-	sourcePath   string
-	destPath     string
-	debugMode    bool
-	folderOpened bool
+	config          DeployConfig
+	sourcePath      string
+	destPath        string
+	debugMode       bool
+	folderOpened    bool
+	sourceHashCache sync.Map // filePath -> hash string
 }
 
 // NewDeployManager 创建部署管理器
@@ -1378,6 +1380,9 @@ func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
 	// 检查无hash版本
 	if fileExists(fullPath) {
 		hash, _ := getFileHash(fullPath)
+		if hash != "" {
+			dm.sourceHashCache.Store(fullPath, hash)
+		}
 		info, _ := os.Stat(fullPath)
 		versions = append(versions, FileVersion{
 			Path:    fullPath,
@@ -1408,6 +1413,9 @@ func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
 		if hashPattern.MatchString(file.Name()) {
 			filePath := filepath.Join(dir, file.Name())
 			hash, _ := getFileHash(filePath)
+			if hash != "" {
+				dm.sourceHashCache.Store(filePath, hash)
+			}
 			info, _ := file.Info()
 			versions = append(versions, FileVersion{
 				Path:    filePath,
@@ -1576,8 +1584,18 @@ func (dm *DeployManager) copyFileWithVersions(sourcePath, destPath string) (int,
 
 		// 检查目标文件是否存在且内容相同
 		if fileExists(versionDestPath) {
-			destHash, err := getFileHash(versionDestPath)
-			if err == nil && destHash == version.Hash {
+			// 快速检查：文件大小不同则内容一定不同，跳过 MD5 计算
+			srcInfo, srcErr := os.Stat(version.Path)
+			dstInfo, dstErr := os.Stat(versionDestPath)
+			sameContent := false
+			if srcErr == nil && dstErr == nil && srcInfo.Size() == dstInfo.Size() {
+				// 大小相同，再比较 hash
+				destHash, err := getFileHash(versionDestPath)
+				if err == nil && destHash == version.Hash {
+					sameContent = true
+				}
+			}
+			if sameContent {
 				if dm.debugMode && isJSOrCSS(sourcePath) {
 					fmt.Printf("  ⏭️  跳过（内容相同）: %s\n", version.Name)
 				}
@@ -1612,38 +1630,89 @@ func (dm *DeployManager) handleWildcardPath(wildcardPath string) (int, int, erro
 		return 0, 0, fmt.Errorf("源目录不存在: %s", sourceDirPath)
 	}
 
-	totalCopied := 0
-	totalSkipped := 0
+	// 先收集所有文件路径
+	type fileTask struct {
+		relToSource string
+		destPath    string
+	}
+	var tasks []fileTask
 
 	err := filepath.Walk(sourceDirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
 		if info.IsDir() {
 			return nil
 		}
 
 		relPath, _ := filepath.Rel(sourceDirPath, path)
 		destPath := filepath.Join(destDirPath, relPath)
-
-		// 获取相对于sourcePath的路径用于查找版本
 		relToSource, _ := filepath.Rel(dm.sourcePath, path)
-
-		copied, skipped, err := dm.copyFileWithVersions(relToSource, destPath)
-		totalFailed := 0
-		if err != nil {
-			fmt.Printf("⚠️  处理失败: %s - %v\n", destPath, err)
-			totalFailed++
-			return nil
-		}
-
-		totalCopied += copied
-		totalSkipped += skipped
+		tasks = append(tasks, fileTask{relToSource, destPath})
 		return nil
 	})
+	if err != nil {
+		return 0, 0, err
+	}
 
-	return totalCopied, totalSkipped, err
+	// 并发处理文件
+	workerCount := runtime.NumCPU()
+	if workerCount > 4 {
+		workerCount = 4
+	}
+	if workerCount > len(tasks) {
+		workerCount = len(tasks)
+	}
+	if workerCount == 0 {
+		return 0, 0, nil
+	}
+
+	jobCh := make(chan fileTask, len(tasks))
+	resultCh := make(chan struct {
+		copied  int
+		skipped int
+		failed  bool
+	}, len(tasks))
+
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range jobCh {
+				copied, skipped, err := dm.copyFileWithVersions(t.relToSource, t.destPath)
+				failed := false
+				if err != nil {
+					fmt.Printf("⚠️  处理失败: %s - %v\n", t.destPath, err)
+					failed = true
+				}
+				resultCh <- struct {
+					copied  int
+					skipped int
+					failed  bool
+				}{copied, skipped, failed}
+			}
+		}()
+	}
+
+	for _, t := range tasks {
+		jobCh <- t
+	}
+	close(jobCh)
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	totalCopied := 0
+	totalSkipped := 0
+	for r := range resultCh {
+		totalCopied += r.copied
+		totalSkipped += r.skipped
+	}
+
+	return totalCopied, totalSkipped, nil
 }
 
 // isSvnRepo 检查是否是SVN仓库
@@ -1858,29 +1927,62 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 	totalSkipped := 0
 	totalFailed := 0
 
-	for _, filePath := range dm.config.FilePaths {
-		if strings.Contains(filePath, "*") {
-			copied, skipped, err := dm.handleWildcardPath(filePath)
-			if err != nil {
-				fmt.Printf("⚠️  处理失败: %s - %v\n", filePath, err)
-				totalFailed++
-				continue
-			}
-			totalCopied += copied
-			totalSkipped += skipped
-		} else {
-			sourcePath := strings.TrimPrefix(filePath, "/")
-			destPath := filepath.Join(dm.destPath, sourcePath)
+	// 并发处理文件，提高复制效率
+	workerCount := runtime.NumCPU()
+	if workerCount > 8 {
+		workerCount = 8
+	}
+	filePaths := dm.config.FilePaths
+	jobs := make(chan string, len(filePaths))
+	results := make(chan struct {
+		copied  int
+		skipped int
+		failed  int
+	}, len(filePaths))
 
-			copied, skipped, err := dm.copyFileWithVersions(sourcePath, destPath)
-			if err != nil {
-				fmt.Printf("⚠️  复制失败: %s - %v\n", filePath, err)
-				totalFailed++
-				continue
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for filePath := range jobs {
+				var copied, skipped int
+				var err error
+				if strings.Contains(filePath, "*") {
+					copied, skipped, err = dm.handleWildcardPath(filePath)
+				} else {
+					sourcePath := strings.TrimPrefix(filePath, "/")
+					destPath := filepath.Join(dm.destPath, sourcePath)
+					copied, skipped, err = dm.copyFileWithVersions(sourcePath, destPath)
+				}
+				failed := 0
+				if err != nil {
+					fmt.Printf("⚠️  处理失败: %s - %v\n", filePath, err)
+					failed = 1
+				}
+				results <- struct {
+					copied  int
+					skipped int
+					failed  int
+				}{copied, skipped, failed}
 			}
-			totalCopied += copied
-			totalSkipped += skipped
-		}
+		}()
+	}
+
+	for _, fp := range filePaths {
+		jobs <- fp
+	}
+	close(jobs)
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for r := range results {
+		totalCopied += r.copied
+		totalSkipped += r.skipped
+		totalFailed += r.failed
 	}
 
 	// 打印汇总
