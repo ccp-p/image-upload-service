@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 REM filepath: d:\project\my_go_project\image-upload-service\cmd\hashCdn\run_hash_cdn.bat
 @chcp 65001 >nul
 echo ========================================
@@ -32,6 +33,19 @@ if not exist "version.config.json" (
     exit /b 1
 )
 
+REM 缓存文件路径
+set "cache_file=%~dp0.run_cache.ini"
+
+REM 读取上次缓存的选项
+set "last_mode=1"
+set "last_message="
+if exist "%cache_file%" (
+    for /f "usebackq tokens=1,* delims==" %%a in ("%cache_file%") do (
+        if "%%a"=="mode" set "last_mode=%%b"
+        if "%%a"=="message" set "last_message=%%b"
+    )
+)
+
 echo.
 echo 请选择部署模式:
 REM [1] 默认的 copy
@@ -49,23 +63,60 @@ echo [10] 仅部署，不处理hash，然后 copy
 echo [11] 仅部署，不处理hash，然后 copy-commit
 echo.
 
-set /p mode_input="请输入对应的数字 (默认=1): "
-if "%mode_input%"=="" set mode_input=1
+if not "%last_message%"=="" (
+    echo [上次] 模式=%last_mode%, 提交信息=%last_message%
+) else (
+    echo [上次] 模式=%last_mode%
+)
+echo [提示] 直接回车使用上次选项，输入 r 重置所有选项
+echo.
+
+set /p mode_input="请输入对应的数字 (上次=%last_mode%，默认=1): "
+REM 直接回车使用上次的模式
+if "!mode_input!"=="" set mode_input=!last_mode!
+REM 输入 r 重置缓存
+if /i "!mode_input!"=="r" (
+    if exist "!cache_file!" del "!cache_file!"
+    echo [信息] 缓存已重置，请重新选择
+    echo.
+    set /p mode_input="请输入对应的数字 (默认=1): "
+    if "!mode_input!"=="" set mode_input=1
+    set "last_message="
+)
 
 set "message_flag="
-REM 模式 2/3/5/6/8/9 涉及自动提交，提示用户输入自定义提交信息
+set "custom_message="
+REM 模式 2/3/5/6/8/9/11 涉及自动提交，提示用户输入自定义提交信息
 if "%mode_input%"=="2" goto ask_message
-if "%mode_input%"=="3" goto ask_messag7e
+if "%mode_input%"=="3" goto ask_message
 if "%mode_input%"=="5" goto ask_message
 if "%mode_input%"=="6" goto ask_message
 if "%mode_input%"=="8" goto ask_message
 if "%mode_input%"=="9" goto ask_message
 if "%mode_input%"=="11" goto ask_message
-goto run
+goto save_cache
 
 :ask_message
-set /p custom_message="请输入提交信息 (留空则使用Git最新提交信息): "
-if not "%custom_message%"=="" set message_flag=-message "%custom_message%"
+if not "!last_message!"=="" (
+    echo [上次提交信息] !last_message!
+    set /p custom_message="请输入提交信息 (回车=上次, 留空=用Git最新提交): "
+    if "!custom_message!"=="" (
+        if defined last_message (
+            set "custom_message=!last_message!"
+        )
+    )
+) else (
+    set /p custom_message="请输入提交信息 (留空则使用Git最新提交信息): "
+)
+if not "!custom_message!"=="" set message_flag=-message "!custom_message!"
+goto save_cache
+
+:save_cache
+REM 保存本次选项到缓存文件
+(
+    echo mode=!mode_input!
+    echo message=!custom_message!
+) > "!cache_file!"
 goto run
 
 :run

@@ -5,3 +5,5 @@
 **/target
 /cmd/autoRetract/*.html
 **/doc
+
+.run_cache.ini
