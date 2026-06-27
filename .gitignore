@@ -7,3 +7,4 @@
 **/doc
 
 .run_cache.ini
+.run_cache.json
