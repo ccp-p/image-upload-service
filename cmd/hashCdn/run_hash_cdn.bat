@@ -36,13 +36,11 @@ if not exist "version.config.json" (
 REM 缓存文件路径
 set "cache_file=%~dp0.run_cache.ini"
 
-REM 读取上次缓存的选项
+REM 读取上次缓存的选项（只缓存模式）
 set "last_mode=1"
-set "last_message="
 if exist "%cache_file%" (
     for /f "usebackq tokens=1,* delims==" %%a in ("%cache_file%") do (
         if "%%a"=="mode" set "last_mode=%%b"
-        if "%%a"=="message" set "last_message=%%b"
     )
 )
 
@@ -63,11 +61,7 @@ echo [10] 仅部署，不处理hash，然后 copy
 echo [11] 仅部署，不处理hash，然后 copy-commit
 echo.
 
-if not "%last_message%"=="" (
-    echo [上次] 模式=%last_mode%, 提交信息=%last_message%
-) else (
-    echo [上次] 模式=%last_mode%
-)
+echo [上次] 模式=%last_mode%
 echo [提示] 直接回车使用上次选项，输入 r 重置所有选项
 echo.
 
@@ -81,7 +75,6 @@ if /i "!mode_input!"=="r" (
     echo.
     set /p mode_input="请输入对应的数字 (默认=1): "
     if "!mode_input!"=="" set mode_input=1
-    set "last_message="
 )
 
 set "message_flag="
@@ -97,25 +90,14 @@ if "%mode_input%"=="11" goto ask_message
 goto save_cache
 
 :ask_message
-if not "!last_message!"=="" (
-    echo [上次提交信息] !last_message!
-    set /p custom_message="请输入提交信息 (回车=上次, 留空=用Git最新提交): "
-    if "!custom_message!"=="" (
-        if defined last_message (
-            set "custom_message=!last_message!"
-        )
-    )
-) else (
-    set /p custom_message="请输入提交信息 (留空则使用Git最新提交信息): "
-)
+set /p custom_message="请输入提交信息 (留空则使用Git最新提交信息): "
 if not "!custom_message!"=="" set message_flag=-message "!custom_message!"
 goto save_cache
 
 :save_cache
-REM 保存本次选项到缓存文件
+REM 保存本次选项到缓存文件（只缓存模式）
 (
     echo mode=!mode_input!
-    echo message=!custom_message!
 ) > "!cache_file!"
 goto run
 
