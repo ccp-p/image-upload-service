@@ -31,7 +31,7 @@
     "companySourcePath": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap",
     "companyDestPath": "D:\\project\\cx_project\\china_mobile\\huidu\\xhmqqthy-res",
     "filePaths": [
-      "/components/*",
+      "/components/xdrsign/*",
       "/css/xdrNormal.css",
       "/images/xdrNormal/202505/*",
       "/scripts/js/xdrNormal.js",
