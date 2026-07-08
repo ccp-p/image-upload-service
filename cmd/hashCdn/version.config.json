@@ -8,7 +8,8 @@
   "RollbackAfterDeploy": true,
   "includeComponents": [
     "xdrInvite",
-    "xdrsign"
+    "xdrsign",
+    "xdrsignNew"
   ],
   "processMainResources": [
     "xdrNormal"
@@ -32,6 +33,7 @@
     "companyDestPath": "D:\\project\\cx_project\\china_mobile\\huidu\\xhmqqthy-res",
     "filePaths": [
       "/components/xdrsign/*",
+      "/components/xdrsignNew/*",
       "/css/xdrNormal.css",
       "/images/xdrNormal/202505/*",
       "/scripts/js/xdrNormal.js",
