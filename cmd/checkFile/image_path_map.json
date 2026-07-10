@@ -1,5 +1,5 @@
 {
-  "totalCount": 851,
+  "totalCount": 856,
   "lastUpdate": "0001-01-01T00:00:00Z",
   "mapping": {
     "afterGetEquityPop.png": [
@@ -967,23 +967,23 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\jd_anime.gif",
         "width": 229,
         "height": 308,
-        "size": 171393
+        "size": 466927
       }
     ],
     "jd_click.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\jd_click.png",
-        "width": 458,
-        "height": 616,
-        "size": 64621
+        "width": 229,
+        "height": 308,
+        "size": 27515
       }
     ],
     "jd_click_r.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\jd_click_r.png",
-        "width": 458,
-        "height": 616,
-        "size": 63632
+        "width": 229,
+        "height": 308,
+        "size": 26661
       }
     ],
     "jd_limit_txt.png": [
@@ -1239,7 +1239,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-enjoy-bg-migu.png",
         "width": 724,
         "height": 398,
-        "size": 92511
+        "size": 89270
       }
     ],
     "level-enjoy-bg.png": [
@@ -1253,9 +1253,9 @@
     "level-enjoy-get-migu.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-enjoy-get-migu.png",
-        "width": 534,
-        "height": 140,
-        "size": 12214
+        "width": 276,
+        "height": 84,
+        "size": 5907
       }
     ],
     "level-enjoy-get.png": [
@@ -1269,9 +1269,9 @@
     "level-enjoy-use-migu.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\level-enjoy-use-migu.png",
-        "width": 534,
-        "height": 140,
-        "size": 10535
+        "width": 276,
+        "height": 84,
+        "size": 5295
       }
     ],
     "level-enjoy-use.png": [
@@ -2000,8 +2000,8 @@
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\rule_bg.png",
         "width": 579,
-        "height": 4167,
-        "size": 183956
+        "height": 4108,
+        "size": 182614
       }
     ],
     "rule_bg_act.png": [
@@ -2024,8 +2024,8 @@
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\rule_bg_nor.png",
         "width": 579,
-        "height": 4167,
-        "size": 183956
+        "height": 4108,
+        "size": 182614
       }
     ],
     "rule_bg_wechat.png": [
@@ -2962,6 +2962,30 @@
         "size": 6892
       }
     ],
+    "sr_banner.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\sr_banner.png",
+        "width": 722,
+        "height": 200,
+        "size": 239232
+      }
+    ],
+    "sr_ck.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\sr_ck.png",
+        "width": 157,
+        "height": 58,
+        "size": 5394
+      }
+    ],
+    "sr_get.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\sr_get.png",
+        "width": 157,
+        "height": 58,
+        "size": 5805
+      }
+    ],
     "starbuck_bg.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\starbuck_bg.png",
@@ -3104,12 +3128,28 @@
         "size": 58852
       }
     ],
+    "untransfer-ljlq-spbpbxe.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\untransfer-ljlq-spbpbxe.png",
+        "width": 930,
+        "height": 170,
+        "size": 9036
+      }
+    ],
     "untransfer-ljlq.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\untransfer-ljlq.png",
         "width": 930,
         "height": 170,
         "size": 8743
+      }
+    ],
+    "untransfer-spbpbxe.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\untransfer-spbpbxe.png",
+        "width": 747,
+        "height": 113,
+        "size": 5675
       }
     ],
     "untransfer.png": [
@@ -3993,13 +4033,13 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrsign\\static\\popQy\\xdrdlpmnk.png",
         "width": 222,
         "height": 222,
-        "size": 3881
+        "size": 4042
       },
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrsign\\static\\xdrdlpmnk.png",
         "width": 200,
         "height": 208,
-        "size": 3800
+        "size": 3823
       }
     ],
     "xdrdylb.png": [
