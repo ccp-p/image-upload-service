@@ -78,7 +78,7 @@ echo.
 echo Running main.go ...
 echo ============================================
 cd /d "%SCRIPT_DIR%"
- autoDlcode.exe "!SELECTED_PATH!"
+autoDlcode.exe "!SELECTED_PATH!"
 
 echo.
 echo ============================================

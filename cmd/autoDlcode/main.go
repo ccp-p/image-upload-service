@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -137,7 +138,7 @@ func main() {
 		if len(localReplacements) == 0 {
 			fmt.Println("✅ 未发现需要下载的 CDN 图片，本地路径已是最新")
 			// 检查并移动 compressed 目录中的文件
-			checkAndMoveCompressedFiles(basePaths[0])
+			checkAndMoveCompressedFiles(basePaths[0], 0)
 			return
 		}
 		// 无 CDN 图片需下载，但本地路径与 resolveBasePaths 不一致 → 替换
@@ -151,7 +152,7 @@ func main() {
 		}
 		fmt.Printf("\n🎉 完成！共替换 %d 处本地路径\n", len(localReplacements))
 		// 检查并移动 compressed 目录中的文件
-		checkAndMoveCompressedFiles(basePaths[0])
+		checkAndMoveCompressedFiles(basePaths[0], 0)
 		return
 	}
 
@@ -194,12 +195,13 @@ func main() {
 	fmt.Printf("🔗 HTML主引用路径: %s<className>.png\n", primaryRef)
 
 	// 检查并移动 compressed 目录中的文件
-	checkAndMoveCompressedFiles(basePaths[0])
+	checkAndMoveCompressedFiles(basePaths[0], len(tasks))
 }
 
 // checkAndMoveCompressedFiles 检查并移动压缩文件到源目录
 // targetDir 为 HTML 中替换后的目标路径（如 ../../components/xdrsignNew/static/）
-func checkAndMoveCompressedFiles(targetDir string) {
+// expectedCount 为预期的压缩文件数量，>0 时会轮训等待所有文件就绪
+func checkAndMoveCompressedFiles(targetDir string, expectedCount int) {
 	compressedDir := `C:\Users\83795\Downloads\compressed`
 
 	// 检查compressed目录是否存在
@@ -222,9 +224,41 @@ func checkAndMoveCompressedFiles(targetDir string) {
 		}
 	}
 
-	if len(fileList) == 0 {
-		return
+	// 如果需要等待压缩文件，轮训直到所有文件就绪
+	if expectedCount > 0 && len(fileList) < expectedCount {
+		fmt.Printf("⏳ compressed 目录中 %d/%d 个文件，等待剩余文件...\n", len(fileList), expectedCount)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		timeout := time.After(5 * time.Minute)
+
+		for {
+			select {
+			case <-timeout:
+				fmt.Printf("⚠️  等待超时(5分钟)，compressed 目录中仅 %d/%d 个文件\n", len(fileList), expectedCount)
+				if len(fileList) == 0 {
+					return
+				}
+				goto proceed
+			case <-ticker.C:
+				files, err = os.ReadDir(compressedDir)
+				if err != nil {
+					continue
+				}
+				fileList = nil
+				for _, file := range files {
+					if !file.IsDir() {
+						fileList = append(fileList, file)
+					}
+				}
+				fmt.Printf("⏳ compressed 目录中 %d/%d 个文件\n", len(fileList), expectedCount)
+				if len(fileList) >= expectedCount {
+					fmt.Printf("✅ 所有 %d 个文件已就绪\n", expectedCount)
+					goto proceed
+				}
+			}
+		}
 	}
+proceed:
 
 	// 根据环境变量确定源目录
 	isHome := os.Getenv("IS_HOME") == "1"
