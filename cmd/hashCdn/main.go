@@ -2399,7 +2399,7 @@ func main() {
 	debugMode := flag.Bool("debug", false, "调试模式（显示详细日志）")
 	deployOnly := flag.Bool("deploy", false, "仅执行部署（不处理hash）")
 	deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
-	deployMode := flag.Int("mode", 7, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles)")
+	deployMode := flag.Int("mode", 6, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles)")
 	commitMessage := flag.String("message", "", "自定义SVN提交信息（不指定则使用Git最新提交信息）")
 
 	flag.Parse()
