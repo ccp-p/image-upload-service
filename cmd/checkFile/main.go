@@ -65,6 +65,7 @@ func ensureCache(basePath string) (*CacheData, error) {
 	// 扫描当前目录获取图片总数
 	staticList:= []string{
 		"components/xdrsign/static",
+		"components/xdrsignNew/static",
 		"images/xdrNormal/202505",
 		"components/xdrInvite/static",
 	}
@@ -314,6 +315,7 @@ func getCSSPath(imagePath, basePath string) string {
 
 	mapping := map[string]string{
 		"components/xdrsign/static":   "components/xdrsign/index.css",
+		"components/xdrsignNew/static": "components/xdrsignNew/index.css",
 		"components/xdrInvite/static": "components/xdrInvite/index.css",
 		"images/xdrNormal/202505":     "css/xdrNormal.css",
 	}

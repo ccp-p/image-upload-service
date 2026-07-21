@@ -1989,6 +1989,11 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 	fmt.Printf("\n%s\n", strings.Repeat("=", 50))
 	fmt.Printf("📊 复制完成: 复制 %d, 跳过 %d, 失败 %d\n", totalCopied, totalSkipped, totalFailed)
 
+	// 检查并移动 compressed 目录中的文件
+	if err := dm.checkAndMoveCompressedFiles(); err != nil {
+		fmt.Printf("⚠️  检查压缩文件失败: %v\n", err)
+	}
+
 	// 验证 CDN 资源存在性
 	if htmlPath != "" && cdnDomain != "" {
 		fmt.Println("🔍 正在校验 HTML 中的 CDN 资源 (已忽略注释内容)...")
@@ -2035,6 +2040,68 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 	// 打开文件夹
 	dm.openFolder()
 
+	return nil
+}
+
+// checkAndMoveCompressedFiles 检查并移动压缩文件到源目录
+func (dm *DeployManager) checkAndMoveCompressedFiles() error {
+	compressedDir := `C:\Users\83795\Downloads\compressed`
+
+	// 检查compressed目录是否存在
+	if !fileExists(compressedDir) {
+		return nil
+	}
+
+	// 读取compressed目录中的文件
+	files, err := os.ReadDir(compressedDir)
+	if err != nil {
+		return err
+	}
+
+	// 过滤出非目录文件
+	var fileList []os.DirEntry
+	for _, file := range files {
+		if !file.IsDir() {
+			fileList = append(fileList, file)
+		}
+	}
+
+	if len(fileList) == 0 {
+		return nil
+	}
+
+	// 列出所有文件
+	fmt.Println("\n📦 发现以下文件在 compressed 目录中:")
+	for i, file := range fileList {
+		fmt.Printf("  %d. %s\n", i+1, file.Name())
+	}
+
+	// 询问用户是否移动
+	fmt.Print("\n是否将这些文件移动到源目录? (y/n) 回车默认y: ")
+	var response string
+	fmt.Scanln(&response)
+
+	if strings.ToLower(strings.TrimSpace(response)) != "y" {
+		fmt.Println("⏭️  跳过移动文件")
+		return nil
+	}
+
+	// 移动文件到源目录
+	movedCount := 0
+	for _, file := range fileList {
+		srcPath := filepath.Join(compressedDir, file.Name())
+		dstPath := filepath.Join(dm.sourcePath, file.Name())
+
+		if err := os.Rename(srcPath, dstPath); err != nil {
+			fmt.Printf("⚠️  移动失败: %s - %v\n", file.Name(), err)
+			continue
+		}
+
+		fmt.Printf("✅ 已移动: %s -> %s\n", file.Name(), dm.sourcePath)
+		movedCount++
+	}
+
+	fmt.Printf("\n🎉 共移动 %d 个文件到 %s\n", movedCount, dm.sourcePath)
 	return nil
 }
 
