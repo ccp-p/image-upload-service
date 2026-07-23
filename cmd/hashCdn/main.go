@@ -24,8 +24,8 @@ var (
 	reOldHashSuffix  = regexp.MustCompile(`\.[a-f0-9]{8}$`)
 	reCSSUrlCollect  = regexp.MustCompile(`url\(['"]?([^'")\s]+)['"]?\)`)
 	reCSSUrlReplace  = regexp.MustCompile(`url\(\s*(['"]?)([^'")\s]+)(['"]?)\s*\)`)
-	reHTMLCSSLink    = regexp.MustCompile(`<link[^>]*href\s*=\s*['"]([^'"]+\.css)['"]`)
-	reHTMLJSScript   = regexp.MustCompile(`<script[^>]*src\s*=\s*['"]([^'"]+\.js)['"]`)
+	reHTMLCSSLink    = regexp.MustCompile(`<link[^>]*href\s*=\s*['"]([^'"]+\.css(?:\?[^'"]*)?)['"]`)
+	reHTMLJSScript   = regexp.MustCompile(`<script[^>]*src\s*=\s*['"]([^'"]+\.js(?:\?[^'"]*)?)['"]`)
 	reHTMLComment    = regexp.MustCompile(`(?s)<!--.*?-->`)
 
 	// CDN 全局替换用的正则（编译一次）
@@ -840,6 +840,10 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
 	for _, match := range cssMatches {
 		if len(match) >= 2 {
 			cssPath := match[1]
+			// 移除查询参数（如 ?v=202607107）
+			if idx := strings.Index(cssPath, "?"); idx != -1 {
+				cssPath = cssPath[:idx]
+			}
 			isExternal := strings.HasPrefix(cssPath, "http") || strings.HasPrefix(cssPath, "//")
 
 			if isExternal {
@@ -863,6 +867,10 @@ func (vm *VersionManager) collectResourcesFromHTML(htmlPath string) (map[string]
 	for _, match := range jsMatches {
 		if len(match) >= 2 {
 			jsPath := match[1]
+			// 移除查询参数（如 ?v=202607107）
+			if idx := strings.Index(jsPath, "?"); idx != -1 {
+				jsPath = jsPath[:idx]
+			}
 			isExternal := strings.HasPrefix(jsPath, "http") || strings.HasPrefix(jsPath, "//")
 
 			if isExternal {
@@ -892,6 +900,11 @@ func (vm *VersionManager) processComponentResource(htmlDir, relativePath string)
 		if idx != -1 {
 			targetPath = relativePath[idx:]
 		}
+	}
+
+	// 移除查询参数（如 ?v=202607107）用于文件路径解析
+	if idx := strings.Index(targetPath, "?"); idx != -1 {
+		targetPath = targetPath[:idx]
 	}
 
 	absolutePath := filepath.Join(htmlDir, filepath.FromSlash(targetPath))
@@ -1117,8 +1130,8 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 			escapedPath = strings.ReplaceAll(escapedPath, "/", `[/\\]`)
 
 			patterns := []string{
-				fmt.Sprintf(`(%s['"])(%s)(['"][^>]*>)`, tagAttr, escapedPath),
-				fmt.Sprintf(`(%s['"])(\.{1,2}[/\\]%s)(['"][^>]*>)`, tagAttr, escapedPath),
+				fmt.Sprintf(`(%s['"])(%s)(\?[^'"]*)?(['"][^>]*>)`, tagAttr, escapedPath),
+				fmt.Sprintf(`(%s['"])(\.{1,2}[/\\]%s)(\?[^'"]*)?(['"][^>]*>)`, tagAttr, escapedPath),
 			}
 
 			matched := false
@@ -1127,10 +1140,11 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 				if re.MatchString(contentStr) {
 					newContent := re.ReplaceAllStringFunc(contentStr, func(match string) string {
 						submatches := re.FindStringSubmatch(match)
-						if len(submatches) >= 4 {
+						if len(submatches) >= 5 {
 							prefix := submatches[1]
 							oldPath := submatches[2]
-							suffix := submatches[3]
+							// submatches[3] is the optional query string, ignored
+							suffix := submatches[4]
 
 							var oldDir string
 							isUrl := strings.HasPrefix(originalRelPath, "http") || strings.HasPrefix(originalRelPath, "//")
@@ -2466,7 +2480,7 @@ func main() {
 	debugMode := flag.Bool("debug", false, "调试模式（显示详细日志）")
 	deployOnly := flag.Bool("deploy", false, "仅执行部署（不处理hash）")
 	deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
-	deployMode := flag.Int("mode", 7, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles)")
+	deployMode := flag.Int("mode", 6, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles)")
 	commitMessage := flag.String("message", "", "自定义SVN提交信息（不指定则使用Git最新提交信息）")
 
 	flag.Parse()
