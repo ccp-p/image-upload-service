@@ -94,7 +94,7 @@ func main() {
 	htmlStr := string(content)
 
 	// 解析 CSS (支持 background 和 background-image 两种写法，兼容多行 CSS)
-	reRule := regexp.MustCompile(`\.([a-zA-Z0-9_-]+)\s*\{[^}]*background(?:-image)?:\s*url\(\s*['"]?(.*?)['"]?\s*\)[^}]*\}`)
+	reRule := regexp.MustCompile(`\.([a-zA-Z0-9_-]+)\s*\{[^}]*background(?:-image)?:\s*url$$\s*['"]?(.*?)['"]?\s*$$[^}]*\}`)
 	matches := reRule.FindAllStringSubmatch(htmlStr, -1)
 
 	tasks := []task{}
@@ -198,6 +198,50 @@ func main() {
 	checkAndMoveCompressedFiles(basePaths[0], len(tasks))
 }
 
+// filterNonDirs 过滤出非目录文件
+func filterNonDirs(entries []os.DirEntry) []os.DirEntry {
+	var result []os.DirEntry
+	for _, e := range entries {
+		if !e.IsDir() {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// waitForAllReady 轮询 compressed 目录，等待文件数量达到预期后返回
+// expectedCount > 0 时会轮训等待所有文件就绪
+func waitForAllReady(compressedDir string, expectedCount int, initialFiles []os.DirEntry) []os.DirEntry {
+	if expectedCount <= 0 || len(initialFiles) >= expectedCount {
+		return initialFiles
+	}
+
+	fmt.Printf("⏳ compressed 目录中 %d/%d 个文件，等待剩余文件...\n", len(initialFiles), expectedCount)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	timeout := time.After(5 * time.Minute)
+	files := initialFiles
+
+	for {
+		select {
+		case <-timeout:
+			fmt.Printf("⚠️  等待超时(5分钟)，compressed 目录中仅 %d/%d 个文件\n", len(files), expectedCount)
+			return files
+		case <-ticker.C:
+			entries, err := os.ReadDir(compressedDir)
+			if err != nil {
+				continue
+			}
+			files = filterNonDirs(entries)
+			fmt.Printf("⏳ compressed 目录中 %d/%d 个文件\n", len(files), expectedCount)
+			if len(files) >= expectedCount {
+				fmt.Printf("✅ 所有 %d 个文件已就绪\n", expectedCount)
+				return files
+			}
+		}
+	}
+}
+
 // checkAndMoveCompressedFiles 检查并移动压缩文件到源目录
 // targetDir 为 HTML 中替换后的目标路径（如 ../../components/xdrsignNew/static/）
 // expectedCount 为预期的压缩文件数量，>0 时会轮训等待所有文件就绪
@@ -210,55 +254,20 @@ func checkAndMoveCompressedFiles(targetDir string, expectedCount int) {
 	}
 
 	// 读取compressed目录中的文件
-	files, err := os.ReadDir(compressedDir)
+	entries, err := os.ReadDir(compressedDir)
 	if err != nil {
 		fmt.Printf("⚠️  读取compressed目录失败: %v\n", err)
 		return
 	}
 
 	// 过滤出非目录文件
-	var fileList []os.DirEntry
-	for _, file := range files {
-		if !file.IsDir() {
-			fileList = append(fileList, file)
-		}
-	}
+	fileList := filterNonDirs(entries)
 
 	// 如果需要等待压缩文件，轮训直到所有文件就绪
-	if expectedCount > 0 && len(fileList) < expectedCount {
-		fmt.Printf("⏳ compressed 目录中 %d/%d 个文件，等待剩余文件...\n", len(fileList), expectedCount)
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		timeout := time.After(5 * time.Minute)
-
-		for {
-			select {
-			case <-timeout:
-				fmt.Printf("⚠️  等待超时(5分钟)，compressed 目录中仅 %d/%d 个文件\n", len(fileList), expectedCount)
-				if len(fileList) == 0 {
-					return
-				}
-				goto proceed
-			case <-ticker.C:
-				files, err = os.ReadDir(compressedDir)
-				if err != nil {
-					continue
-				}
-				fileList = nil
-				for _, file := range files {
-					if !file.IsDir() {
-						fileList = append(fileList, file)
-					}
-				}
-				fmt.Printf("⏳ compressed 目录中 %d/%d 个文件\n", len(fileList), expectedCount)
-				if len(fileList) >= expectedCount {
-					fmt.Printf("✅ 所有 %d 个文件已就绪\n", expectedCount)
-					goto proceed
-				}
-			}
-		}
+	fileList = waitForAllReady(compressedDir, expectedCount, fileList)
+	if len(fileList) == 0 {
+		return
 	}
-proceed:
 
 	// 根据环境变量确定源目录
 	isHome := os.Getenv("IS_HOME") == "1"
