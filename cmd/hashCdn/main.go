@@ -20,8 +20,8 @@ import (
 
 // 包级正则：编译一次，全局复用
 var (
-	reHashInFilename = regexp.MustCompile(`^(.+)\.([a-f0-9]{8})\.(css|js|jpg|jpeg|png|gif|svg|webp|ico)$`)
-	reOldHashSuffix  = regexp.MustCompile(`\.[a-f0-9]{8}$`)
+	reHashInFilename = regexp.MustCompile(`^(.+)\.([a-f0-9]{4,64})\.(css|js|jpg|jpeg|png|gif|svg|webp|ico)$`)
+	reOldHashSuffix  = regexp.MustCompile(`\.[a-f0-9]{4,64}$`)
 	reCSSUrlCollect  = regexp.MustCompile(`url\(['"]?([^'")\s]+)['"]?\)`)
 	reCSSUrlReplace  = regexp.MustCompile(`url\(\s*(['"]?)([^'")\s]+)(['"]?)\s*\)`)
 	reHTMLCSSLink    = regexp.MustCompile(`<link[^>]*href\s*=\s*['"]([^'"]+\.css(?:\?[^'"]*)?)['"]`)
@@ -37,6 +37,60 @@ var (
 )
 
 // getRegex 从缓存获取编译好的正则，未命中则编译并缓存
+// 部署模式常量（消除 main() 中的魔法数字）
+const (
+	ModePreScriptCopy                = 1
+	ModePreScriptCopyCommit          = 2
+	ModePreScriptCopyCommitRollback  = 3
+	ModeCopyNoCDN                    = 4
+	ModeCopyCommitNoCDN              = 5
+	ModeCopyCommitRollbackNoCDN      = 6
+	ModeCopyExcludeCDN               = 7
+	ModeCopyCommitExcludeCDN         = 8
+	ModeCopyCommitRollbackExcludeCDN = 9
+)
+
+// isHomeEnv 判断当前是否为家庭环境（集中管理 IS_HOME 检查）
+func isHomeEnv() bool {
+	return os.Getenv("IS_HOME") == "1"
+}
+
+// vcsSvnDelete 通知SVN删除文件（保留本地副本），消除 VersionManager 和 DeployManager 中的重复实现
+func vcsSvnDelete(filePath string, debugMode bool) {
+	if _, err := exec.LookPath("svn"); err != nil {
+		return
+	}
+	dir := filepath.Dir(filePath)
+	filename := filepath.Base(filePath)
+	cmd := exec.Command("svn", "delete", "--keep-local", filename)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if debugMode {
+			fmt.Printf("      ⚠️  SVN delete 失败: %s (%v)\n", filename, err)
+			fmt.Printf("      Output: %s\n", string(output))
+		}
+	} else if debugMode {
+		fmt.Printf("    📝 SVN delete: %s\n", filename)
+	}
+}
+
+// vcsGitAdd 执行 git add，消除 VersionManager 中的重复实现
+func vcsGitAdd(filePath string, debugMode bool) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return
+	}
+	cmd := exec.Command("git", "add", filepath.Base(filePath))
+	cmd.Dir = filepath.Dir(filePath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if debugMode {
+			fmt.Printf("      ⚠️  Git add 失败: %s (%v)\n", filepath.Base(filePath), err)
+			fmt.Printf("      Output: %s\n", string(output))
+		}
+	} else if debugMode {
+		fmt.Printf("    ➕ Git add: %s\n", filepath.Base(filePath))
+	}
+}
+
 func getRegex(pattern string) *regexp.Regexp {
 	if v, ok := regexCache.Load(pattern); ok {
 		return v.(*regexp.Regexp)
@@ -102,6 +156,8 @@ type DeployConfig struct {
 	GitAuthors        []string `json:"gitAuthors"`
 	CDNPathPrefix     string   `json:"cdnPathPrefix"` // 新增：CDN URL中需要裁掉的前缀映射，例如 /2016tyjf/xhmqqthy/res/wap/
 	ForcePreScript    bool     `json:"-"`             // 运行时覆盖：是否强制执行前置脚本
+	HomeNodeScript    string   `json:"homeNodeScript"`    // 家里电脑的Node.js部署脚本路径
+	CompanyNodeScript string   `json:"companyNodeScript"` // 公司电脑的Node.js部署脚本路径
 }
 
 // VersionManager 版本管理器
@@ -146,39 +202,21 @@ func NewVersionManager(config Config, debugMode bool) *VersionManager {
 	return vm
 }
 
-// gitAddFile 执行 git add 命令
-func (vm *VersionManager) gitAddFile(filePath string) {
-	// 简单检查git是否存在
-	if _, err := exec.LookPath("git"); err != nil {
-		return
-	}
-
-	cmd := exec.Command("git", "add", filepath.Base(filePath))
-	cmd.Dir = filepath.Dir(filePath)
-
-	if output, err := cmd.CombinedOutput(); err != nil {
-		if vm.debugMode {
-			fmt.Printf("      ⚠️  Git add 失败: %s (%v)\n", filepath.Base(filePath), err)
-			fmt.Printf("      Output: %s\n", string(output))
-		}
-	} else {
-		if vm.debugMode {
-			fmt.Printf("    ➕ Git add: %s\n", filepath.Base(filePath))
-		}
-	}
-}
-
-// runNodeCopyScript 执行Node.js复制脚本
+// runNodeCopyScript 执行Node.js复制脚本（路径从配置文件读取，回退到硬编码默认值）
 func (vm *VersionManager) runNodeCopyScript() {
-	isHome := os.Getenv("IS_HOME")
 	var scriptPath string
-
-	if isHome == "1" {
+	if isHomeEnv() {
 		fmt.Println("🏠 当前环境: Home")
-		scriptPath = `D:\self_project\js_project\miaowei\test\auto\normal.js`
+		scriptPath = vm.config.Deploy.HomeNodeScript
+		if scriptPath == "" {
+			scriptPath = `D:\self_project\js_project\miaowei\test\auto\normal.js`
+		}
 	} else {
 		fmt.Println("🏢 当前环境: Office")
-		scriptPath = `d:\project\my_web_project\web\train\miaov-disk\Cloud_disk\test\auto\normal.js`
+		scriptPath = vm.config.Deploy.CompanyNodeScript
+		if scriptPath == "" {
+			scriptPath = `d:\project\my_web_project\web\train\miaov-disk\Cloud_disk\test\auto\normal.js`
+		}
 	}
 
 	fmt.Printf("🚀 执行部署脚本: node %s copy\n", scriptPath)
@@ -268,7 +306,7 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
 		vm.logf("  🔍 查找旧hash文件: %s%s (当前hash: %s)\n", basename, ext, currentHash)
 	}
 
-	hashPattern := fmt.Sprintf(`^%s\.([a-f0-9]{8})%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext))
+	hashPattern := fmt.Sprintf(`^%s\.([a-f0-9]{4,64})%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext))
 	re := getRegex(hashPattern)
 
 	files, err := os.ReadDir(dir)
@@ -285,7 +323,7 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
 		hashMatches := re.FindStringSubmatch(filename)
 		if len(hashMatches) >= 2 && hashMatches[1] != currentHash {
 			oldFilePath := filepath.Join(dir, filename)
-			vm.svnDeleteFile(oldFilePath)
+			vcsSvnDelete(oldFilePath, vm.debugMode)
 			if err := os.Remove(oldFilePath); err != nil {
 				if isJSOrCSS(filename) {
 					fmt.Printf("    ⚠️  删除失败: %s\n", filename)
@@ -304,30 +342,6 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
 	}
 
 	return nil
-}
-
-// svnDeleteFile 通知SVN删除文件（如果在SVN仓库中）
-func (vm *VersionManager) svnDeleteFile(filePath string) {
-	if _, err := exec.LookPath("svn"); err != nil {
-		return
-	}
-
-	dir := filepath.Dir(filePath)
-	filename := filepath.Base(filePath)
-
-	cmd := exec.Command("svn", "delete", "--keep-local", filename)
-	cmd.Dir = dir
-
-	if output, err := cmd.CombinedOutput(); err != nil {
-		if vm.debugMode {
-			fmt.Printf("      ⚠️  SVN delete 失败: %s (%v)\n", filename, err)
-			fmt.Printf("      Output: %s\n", string(output))
-		}
-	} else {
-		if vm.debugMode {
-			fmt.Printf("    📝 SVN delete: %s\n", filename)
-		}
-	}
 }
 
 // processHTMLFile 处理单个HTML文件及其关联资源
@@ -517,7 +531,7 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
 
 // processMultipleHTMLFiles 批量处理多个HTML文件
 func (vm *VersionManager) processMultipleHTMLFiles(htmlPaths []string) {
-	fmt.Println("🚀 开始批量处理HTML文件...\n")
+	fmt.Println("🚀 开始批量处理HTML文件...")
 
 	for _, htmlPath := range htmlPaths {
 		absolutePath := filepath.Join(vm.config.RootDir, htmlPath)
@@ -576,11 +590,25 @@ func fileExists(path string) bool {
 }
 
 func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
+	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0644)
+	defer srcFile.Close()
+
+	info, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
 }
 
 // renameFileWithHash 重命名文件（如果hash改变）
@@ -636,7 +664,7 @@ func (vm *VersionManager) renameFileWithHash(filePath string) (*FileInfo, error)
 		return nil, fmt.Errorf("复制文件失败: %v", err)
 	}
 
-	vm.gitAddFile(newPath) // 自动添加到git
+	vcsGitAdd(newPath, vm.debugMode) // 自动添加到git
 
 	if isJSOrCSS(newFilename) {
 		fmt.Printf("  ✅ 已生成: %s\n", newFilename)
@@ -1082,16 +1110,19 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
 			finalCssFilename := vm.addHashToFilename(cleanFilename, newHash)
 			finalCssPath := filepath.Join(cssDir, finalCssFilename)
 
-			if finalCssPath != hashedCssPath {
-				os.Rename(hashedCssPath, finalCssPath)
-				hashedCssPath = finalCssPath
+		if finalCssPath != hashedCssPath {
+			if err := os.Rename(hashedCssPath, finalCssPath); err != nil {
+				os.Remove(hashedCssPath)
+				return nil, fmt.Errorf("重命名CSS哈希文件失败: %v", err)
+			}
+			hashedCssPath = finalCssPath
 				hashedCssFilename = finalCssFilename
 				originalHash = newHash
 			}
 		}
 	}
 
-	vm.gitAddFile(hashedCssPath) // 自动添加到git
+	vcsGitAdd(hashedCssPath, vm.debugMode) // 自动添加到git
 
 	// 删除旧的CSS hash文件
 	cssExt := filepath.Ext(cleanFilename)
@@ -1346,7 +1377,7 @@ type DeployManager struct {
 
 // NewDeployManager 创建部署管理器
 func NewDeployManager(config DeployConfig, debugMode bool) *DeployManager {
-	isHome := os.Getenv("IS_HOME") == "1"
+	isHome := isHomeEnv()
 
 	var sourcePath, destPath string
 	if isHome {
@@ -1405,7 +1436,10 @@ func loadDeployCache(cachePath string) *DeployCache {
 		cachePath: cachePath,
 	}
 	if data, err := os.ReadFile(cachePath); err == nil {
-		_ = json.Unmarshal(data, &dc.Files)
+		if err := json.Unmarshal(data, &dc.Files); err != nil {
+			fmt.Printf("⚠️  部署缓存解析失败，将重建缓存: %v\n", err)
+			dc.Files = make(map[string]FileCacheEntry)
+		}
 		if dc.Files == nil {
 			dc.Files = make(map[string]FileCacheEntry)
 		}
@@ -1467,6 +1501,15 @@ func (dc *DeployCache) updateCache(filePath, hash string, size, modTime int64) {
 	dc.Files[key] = FileCacheEntry{Hash: hash, Size: size, ModTime: modTime}
 	dc.dirty = true
 	dc.mu.Unlock()
+}
+
+// FileVersion 文件版本信息
+type FileVersion struct {
+	Path    string
+	Name    string
+	HasHash bool
+	ModTime time.Time
+	Hash    string
 }
 
 // findAllFileVersions 查找文件的所有版本（包含hash值）
@@ -1555,15 +1598,6 @@ func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
 	return versions
 }
 
-// FileVersion 文件版本信息
-type FileVersion struct {
-	Path    string
-	Name    string
-	HasHash bool
-	ModTime time.Time
-	Hash    string
-}
-
 // cleanHashFiles 清理旧的hash文件
 func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 	destDir := filepath.Dir(destPath)
@@ -1594,7 +1628,7 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 		if hashPattern.MatchString(file.Name()) {
 			filePath := filepath.Join(destDir, file.Name())
 			// 先通知SVN删除，再删除本地文件
-			dm.svnDeleteFile(filePath)
+			vcsSvnDelete(filePath, dm.debugMode)
 			if err := os.Remove(filePath); err == nil {
 				deletedCount++
 				if isJSOrCSS(file.Name()) {
@@ -1605,30 +1639,6 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 	}
 
 	return deletedCount
-}
-
-// svnDeleteFile 通知SVN删除文件（如果在SVN仓库中）
-func (dm *DeployManager) svnDeleteFile(filePath string) {
-	if _, err := exec.LookPath("svn"); err != nil {
-		return
-	}
-
-	dir := filepath.Dir(filePath)
-	filename := filepath.Base(filePath)
-
-	cmd := exec.Command("svn", "delete", "--keep-local", filename)
-	cmd.Dir = dir
-
-	if output, err := cmd.CombinedOutput(); err != nil {
-		if dm.debugMode {
-			fmt.Printf("      ⚠️  SVN delete 失败: %s (%v)\n", filename, err)
-			fmt.Printf("      Output: %s\n", string(output))
-		}
-	} else {
-		if dm.debugMode {
-			fmt.Printf("    📝 SVN delete: %s\n", filename)
-		}
-	}
 }
 
 // copyFileWithVersions 复制文件（包括hash版本）
@@ -1750,11 +1760,11 @@ func (dm *DeployManager) handleWildcardPath(wildcardPath string) (int, int, erro
 	}
 	var tasks []fileTask
 
-	err := filepath.Walk(sourceDirPath, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(sourceDirPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
 
@@ -2092,7 +2102,7 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 		}
 	}
 
-	fmt.Println("📦 开始复制文件...\n")
+	fmt.Println("📦 开始复制文件...")
 
 	totalCopied := 0
 	totalSkipped := 0
@@ -2391,13 +2401,19 @@ func (vm *VersionManager) gitCommitAndPushAfterRollback(htmlPath string) error {
 	}
 
 	// 1. 获取最新的git commit hash作为提交信息
-	hash, _, err := vm.getLatestGitCommitForRollback(dir)
+	hash, message, err := vm.getLatestGitCommitForRollback(dir)
 	if err != nil {
 		fmt.Printf("⚠️  获取Git提交信息失败: %v\n", err)
 		// 使用时间戳作为备选提交信息
 		hash = time.Now().Format("20060102150405")
+		message = ""
 	}
-	hash = "hash化"
+	var commitMsg string
+	if message != "" {
+		commitMsg = fmt.Sprintf("rollback after deploy: %s (%s)", message, hash)
+	} else {
+		commitMsg = fmt.Sprintf("rollback after deploy (ref: %s)", hash)
+	}
 
 	// 2. 执行 git add -A (全量添加)
 	fmt.Printf("  📁 执行 git add -A...\n")
@@ -2424,8 +2440,8 @@ func (vm *VersionManager) gitCommitAndPushAfterRollback(htmlPath string) error {
 	}
 
 	// 4. 执行 git commit
-	fmt.Printf("  📝 执行 git commit -m \"%s\"...\n", hash)
-	commitCmd := exec.Command("git", "commit", "-m", hash)
+	fmt.Printf("  📝 执行 git commit -m \"%s\"...\n", commitMsg)
+	commitCmd := exec.Command("git", "commit", "-m", commitMsg)
 	commitCmd.Dir = dir
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		fmt.Printf("❌ Git commit 失败: %v\n", err)
@@ -2441,8 +2457,9 @@ func (vm *VersionManager) gitCommitAndPushAfterRollback(htmlPath string) error {
 	pullCmd.Stdout = os.Stdout
 	pullCmd.Stderr = os.Stderr
 	if err := pullCmd.Run(); err != nil {
-		fmt.Printf("⚠️  Git pull 失败: %v\n", err)
-		fmt.Printf("   继续尝试推送...\n")
+		fmt.Printf("❌ Git pull --rebase 失败: %v\n", err)
+		fmt.Printf("   已中止推送，请手动解决冲突后重试\n")
+		return err
 	}
 
 	// 6. 执行 git push
@@ -2551,11 +2568,15 @@ func loadConfig(configPath string) (*Config, error) {
 	}
 
 	// 根据环境变量 IS_HOME 选择路径
-	isHome := os.Getenv("IS_HOME")
-	fmt.Printf("📍 环境变量 IS_HOME=%s\n", isHome)
+	isHome := isHomeEnv()
+	envLabel := "Office"
+	if isHome {
+		envLabel = "Home"
+	}
+	fmt.Printf("📍 当前环境: %s\n", envLabel)
 
 	if config.HomeHTMLFile != "" || config.CompanyHTMLFile != "" {
-		if isHome == "1" {
+		if isHome {
 			if config.HomeHTMLFile != "" {
 				config.SingleHTMLFile = config.HomeHTMLFile
 				fmt.Printf("🏠 使用家里电脑路径: %s\n", config.SingleHTMLFile)
@@ -2582,6 +2603,7 @@ func main() {
 	deployMode := flag.Int("mode", 6, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles)")
 	commitMessage := flag.String("message", "", "自定义SVN提交信息（不指定则使用Git最新提交信息）")
 	revertSvn := flag.Bool("revert-svn", false, "回退dest SVN工作副本的所有本地变更（递归 svn revert）")
+	dryRun := flag.Bool("dry-run", false, "预览模式（只显示将要执行的操作，不实际修改文件）")
 
 	flag.Parse()
 
@@ -2606,48 +2628,48 @@ func main() {
 	if *deployMode > 0 {
 		config.Deploy.Enabled = true // 强制开启部署
 		switch *deployMode {
-		case 1:
+		case ModePreScriptCopy:
 			config.Deploy.AutoCommit = false
 			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy"
-		case 2:
+		case ModePreScriptCopyCommit:
 			config.Deploy.AutoCommit = true
 			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy-commit"
-		case 3:
+		case ModePreScriptCopyCommitRollback:
 			config.Deploy.AutoCommit = true
 			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy-commit"
 			config.RollbackAfterDeploy = true    // 回滚HTML
 			config.GitCommitAfterRollback = true // 回滚后执行git commit和push
-		case 4:
+		case ModeCopyNoCDN:
 			config.Deploy.AutoCommit = false
 			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy"
 			config.CDNDomain = "" // 不替换CDN
-		case 5:
+		case ModeCopyCommitNoCDN:
 			config.Deploy.AutoCommit = true
 			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy-commit"
 			config.CDNDomain = "" // 不替换CDN
-		case 6:
+		case ModeCopyCommitRollbackNoCDN:
 			config.Deploy.AutoCommit = true
 			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy-commit"
 			config.CDNDomain = ""                // 不替换CDN
 			config.RollbackAfterDeploy = true    // 回滚HTML
 			config.GitCommitAfterRollback = true // 回滚后执行git commit和push
-		case 7:
+		case ModeCopyExcludeCDN:
 			config.Deploy.AutoCommit = false
 			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy"
 			config.CDNExcludeFiles = []string{} // 清空CDN排除文件
-		case 8:
+		case ModeCopyCommitExcludeCDN:
 			config.Deploy.AutoCommit = true
 			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy-commit"
 			config.CDNExcludeFiles = []string{} // 清空CDN排除文件
-		case 9:
+		case ModeCopyCommitRollbackExcludeCDN:
 			config.Deploy.AutoCommit = true
 			config.Deploy.ForcePreScript = false
 			config.Deploy.Command = "copy-commit"
@@ -2658,6 +2680,27 @@ func main() {
 	}
 	// deployMode
 	fmt.Printf("📋 部署模式: %d\n", *deployMode)
+
+	// 预览模式：显示配置后直接退出
+	if *dryRun {
+		fmt.Println("\n🔍 === 预览模式（dry-run）===")
+		fmt.Printf("  HTML文件: %s\n", config.SingleHTMLFile)
+		fmt.Printf("  CDN域名: %s\n", config.CDNDomain)
+		fmt.Printf("  HashLength: %d\n", config.HashLength)
+		fmt.Printf("  部署: enabled=%v, command=%s, autoCommit=%v\n",
+			config.Deploy.Enabled, config.Deploy.Command, config.Deploy.AutoCommit)
+		fmt.Printf("  回滚HTML: %v, Git提交: %v\n", config.RollbackAfterDeploy, config.GitCommitAfterRollback)
+		fmt.Printf("  源路径(Home): %s\n", config.Deploy.HomeSourcePath)
+		fmt.Printf("  目标路径(Home): %s\n", config.Deploy.HomeDestPath)
+		fmt.Printf("  源路径(Office): %s\n", config.Deploy.CompanySourcePath)
+		fmt.Printf("  目标路径(Office): %s\n", config.Deploy.CompanyDestPath)
+		fmt.Printf("  部署文件列表(%d项):\n", len(config.Deploy.FilePaths))
+		for _, fp := range config.Deploy.FilePaths {
+			fmt.Printf("    - %s\n", fp)
+		}
+		fmt.Println("  （预览模式，不执行实际操作）")
+		return
+	}
 
 	vm := NewVersionManager(*config, *debugMode)
 
