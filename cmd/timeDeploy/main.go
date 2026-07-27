@@ -23,9 +23,10 @@ import (
 const (
 	svnLogCount = 3
 
-	checkURL      = `https://qqt.cmicrwx.cn/2016tyjf_huido/xhmqqthy/res/wap/xdrNormal.html`
-	checkInterval = 1 * time.Minute
-	checkTimeout  = 30 * time.Minute
+	checkURL           = `https://qqt.cmicrwx.cn/2016tyjf_huido/xhmqqthy/res/wap/xdrNormal.html`
+	checkInterval      = 1 * time.Minute
+	checkTimeout       = 30 * time.Minute
+	maxInitialAttempts = 5 // 初始检测最大重试次数，避免单次请求失败直接判定为"超时未检测到"
 
 	pushPlusURL = "https://www.pushplus.plus/send"
 )
@@ -234,16 +235,33 @@ func runCheck(cfg EnvConfig) CheckResult {
 	logf("目标页面: %s\n", checkURL)
 	logf("本地目录: %s\n", filepath.Join(cfg.DestPath, "scripts", "js"))
 
-	htmlContent, err := fetchHTML(checkURL)
-	if err != nil {
-		logf("首次请求失败: %v\n", err)
-		return CheckResult{Found: false}
-	}
+	// 初始检测带重试机制（最多 maxInitialAttempts 次），
+	// 避免单次网络抖动导致请求失败就直接判定为"超时未检测到"。
+	var (
+		htmlContent string
+		jsFile      string
+		hash        string
+		err         error
+	)
 
-	jsFile, hash, err := extractJSFilename(htmlContent)
+	for i := 1; i <= maxInitialAttempts; i++ {
+		htmlContent, err = fetchHTML(checkURL)
+		if err == nil {
+			jsFile, hash, err = extractJSFilename(htmlContent)
+			if err == nil {
+				break
+			}
+			logf("第 %d 次提取 JS 文件名失败: %v\n", i, err)
+		} else {
+			logf("第 %d 次请求页面失败: %v\n", i, err)
+		}
+		if i < maxInitialAttempts {
+			time.Sleep(time.Duration(i) * 5 * time.Second)
+		}
+	}
 	if err != nil {
-		logf("提取 JS 文件名失败: %v\n", err)
-		return CheckResult{Found: false}
+		logf("初始检测连续 %d 次失败: %v\n", maxInitialAttempts, err)
+		return CheckResult{Found: false, Attempts: maxInitialAttempts}
 	}
 
 	logf("目标 JS 文件: %s (hash: %s)\n", jsFile, hash)
@@ -429,15 +447,29 @@ func buildCheckNotifyContent(result CheckResult, locationLabel string) (string, 
 		return title, sb.String()
 	}
 
-	title := fmt.Sprintf("❌ CDN 更新超时 - %s", now)
+	// 区分"轮询超时"与"初始请求连续失败"，避免请求失败时误报"超时"
+	var title, statusText string
+	if result.ElapsedTime > 0 {
+		title = fmt.Sprintf("❌ CDN 更新超时 - %s", now)
+		statusText = "❌ 超时未检测到更新"
+	} else {
+		title = fmt.Sprintf("❌ CDN 更新失败 - %s", now)
+		statusText = "❌ 请求失败，未检测到更新"
+	}
 	var sb strings.Builder
 	sb.WriteString("## CDN 更新检测结果\n\n")
-	sb.WriteString(fmt.Sprintf("- **状态**: ❌ 超时未检测到更新\n"))
+	sb.WriteString(fmt.Sprintf("- **状态**: %s\n", statusText))
 	sb.WriteString(fmt.Sprintf("- **时间**: %s\n", now))
-	sb.WriteString(fmt.Sprintf("- **目标文件**: `%s`\n", result.JSFile))
+	if result.JSFile != "" {
+		sb.WriteString(fmt.Sprintf("- **目标文件**: `%s`\n", result.JSFile))
+	} else {
+		sb.WriteString("- **目标文件**: 未能获取\n")
+	}
 	sb.WriteString(fmt.Sprintf("- **检测位置**: %s\n", locationLabel))
 	sb.WriteString(fmt.Sprintf("- **轮询次数**: %d 次\n", result.Attempts))
-	sb.WriteString(fmt.Sprintf("- **超时时间**: %s\n", checkTimeout))
+	if result.ElapsedTime > 0 {
+		sb.WriteString(fmt.Sprintf("- **超时时间**: %s（已等待 %s）\n", checkTimeout, result.ElapsedTime.Round(time.Second)))
+	}
 	sb.WriteString("\n> 请检查 CDN 部署是否正常，或手动确认文件是否已同步。\n")
 	return title, sb.String()
 }
@@ -479,9 +511,16 @@ func buildFullNotifyContent(deployOutput string, logs []LogEntry, checkResult Ch
 		sb.WriteString(fmt.Sprintf("- **结果**: ✅ 更新成功\n"))
 		sb.WriteString(fmt.Sprintf("- **文件**: `%s`\n", checkResult.JSFile))
 		sb.WriteString(fmt.Sprintf("- **Hash**: `%s`\n", checkResult.Hash))
-	} else {
+	} else if checkResult.ElapsedTime > 0 {
 		sb.WriteString(fmt.Sprintf("- **结果**: ❌ 超时未检测到\n"))
 		sb.WriteString(fmt.Sprintf("- **目标**: `%s`\n", checkResult.JSFile))
+	} else {
+		sb.WriteString(fmt.Sprintf("- **结果**: ❌ 请求失败，未检测到\n"))
+		if checkResult.JSFile != "" {
+			sb.WriteString(fmt.Sprintf("- **目标**: `%s`\n", checkResult.JSFile))
+		} else {
+			sb.WriteString("- **目标**: 未能获取\n")
+		}
 	}
 	sb.WriteString(fmt.Sprintf("- **轮询**: %d 次", checkResult.Attempts))
 	if checkResult.ElapsedTime > 0 {
