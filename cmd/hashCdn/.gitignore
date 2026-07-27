@@ -1,2 +1,8 @@
 .gocache/
 .deploy-cache.json
+
+# Rust
+target/
+*.rs
+Cargo.lock
+Cargo.toml
