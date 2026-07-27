@@ -1299,6 +1299,20 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 		})
 	}
 
+	// 更新顶部注释中的创建和修改日期
+	now := time.Now().Format("2006-01-02 15:04:05")
+	datePattern := `(@(?:create|modify)\s+date\s+)\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}`
+	reDate := regexp.MustCompile(datePattern)
+	if reDate.MatchString(contentStr) {
+		newContentStr := reDate.ReplaceAllString(contentStr, "${1}"+now)
+		if newContentStr != contentStr {
+			contentStr = newContentStr
+			updated = true
+			fmt.Printf("  🕐 注释日期已更新: %s\n", now)
+		}
+	}
+
+
 	if updated {
 		if err := os.WriteFile(htmlPath, []byte(contentStr), 0644); err != nil {
 			return err
