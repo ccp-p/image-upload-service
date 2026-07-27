@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -357,5 +358,441 @@ func TestDeployCache(t *testing.T) {
 	dc2.updateCache(dstFile, hash3, dstInfo.Size(), dstInfo.ModTime().UnixNano())
 	if len(dc2.Files) != 2 {
 		t.Errorf("Expected 2 entries after updateCache, got %d", len(dc2.Files))
+	}
+}
+
+// ==================== 补齐的测试用例 ====================
+
+func TestCopyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "source.txt")
+	dst := filepath.Join(tmpDir, "dest.txt")
+	content := []byte("file copy test content")
+	if err := os.WriteFile(src, content, 0644); err != nil {
+		t.Fatalf("Failed to write source: %v", err)
+	}
+	if err := copyFile(src, dst); err != nil {
+		t.Fatalf("copyFile failed: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("Failed to read dest: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("copied content mismatch: got %q, want %q", got, content)
+	}
+}
+
+func TestIsJSOrCSS(t *testing.T) {
+	tests := []struct {
+		filename string
+		expected bool
+	}{
+		{"style.css", true},
+		{"app.js", true},
+		{"STYLE.CSS", true},
+		{"APP.JS", true},
+		{"app.min.js", true},
+		{"image.png", false},
+		{"data.json", false},
+		{"noext", false},
+	}
+	for _, tt := range tests {
+		if got := isJSOrCSS(tt.filename); got != tt.expected {
+			t.Errorf("isJSOrCSS(%q) = %v; want %v", tt.filename, got, tt.expected)
+		}
+	}
+}
+
+func TestIsHomeEnv(t *testing.T) {
+	original := os.Getenv("IS_HOME")
+	defer os.Setenv("IS_HOME", original)
+
+	os.Setenv("IS_HOME", "1")
+	if !isHomeEnv() {
+		t.Error("isHomeEnv() returned false with IS_HOME=1")
+	}
+	os.Setenv("IS_HOME", "0")
+	if isHomeEnv() {
+		t.Error("isHomeEnv() returned true with IS_HOME=0")
+	}
+	os.Setenv("IS_HOME", "")
+	if isHomeEnv() {
+		t.Error("isHomeEnv() returned true with IS_HOME empty")
+	}
+}
+
+func TestGetRegex(t *testing.T) {
+	re1 := getRegex(`^[a-f0-9]{8}$`)
+	re2 := getRegex(`^[a-f0-9]{8}$`)
+	// Same pattern should return the same cached regex (pointer equality)
+	if re1 != re2 {
+		t.Error("getRegex should return cached regex for same pattern")
+	}
+	if !re1.MatchString("abcdef12") {
+		t.Error("regex did not match expected hex string")
+	}
+	if re1.MatchString("xyz12345") {
+		t.Error("regex matched non-hex string")
+	}
+}
+
+func TestAddHashToFilenameEdge(t *testing.T) {
+	vm := NewVersionManager(Config{HashLength: 8}, false)
+	tests := []struct {
+		original string
+		hash     string
+		expected string
+	}{
+		{"style.css", "abcd1234", "style.abcd1234.css"},
+		{"app.min.js", "aabbccdd", "app.min.aabbccdd.js"},
+		// re-add hash: old hash should be replaced
+		{"style.aaaabbbb.css", "ccccdddd", "style.ccccdddd.css"},
+		// no extension
+		{"Makefile", "aabbccdd", "Makefile.aabbccdd"},
+	}
+	for _, tt := range tests {
+		got := vm.addHashToFilename(tt.original, tt.hash)
+		if got != tt.expected {
+			t.Errorf("addHashToFilename(%q, %q) = %q; want %q", tt.original, tt.hash, got, tt.expected)
+		}
+	}
+}
+
+func TestRemoveHashFromFilenameEdge(t *testing.T) {
+	vm := NewVersionManager(Config{HashLength: 8}, false)
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"style.abcdef12.css", "style.css"},
+		{"app.min.12345678.js", "app.min.js"},
+		// no hash present, should return original
+		{"style.css", "style.css"},
+		// hash too short (< 4 hex chars), should return original
+		{"style.abc.css", "style.abc.css"},
+	}
+	for _, tt := range tests {
+		got := vm.removeHashFromFilename(tt.input)
+		if got != tt.expected {
+			t.Errorf("removeHashFromFilename(%q) = %q; want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestFindFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	vm := NewVersionManager(Config{HashLength: 8}, false)
+
+	// Create a plain file
+	plainPath := filepath.Join(tmpDir, "style.css")
+	os.WriteFile(plainPath, []byte("css"), 0644)
+
+	// Should find the plain file directly
+	if got := vm.findFile(plainPath); got != plainPath {
+		t.Errorf("findFile(plain) = %q; want %q", got, plainPath)
+	}
+
+	// Create a hashed version and remove the plain one
+	os.Remove(plainPath)
+	hashedPath := filepath.Join(tmpDir, "style.abcd1234.css")
+	os.WriteFile(hashedPath, []byte("css"), 0644)
+
+	// Should find the hashed version when plain doesn't exist
+	got := vm.findFile(plainPath)
+	if got == "" {
+		t.Error("findFile did not find hashed version")
+	}
+	if filepath.Base(got) != "style.abcd1234.css" {
+		t.Errorf("findFile found %q; want style.abcd1234.css", filepath.Base(got))
+	}
+
+	// Non-existent directory
+	if got := vm.findFile(filepath.Join(tmpDir, "nonexistent", "style.css")); got != "" {
+		t.Errorf("findFile in nonexistent dir should return empty, got %q", got)
+	}
+}
+
+func TestFindAndDeleteOldHashFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	vm := NewVersionManager(Config{HashLength: 8}, false)
+
+	basename := "style"
+	ext := ".css"
+	currentHash := "aaaabbbb"
+
+	// Create current hash file, an old hash file, and an unrelated file
+	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("current"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("old"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.eeeeffff.css"), []byte("older"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "other.css"), []byte("unrelated"), 0644)
+
+	if err := vm.findAndDeleteOldHashFiles(tmpDir, basename, ext, currentHash); err != nil {
+		t.Fatalf("findAndDeleteOldHashFiles failed: %v", err)
+	}
+
+	// Current hash file should survive
+	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
+		t.Error("current hash file was deleted")
+	}
+	// Old hash files should be deleted
+	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
+		t.Error("old hash file was not deleted")
+	}
+	if fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
+		t.Error("older hash file was not deleted")
+	}
+	// Unrelated file should survive
+	if !fileExists(filepath.Join(tmpDir, "other.css")) {
+		t.Error("unrelated file was deleted")
+	}
+}
+
+func TestRenameFileWithHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	vm := NewVersionManager(Config{HashLength: 8}, false)
+
+	srcPath := filepath.Join(tmpDir, "app.js")
+	os.WriteFile(srcPath, []byte("console.log(1)"), 0644)
+
+	info, err := vm.renameFileWithHash(srcPath)
+	if err != nil {
+		t.Fatalf("renameFileWithHash failed: %v", err)
+	}
+
+	// Hashed file should exist
+	if !fileExists(info.HashedPath) {
+		t.Errorf("hashed file not created: %s", info.HashedPath)
+	}
+	// Original should still exist (copy, not move)
+	if !fileExists(srcPath) {
+		t.Error("original file was removed")
+	}
+	// Hash should be 8 chars
+	if len(info.Hash) != 8 {
+		t.Errorf("hash length = %d; want 8", len(info.Hash))
+	}
+	// Hashed filename should contain the hash
+	if !strings.Contains(filepath.Base(info.HashedPath), info.Hash) {
+		t.Errorf("hashed filename %q does not contain hash %q", filepath.Base(info.HashedPath), info.Hash)
+	}
+}
+
+func TestCollectResourcesFromHTML(t *testing.T) {
+	tmpDir := t.TempDir()
+	htmlContent := `<!DOCTYPE html>
+<html>
+<head>
+	<link rel="stylesheet" href="css/index.css">
+	<link rel="stylesheet" href="components/button/button.css">
+	<link rel="stylesheet" href="https://cdn.example.com/components/modal/modal.css">
+</head>
+<body>
+	<script src="js/index.js"></script>
+	<script src="components/button/button.js"></script>
+	<script src="https://cdn.example.com/components/modal/modal.js"></script>
+</body>
+</html>`
+	htmlPath := filepath.Join(tmpDir, "index.html")
+	os.WriteFile(htmlPath, []byte(htmlContent), 0644)
+
+	vm := NewVersionManager(Config{
+		IncludeComponents: []string{"button", "modal"},
+	}, false)
+
+	resources, err := vm.collectResourcesFromHTML(htmlPath)
+	if err != nil {
+		t.Fatalf("collectResourcesFromHTML failed: %v", err)
+	}
+
+	// Should collect component CSS (local + CDN with "components")
+	cssFound := false
+	for _, css := range resources["css"] {
+		if strings.Contains(css, "button/button.css") {
+			cssFound = true
+		}
+	}
+	if !cssFound {
+		t.Errorf("did not collect component button CSS, got: %v", resources["css"])
+	}
+
+	// Should collect component JS
+	jsFound := false
+	for _, js := range resources["js"] {
+		if strings.Contains(js, "button/button.js") {
+			jsFound = true
+		}
+	}
+	if !jsFound {
+		t.Errorf("did not collect component button JS, got: %v", resources["js"])
+	}
+}
+
+func TestUpdateHTMLContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	htmlContent := `<link rel="stylesheet" href="css/style.css">
+<script src="js/app.js"></script>`
+	htmlPath := filepath.Join(tmpDir, "index.html")
+	os.WriteFile(htmlPath, []byte(htmlContent), 0644)
+
+	// Create the actual resource files so renaming works
+	os.MkdirAll(filepath.Join(tmpDir, "css"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "js"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "css", "style.css"), []byte("body{}"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "js", "app.js"), []byte("1"), 0644)
+
+	vm := NewVersionManager(Config{HashLength: 8}, false)
+
+	resources := map[string]map[string]string{
+		"css": {"css/style.css": "css/style.aaaabbbb.css"},
+		"js":  {"js/app.js": "js/app.ccccdddd.js"},
+	}
+
+	if err := vm.updateHTMLContent(htmlPath, resources); err != nil {
+		t.Fatalf("updateHTMLContent failed: %v", err)
+	}
+
+	updated, _ := os.ReadFile(htmlPath)
+	strContent := string(updated)
+	if !strings.Contains(strContent, "style.aaaabbbb.css") {
+		t.Errorf("HTML not updated with hashed CSS, got: %s", strContent)
+	}
+	if !strings.Contains(strContent, "app.ccccdddd.js") {
+		t.Errorf("HTML not updated with hashed JS, got: %s", strContent)
+	}
+}
+
+func TestFindAllHTMLFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create HTML files in various locations
+	os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("1"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "sub"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "sub", "page.html"), []byte("2"), 0644)
+	// Exclude dir should be skipped
+	os.MkdirAll(filepath.Join(tmpDir, "node_modules"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "node_modules", "lib.html"), []byte("3"), 0644)
+	// Non-HTML file
+	os.WriteFile(filepath.Join(tmpDir, "readme.txt"), []byte("4"), 0644)
+
+	vm := NewVersionManager(Config{
+		RootDir:     tmpDir,
+		ExcludeDirs: []string{"node_modules"},
+	}, false)
+
+	files := vm.findAllHTMLFiles()
+	if len(files) != 2 {
+		t.Errorf("expected 2 HTML files, got %d: %v", len(files), files)
+	}
+
+	for _, f := range files {
+		if strings.Contains(f, "node_modules") {
+			t.Errorf("excluded dir not skipped: %s", f)
+		}
+	}
+}
+
+func TestValidateCDNResources(t *testing.T) {
+	tmpDir := t.TempDir()
+	cdnDomain := "https://cdn.example.com"
+
+	htmlContent := fmt.Sprintf(`<link href="%s/css/style.css">
+<script src="%s/js/app.js"></script>`, cdnDomain, cdnDomain)
+	htmlPath := filepath.Join(tmpDir, "index.html")
+	os.WriteFile(htmlPath, []byte(htmlContent), 0644)
+
+	// Create dest files so validation passes
+	os.MkdirAll(filepath.Join(tmpDir, "dest", "css"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "dest", "js"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "dest", "css", "style.css"), []byte("body{}"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "dest", "js", "app.js"), []byte("1"), 0644)
+
+	dm := &DeployManager{
+		config:    DeployConfig{},
+		destPath:  filepath.Join(tmpDir, "dest"),
+		debugMode: false,
+		cache:     loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json")),
+	}
+
+	if err := dm.validateCDNResources(htmlPath, cdnDomain); err != nil {
+		t.Errorf("validateCDNResources should pass when files exist, got: %v", err)
+	}
+
+	// Remove a file, validation should fail
+	os.Remove(filepath.Join(tmpDir, "dest", "css", "style.css"))
+	if err := dm.validateCDNResources(htmlPath, cdnDomain); err == nil {
+		t.Error("validateCDNResources should fail when a file is missing")
+	}
+}
+
+func TestCleanHashFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.MkdirAll(tmpDir, 0755)
+
+	// Create files: keep, old hash, unrelated
+	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("keep"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("old"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "other.css"), []byte("unrelated"), 0644)
+
+	dm := &DeployManager{
+		config:    DeployConfig{},
+		destPath:  tmpDir,
+		debugMode: false,
+		cache:     loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json")),
+	}
+
+	destPath := filepath.Join(tmpDir, "style.css")
+	deleted := dm.cleanHashFiles(destPath, "style.aaaabbbb.css")
+
+	if deleted != 1 {
+		t.Errorf("expected 1 deleted, got %d", deleted)
+	}
+	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
+		t.Error("keep file was deleted")
+	}
+	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
+		t.Error("old hash file was not deleted")
+	}
+	if !fileExists(filepath.Join(tmpDir, "style.css")) {
+		t.Error("base file was deleted")
+	}
+	if !fileExists(filepath.Join(tmpDir, "other.css")) {
+		t.Error("unrelated file was deleted")
+	}
+}
+
+func TestCopyFileWithVersions(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	// Create source: base file + one hash version
+	os.WriteFile(filepath.Join(srcDir, "app.js"), []byte("console.log(1)"), 0644)
+	os.WriteFile(filepath.Join(srcDir, "app.aaaabbbb.js"), []byte("console.log(1)"), 0644)
+
+	dm := &DeployManager{
+		config:     DeployConfig{},
+		sourcePath: srcDir,
+		destPath:   dstDir,
+		debugMode:  false,
+		cache:      loadDeployCache(filepath.Join(dstDir, ".deploy-cache.json")),
+	}
+
+	copied, skipped, err := dm.copyFileWithVersions("app.js", filepath.Join(dstDir, "app.js"))
+	if err != nil {
+		t.Fatalf("copyFileWithVersions failed: %v", err)
+	}
+	if copied == 0 {
+		t.Error("expected at least 1 file copied")
+	}
+	_ = skipped
+
+	// Base file should exist in dest
+	if !fileExists(filepath.Join(dstDir, "app.js")) {
+		t.Error("base file not copied to dest")
+	}
+	// Hash version should exist in dest
+	if !fileExists(filepath.Join(dstDir, "app.aaaabbbb.js")) {
+		t.Error("hash file not copied to dest")
 	}
 }

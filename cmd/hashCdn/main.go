@@ -828,7 +828,7 @@ func (vm *VersionManager) findFile(basePath string) string {
 		return ""
 	}
 
-	pattern := getRegex(fmt.Sprintf(`^%s\.[a-f0-9]{8}\%s$`, regexp.QuoteMeta(nameWithoutExt), regexp.QuoteMeta(ext)))
+	pattern := getRegex(fmt.Sprintf(`^%s\.[a-f0-9]{8}%s$`, regexp.QuoteMeta(nameWithoutExt), regexp.QuoteMeta(ext)))
 
 	for _, file := range files {
 		if pattern.MatchString(file.Name()) {
@@ -1144,7 +1144,8 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
 	}, nil
 }
 
-func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[string]map[string]string) error {
+// updateHTMLContent updates HTML file content with hashed resource references (no deployment side effects)
+func (vm *VersionManager) updateHTMLContent(htmlPath string, resources map[string]map[string]string) error {
 	content, err := os.ReadFile(htmlPath)
 	if err != nil {
 		return err
@@ -1351,6 +1352,15 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 		fmt.Printf("\n✅ HTML文件已更新\n")
 	} else {
 		fmt.Printf("\n⚠️  没有内容需要更新\n")
+	}
+
+	return nil
+}
+
+// updateHTMLReferences updates HTML references and then triggers deployment
+func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[string]map[string]string) error {
+	if err := vm.updateHTMLContent(htmlPath, resources); err != nil {
+		return err
 	}
 
 	// 执行部署脚本（如果启用）
