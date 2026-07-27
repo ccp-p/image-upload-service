@@ -59,6 +59,7 @@ echo [8] copy-commit (盲盒组件走cdn)
 echo [9] copy-commit，提交git (盲盒组件走cdn，HTML回滚后)
 echo [10] 仅部署，不处理hash，然后 copy
 echo [11] 仅部署，不处理hash，然后 copy-commit
+echo [12] 回退dest SVN的所有本地变更
 echo.
 
 echo [上次] 模式=%last_mode%
@@ -95,7 +96,8 @@ if not "!custom_message!"=="" set message_flag=-message "!custom_message!"
 goto save_cache
 
 :save_cache
-REM 保存本次选项到缓存文件（只缓存模式）
+REM 保存本次选项到缓存文件（只缓存模式；回退操作不缓存，避免误触）
+if /i "%mode_input%"=="12" goto run
 (
     echo mode=!mode_input!
 ) > "!cache_file!"
@@ -116,6 +118,12 @@ if "%mode_input%"=="11" (
     echo [调试] 完整命令: hashCdn.exe -config=version.config.json -deploy-commit %message_flag%
     echo.
     hashCdn.exe -config=version.config.json -deploy-commit %message_flag%
+    goto check_result
+)
+if "%mode_input%"=="12" (
+    echo [调试] 完整命令: hashCdn.exe -config=version.config.json -revert-svn
+    echo.
+    hashCdn.exe -config=version.config.json -revert-svn
     goto check_result
 )
 

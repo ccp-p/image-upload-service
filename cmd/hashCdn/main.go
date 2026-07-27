@@ -1973,6 +1973,60 @@ func (dm *DeployManager) svnCommit(message string) error {
 	return nil
 }
 
+// revertAllSvn 回退dest SVN工作副本的所有本地变更（递归 svn revert）
+// 恢复已修改的文件、撤销已标记的 svn add/delete，将工作副本还原到上次提交状态
+func (dm *DeployManager) revertAllSvn() error {
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("🔄 回退dest SVN的所有本地变更")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("📂 目标路径: %s\n", dm.destPath)
+
+	if dm.destPath == "" {
+		return fmt.Errorf("未配置dest路径（请检查 version.config.json 中的 deploy.homeDestPath / deploy.companyDestPath）")
+	}
+
+	if !isSvnRepo(dm.destPath) {
+		return fmt.Errorf("目标路径不是SVN仓库: %s", dm.destPath)
+	}
+
+	// 先尝试 cleanup，处理可能的中断/锁定状态
+	cleanCmd := exec.Command("svn", "cleanup")
+	cleanCmd.Dir = dm.destPath
+	if cleanOut, cleanErr := cleanCmd.CombinedOutput(); cleanErr != nil {
+		fmt.Printf("⚠️  SVN cleanup 失败（可忽略）: %v\n%s\n", cleanErr, string(cleanOut))
+	} else {
+		fmt.Println("✅ SVN cleanup 完成")
+	}
+
+	// 先查看当前待提交的状态，便于确认回退内容
+	statusCmd := exec.Command("svn", "status")
+	statusCmd.Dir = dm.destPath
+	if statusOut, statusErr := statusCmd.Output(); statusErr == nil {
+		statusStr := strings.TrimSpace(string(statusOut))
+		if statusStr == "" {
+			fmt.Println("ℹ️  当前没有待提交的本地变更，无需回退")
+			fmt.Println(strings.Repeat("=", 60))
+			return nil
+		}
+		fmt.Println("📋 待回退的本地变更:")
+		fmt.Println(statusStr)
+	}
+
+	// 递归回退所有本地变更：恢复修改、撤销 add/delete 标记
+	fmt.Println("\n⏳ 正在执行 svn revert -R . ...")
+	revertCmd := exec.Command("svn", "revert", "-R", ".")
+	revertCmd.Dir = dm.destPath
+	revertCmd.Stdout = os.Stdout
+	revertCmd.Stderr = os.Stderr
+	if err := revertCmd.Run(); err != nil {
+		return fmt.Errorf("SVN回退失败: %v", err)
+	}
+
+	fmt.Println("✅ dest SVN的所有本地变更已回退")
+	fmt.Println(strings.Repeat("=", 60))
+	return nil
+}
+
 // openFolder 打开文件夹（避免重复打开）
 func (dm *DeployManager) openFolder() {
 	if dm.folderOpened {
@@ -2527,6 +2581,7 @@ func main() {
 	deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
 	deployMode := flag.Int("mode", 6, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles)")
 	commitMessage := flag.String("message", "", "自定义SVN提交信息（不指定则使用Git最新提交信息）")
+	revertSvn := flag.Bool("revert-svn", false, "回退dest SVN工作副本的所有本地变更（递归 svn revert）")
 
 	flag.Parse()
 
@@ -2609,6 +2664,18 @@ func main() {
 	// 设置自定义提交信息
 	if *commitMessage != "" {
 		vm.commitMessage = *commitMessage
+	}
+
+	// 仅回退dest SVN的所有本地变更（递归 svn revert -R .）
+	if *revertSvn {
+		dm := NewDeployManager(config.Deploy, *debugMode)
+		if err := dm.revertAllSvn(); err != nil {
+			fmt.Printf("❌ 回退失败: %v\n", err)
+			os.Exit(1)
+		}
+		duration := time.Since(startTime)
+		fmt.Printf("\n⏱️  总运行时间: %v\n", duration)
+		return
 	}
 
 	// 仅部署模式
