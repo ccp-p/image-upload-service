@@ -1341,7 +1341,7 @@ type DeployManager struct {
 	destPath        string
 	debugMode       bool
 	folderOpened    bool
-	sourceHashCache sync.Map // filePath -> hash string
+	cache           *DeployCache // 持久化文件hash缓存
 }
 
 // NewDeployManager 创建部署管理器
@@ -1363,6 +1363,7 @@ func NewDeployManager(config DeployConfig, debugMode bool) *DeployManager {
 		destPath:     destPath,
 		debugMode:    debugMode,
 		folderOpened: false,
+		cache:        loadDeployCache(".deploy-cache.json"),
 	}
 }
 
@@ -1380,6 +1381,92 @@ func getFileHash(filePath string) (string, error) {
 	}
 
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// FileCacheEntry 文件hash缓存条目
+type FileCacheEntry struct {
+	Hash    string `json:"hash"`
+	Size    int64  `json:"size"`
+	ModTime int64  `json:"modTime"`
+}
+
+// DeployCache 部署文件hash缓存（持久化到磁盘，避免每次重复计算MD5）
+type DeployCache struct {
+	Files     map[string]FileCacheEntry `json:"files"`
+	cachePath string
+	mu        sync.RWMutex
+	dirty     bool
+}
+
+// loadDeployCache 从磁盘加载缓存，文件不存在或解析失败时返回空缓存
+func loadDeployCache(cachePath string) *DeployCache {
+	dc := &DeployCache{
+		Files:     make(map[string]FileCacheEntry),
+		cachePath: cachePath,
+	}
+	if data, err := os.ReadFile(cachePath); err == nil {
+		_ = json.Unmarshal(data, &dc.Files)
+		if dc.Files == nil {
+			dc.Files = make(map[string]FileCacheEntry)
+		}
+	}
+	return dc
+}
+
+// Save 将缓存写入磁盘（仅在有变更时写入）
+func (dc *DeployCache) Save() error {
+	dc.mu.RLock()
+	defer dc.mu.RUnlock()
+	if !dc.dirty {
+		return nil
+	}
+	data, err := json.MarshalIndent(dc.Files, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dc.cachePath, data, 0644)
+}
+
+// getCachedHash 获取文件hash：size+modTime 未变则复用缓存的hash，否则重新计算
+func (dc *DeployCache) getCachedHash(filePath string) (string, error) {
+	key := filepath.Clean(filePath)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return "", err
+	}
+
+	dc.mu.RLock()
+	entry, ok := dc.Files[key]
+	dc.mu.RUnlock()
+
+	if ok && entry.Size == info.Size() && entry.ModTime == info.ModTime().UnixNano() {
+		return entry.Hash, nil
+	}
+
+	hash, err := getFileHash(filePath)
+	if err != nil {
+		return "", err
+	}
+
+	dc.mu.Lock()
+	dc.Files[key] = FileCacheEntry{
+		Hash:    hash,
+		Size:    info.Size(),
+		ModTime: info.ModTime().UnixNano(),
+	}
+	dc.dirty = true
+	dc.mu.Unlock()
+
+	return hash, nil
+}
+
+// updateCache 直接写入缓存条目（复制文件后用源文件hash同步目标缓存）
+func (dc *DeployCache) updateCache(filePath, hash string, size, modTime int64) {
+	key := filepath.Clean(filePath)
+	dc.mu.Lock()
+	dc.Files[key] = FileCacheEntry{Hash: hash, Size: size, ModTime: modTime}
+	dc.dirty = true
+	dc.mu.Unlock()
 }
 
 // findAllFileVersions 查找文件的所有版本（包含hash值）
@@ -1407,10 +1494,7 @@ func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
 
 	// 检查无hash版本
 	if fileExists(fullPath) {
-		hash, _ := getFileHash(fullPath)
-		if hash != "" {
-			dm.sourceHashCache.Store(fullPath, hash)
-		}
+		hash, _ := dm.cache.getCachedHash(fullPath)
 		info, _ := os.Stat(fullPath)
 		versions = append(versions, FileVersion{
 			Path:    fullPath,
@@ -1440,10 +1524,7 @@ func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
 
 		if hashPattern.MatchString(file.Name()) {
 			filePath := filepath.Join(dir, file.Name())
-			hash, _ := getFileHash(filePath)
-			if hash != "" {
-				dm.sourceHashCache.Store(filePath, hash)
-			}
+			hash, _ := dm.cache.getCachedHash(filePath)
 			info, _ := file.Info()
 			versions = append(versions, FileVersion{
 				Path:    filePath,
@@ -1618,7 +1699,7 @@ func (dm *DeployManager) copyFileWithVersions(sourcePath, destPath string) (int,
 			sameContent := false
 			if srcErr == nil && dstErr == nil && srcInfo.Size() == dstInfo.Size() {
 				// 大小相同，再比较 hash
-				destHash, err := getFileHash(versionDestPath)
+				destHash, err := dm.cache.getCachedHash(versionDestPath)
 				if err == nil && destHash == version.Hash {
 					sameContent = true
 				}
@@ -1640,6 +1721,10 @@ func (dm *DeployManager) copyFileWithVersions(sourcePath, destPath string) (int,
 			return copiedCount, skippedCount, err
 		}
 		copiedCount++
+		// 复制后用源文件hash同步目标缓存，避免下次重复计算MD5
+		if dstInfo, err := os.Stat(versionDestPath); err == nil {
+			dm.cache.updateCache(versionDestPath, version.Hash, dstInfo.Size(), dstInfo.ModTime().UnixNano())
+		}
 		if isJSOrCSS(sourcePath) {
 			fmt.Printf("  ✅ 已复制: %s -> %s\n", version.Name, destDir)
 		}
@@ -1924,6 +2009,10 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 	fmt.Printf("📂 源路径: %s\n", dm.sourcePath)
 	fmt.Printf("📂 目标路径: %s\n\n", dm.destPath)
 
+	// 文件hash缓存
+	fmt.Printf("💾 已加载文件缓存: %d 个条目\n\n", len(dm.cache.Files))
+
+
 	// 是否执行前置脚本
 	if dm.config.ForcePreScript {
 		scriptPath := filepath.Join(dm.sourcePath, filepath.FromSlash("scripts/bussiness/cdn.js"))
@@ -2012,6 +2101,11 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 		totalSkipped += r.skipped
 		totalFailed += r.failed
 	}
+	// 保存hash缓存到磁盘
+	if err := dm.cache.Save(); err != nil {
+		fmt.Printf("⚠️  缓存保存失败: %v\n", err)
+	}
+
 
 	// 打印汇总
 	fmt.Printf("\n%s\n", strings.Repeat("=", 50))

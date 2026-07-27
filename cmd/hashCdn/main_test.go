@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFileExists(t *testing.T) {
@@ -277,5 +278,84 @@ func TestCollectImagesFromCSS(t *testing.T) {
 
 	if !foundTest1 || !foundTest2 {
 		t.Errorf("Did not find expected images. Found: %v", images)
+	}
+}
+
+func TestDeployCache(t *testing.T) {
+	// 创建临时测试文件
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "test.png")
+	os.WriteFile(srcFile, []byte("hello world"), 0644)
+
+	// 缓存文件路径
+	cacheFile := filepath.Join(tmpDir, ".deploy-cache.json")
+
+	// 1. 加载不存在的缓存文件，应为空
+	dc := loadDeployCache(cacheFile)
+	if len(dc.Files) != 0 {
+		t.Errorf("Expected empty cache, got %d entries", len(dc.Files))
+	}
+
+	// 2. 第一次计算 hash（缓存未命中）
+	hash1, err := dc.getCachedHash(srcFile)
+	if err != nil {
+		t.Fatalf("getCachedHash failed: %v", err)
+	}
+	if hash1 == "" {
+		t.Error("Expected non-empty hash")
+	}
+	if len(dc.Files) != 1 {
+		t.Errorf("Expected 1 cache entry, got %d", len(dc.Files))
+	}
+
+	// 3. 第二次计算（缓存命中，应返回相同 hash）
+	hash2, err := dc.getCachedHash(srcFile)
+	if err != nil {
+		t.Fatalf("getCachedHash failed: %v", err)
+	}
+	if hash1 != hash2 {
+		t.Errorf("Expected same hash, got %s vs %s", hash1, hash2)
+	}
+
+	// 4. 修改文件内容，modTime 变化，缓存应失效
+	time.Sleep(10 * time.Millisecond)
+	os.WriteFile(srcFile, []byte("hello world modified"), 0644)
+	hash3, err := dc.getCachedHash(srcFile)
+	if err != nil {
+		t.Fatalf("getCachedHash failed: %v", err)
+	}
+	if hash3 == hash1 {
+		t.Error("Expected different hash after file modification")
+	}
+
+	// 5. 保存缓存并重新加载
+	if err := dc.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if !fileExists(cacheFile) {
+		t.Error("Cache file was not created")
+	}
+
+	dc2 := loadDeployCache(cacheFile)
+	if len(dc2.Files) != 1 {
+		t.Errorf("Expected 1 entry in reloaded cache, got %d", len(dc2.Files))
+	}
+
+	// 6. 重新加载后，文件未变，应命中缓存
+	hash4, err := dc2.getCachedHash(srcFile)
+	if err != nil {
+		t.Fatalf("getCachedHash failed: %v", err)
+	}
+	if hash4 != hash3 {
+		t.Errorf("Expected same hash after reload, got %s vs %s", hash4, hash3)
+	}
+
+	// 7. 验证 updateCache 方法
+	dstFile := filepath.Join(tmpDir, "copied.png")
+	os.WriteFile(dstFile, []byte("hello world modified"), 0644)
+	dstInfo, _ := os.Stat(dstFile)
+	dc2.updateCache(dstFile, hash3, dstInfo.Size(), dstInfo.ModTime().UnixNano())
+	if len(dc2.Files) != 2 {
+		t.Errorf("Expected 2 entries after updateCache, got %d", len(dc2.Files))
 	}
 }
