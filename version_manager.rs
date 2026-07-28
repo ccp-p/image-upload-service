@@ -50,6 +50,43 @@ pub fn copy_file(src: &str, dst: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Runs `git add <basename>` from the file's directory, mirroring Go's
+/// vcsGitAdd. Best-effort and non-fatal: failures (e.g. not a git repo, or
+/// git missing from PATH) only print a warning so hashing never aborts.
+fn vcs_git_add(file_path: &str, debug_mode: bool) {
+    let dir = path_dir(file_path);
+    let base = path_base(file_path);
+    // Use .output() (not .status()) so git's stderr is captured and never
+    // leaks to the console, mirroring Go's CombinedOutput(). Failures are
+    // non-fatal and only logged in debug mode, matching Go's vcsGitAdd.
+    let output = std::process::Command::new("git")
+        .arg("add")
+        .arg(&base)
+        .current_dir(&dir)
+        .output();
+   match output {
+       Ok(s) if s.status.success() => {
+           if debug_mode {
+               println!("    ➕ Git add: {}", base);
+           }
+       }
+       Ok(o) => {
+           if debug_mode {
+               let combined = format!(
+                   "{}{}",
+                   String::from_utf8_lossy(&o.stdout),
+                   String::from_utf8_lossy(&o.stderr)
+               );
+              println!("      ⚠️  Git add 失败: {} ({})", base, o.status);
+               println!("      Output: {}", combined.trim());
+           }
+       }
+        Err(_) => {
+            // git not in PATH — silently skip (mirrors Go's exec.LookPath guard)
+        }
+    }
+}
+
 /// Full MD5 hex of a file's contents (no truncation).
 pub fn get_file_hash(file_path: &str) -> Result<String, String> {
     let data = std::fs::read(file_path).map_err(|e| e.to_string())?;
@@ -115,6 +152,71 @@ fn path_relative(base: &str, target: &str) -> String {
     }
 }
 
+/// Returns current local time as "YYYY-MM-DD HH:MM:SS" (mirrors Go's time.Now().Format).
+#[cfg(windows)]
+fn format_now() -> String {
+    #[repr(C)]
+    struct LocalSystemTime {
+        year: u16,
+        month: u16,
+        _day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        _milliseconds: u16,
+    }
+    extern "system" {
+        fn GetLocalTime(systime: *mut LocalSystemTime);
+    }
+    unsafe {
+        let mut st = LocalSystemTime {
+            year: 0,
+            month: 0,
+            _day_of_week: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            _milliseconds: 0,
+        };
+        GetLocalTime(&mut st);
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            st.year, st.month, st.day, st.hour, st.minute, st.second
+        )
+    }
+}
+
+#[cfg(not(windows))]
+fn format_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
 /// File modification time in nanoseconds since UNIX epoch.
 fn mod_time_nanos(metadata: &std::fs::Metadata) -> i64 {
     metadata
@@ -123,6 +225,63 @@ fn mod_time_nanos(metadata: &std::fs::Metadata) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0)
+}
+
+/// Checks if a 19-char string matches "YYYY-MM-DD HH:MM:SS".
+fn is_date_time_format(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 19
+        && b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+        && b[4] == b'-'
+        && b[5].is_ascii_digit()
+        && b[6].is_ascii_digit()
+        && b[7] == b'-'
+        && b[8].is_ascii_digit()
+        && b[9].is_ascii_digit()
+        && (b[10] == b' ' || b[10] == b'\t')
+        && b[11].is_ascii_digit()
+        && b[12].is_ascii_digit()
+        && b[13] == b':'
+        && b[14].is_ascii_digit()
+        && b[15].is_ascii_digit()
+        && b[16] == b':'
+        && b[17].is_ascii_digit()
+        && b[18].is_ascii_digit()
+}
+
+/// Updates @create/@modify date patterns in HTML comments (mirrors Go's updateHTMLContent).
+fn update_comment_dates(content: &str) -> (String, bool) {
+    let now = format_now();
+    let mut result = content.to_string();
+    let mut updated = false;
+    for keyword in &["@create date ", "@modify date "] {
+        let mut search_from = 0;
+        while let Some(idx) = result[search_from..].find(keyword) {
+            let abs_idx = search_from + idx;
+            let date_start = abs_idx + keyword.len();
+            if date_start + 19 <= result.len() {
+                let date_str = &result[date_start..date_start + 19];
+                if is_date_time_format(date_str) {
+                    let before = &result[..date_start];
+                    let after = &result[date_start + 19..];
+                    result = format!("{}{}{}", before, now, after);
+                    updated = true;
+                    search_from = date_start + now.len();
+                } else {
+                    search_from = abs_idx + 1;
+                }
+            } else {
+                search_from = abs_idx + 1;
+            }
+        }
+    }
+    if updated {
+        println!("  🕐 注释日期已更新: {}", now);
+    }
+    (result, updated)
 }
 
 /// Matches `^nameWithoutExt\.[a-f0-9]{8}ext$` (Go findFile pattern).
@@ -216,9 +375,12 @@ impl VersionManager {
         for entry in entries.flatten() {
             let filename = entry.file_name().to_string_lossy().to_string();
             if let Some(hash) = patterns::matches_hex_hash(&filename, basename, ext) {
-                if hash != current_hash {
-                    let _ = std::fs::remove_file(path_join(dir, &filename));
-                }
+           if hash != current_hash {
+                   let _ = std::fs::remove_file(path_join(dir, &filename));
+                    if is_js_or_css(&filename) {
+                        println!("    🗑️  已删除: {}", filename);
+                    }
+               }
             }
         }
         Ok(())
@@ -255,6 +417,10 @@ impl VersionManager {
         }
 
         copy_file(&source_path, &new_path)?;
+        vcs_git_add(&new_path, self.debug_mode);
+        if is_js_or_css(&new_filename) {
+            println!("  ✅ 已生成: {}", new_filename);
+        }
 
         let ext = get_ext(&clean_filename);
         let bn = get_basename(&clean_filename);
@@ -460,6 +626,12 @@ impl VersionManager {
             }
         }
 
+        let (date_content, date_updated) = update_comment_dates(&content_str);
+        content_str = date_content;
+        if date_updated {
+            updated = true;
+        }
+
         if updated {
             std::fs::write(html_path, content_str.as_bytes()).map_err(|e| e.to_string())?;
         }
@@ -555,6 +727,9 @@ impl VersionManager {
         };
 
         let images = self.collect_images_from_css(&original_css)?;
+        if !images.is_empty() {
+            println!("    📸 处理 {} 个图片引用", images.len());
+        }
         let mut image_map: HashMap<String, String> = HashMap::new();
 
         for image in &images {
@@ -610,6 +785,8 @@ impl VersionManager {
             }
         }
 
+        vcs_git_add(&hashed_path, self.debug_mode);
+
         let css_ext = get_ext(&clean_filename);
         let css_bn = get_basename(&clean_filename);
         let _ = self.find_and_delete_old_hash_files(&css_dir, &css_bn, &css_ext, &final_hash);
@@ -647,7 +824,18 @@ impl VersionManager {
         resources.insert("css".to_string(), HashMap::new());
         resources.insert("js".to_string(), HashMap::new());
 
+        println!("============================================================");
+        println!("📄 处理: {}", html_path);
+        println!("============================================================");
         if should_process_main {
+            println!("🎯 策略: 处理主资源 (JS/CSS) 及组件");
+        } else {
+            println!("🎯 策略: 处理组件资源");
+        }
+        println!();
+
+        if should_process_main {
+            println!("📦 处理主 JavaScript 文件...");
             let js_candidates = [
                 path_join(&html_dir, &format!("{}.js", html_bn)),
                 path_join(&html_dir, &format!("js/{}.js", html_bn)),
@@ -657,6 +845,7 @@ impl VersionManager {
                 let actual = self.find_file(js_path);
                 if !actual.is_empty() {
                     if let Ok(info) = self.rename_file_with_hash(&actual) {
+                        println!("  ✅ JS: {} -> {}", path_base(&actual), path_base(&info.hashed_path));
                         let rel = path_relative(&html_dir, &actual).replace('\\', "/");
                         let hrel = path_relative(&html_dir, &info.hashed_path).replace('\\', "/");
                         let key = rel.strip_prefix("./").unwrap_or(&rel).to_string();
@@ -666,6 +855,8 @@ impl VersionManager {
                 }
             }
 
+            println!();
+            println!("🎨 处理主 CSS 文件...");
             let css_candidates = [
                 path_join(&html_dir, &format!("{}.css", html_bn)),
                 path_join(&html_dir, &format!("css/{}.css", html_bn)),
@@ -674,6 +865,7 @@ impl VersionManager {
                 let actual = self.find_file(css_path);
                 if !actual.is_empty() {
                     if let Ok(info) = self.process_component_css(&actual) {
+                        println!("  ✅ CSS: {} -> {}", path_base(&actual), path_base(&info.hashed_path));
                         let rel = path_relative(&html_dir, &actual).replace('\\', "/");
                         let hrel = path_relative(&html_dir, &info.hashed_path).replace('\\', "/");
                         let key = rel.strip_prefix("./").unwrap_or(&rel).to_string();
@@ -684,8 +876,17 @@ impl VersionManager {
             }
         }
 
+        println!();
+        println!("🔍 扫描组件资源...");
         if let Ok(html_resources) = self.collect_resources_from_html(html_path) {
+            let js_count = html_resources.get("js").map(|v| v.len()).unwrap_or(0);
+            let css_count = html_resources.get("css").map(|v| v.len()).unwrap_or(0);
+            println!("  找到 {} 个组件CSS, {} 个组件JS", css_count, js_count);
             if let Some(js_list) = html_resources.get("js") {
+                if js_count > 0 {
+                    println!();
+                    println!("🔧 处理组件 JavaScript 文件...");
+                }
                 for js_rel in js_list {
                     let key = js_rel.replace('\\', "/");
                     let key = key.strip_prefix("./").unwrap_or(&key).to_string();
@@ -699,6 +900,10 @@ impl VersionManager {
                 }
             }
             if let Some(css_list) = html_resources.get("css") {
+                if css_count > 0 {
+                    println!();
+                    println!("🔧 处理组件 CSS 文件...");
+                }
                 for css_rel in css_list {
                     let key = css_rel.replace('\\', "/");
                     let key = key.strip_prefix("./").unwrap_or(&key).to_string();
@@ -713,7 +918,16 @@ impl VersionManager {
             }
         }
 
+        println!();
+        println!("🔄 更新HTML中的资源引用...");
+        println!(
+            "  📋 CSS: {} 项, JS: {} 项",
+            resources.get("css").unwrap().len(),
+            resources.get("js").unwrap().len()
+        );
         self.update_html_content(html_path, &resources)?;
+        println!("✅ HTML文件已更新");
+        println!();
         Ok(())
     }
 
@@ -914,6 +1128,13 @@ fn apply_resource_to_tags(
         result = nc;
         if u {
             updated = true;
+            let res_type = if tag == "link" { "CSS" } else { "JS" };
+            println!(
+                "  ✅ {}: {} -> {}",
+                res_type,
+                path_base(original_rel),
+                path_base(&new_path)
+            );
         }
     }
     (result, updated)
@@ -989,6 +1210,8 @@ fn apply_generic_cdn(
                     }
                     let new_path = format!("{}/{}", cdn_domain, clean);
                     if new_path != *path {
+                        let cdn_type = if tag == "link" { "CSS" } else { "JS" };
+                        println!("  🌍 CDN({}): {} -> {}", cdn_type, path_base(path), new_path);
                         let new_tag = format!(
                             "{}{}{}",
                             &tag_content[..am.val_start],
@@ -1389,6 +1612,118 @@ mod tests {
         assert!(file_exists(src.to_str().unwrap()));
         assert_eq!(info.hash.len(), 8);
         assert!(path_base(&info.hashed_path).contains(&info.hash));
+
+       let _ = std::fs::remove_dir_all(&dir);
+   }
+
+   #[test]
+    fn test_rename_file_with_hash_stages_in_git() {
+        // Regression for the "unversioned files" production incident:
+        // rename_file_with_hash must git-add the newly created hashed file so
+        // it appears as staged (A) in git status, not as unversioned (??).
+        // The old Rust binary never called git add, leaving every hashed JS/CSS
+        // and image file unversioned in the source repo.
+        use std::process::Command;
+
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("gitstage_{}", tmp_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+
+        let vm = VersionManager::new(
+            Config {
+                hash_length: 8,
+                ..Default::default()
+            },
+            false,
+        );
+        let src = dir.join("xdrNormal.js");
+        std::fs::write(&src, "console.log(1)").unwrap();
+
+        let info = vm.rename_file_with_hash(src.to_str().unwrap()).unwrap();
+        let hashed_name = path_base(&info.hashed_path);
+        assert!(file_exists(&info.hashed_path), "hashed file must be created");
+
+        let out = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&out.stdout);
+
+        let staged = status
+            .lines()
+            .any(|l| l.starts_with('A') && l.contains(&hashed_name));
+        assert!(
+            staged,
+            "hashed JS file should be staged (A) in git, not unversioned.\ngot:\n{}",
+            status
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rename_file_with_hash_stages_nested_image_in_git() {
+        // Regression for the gift-carousel2 production incident: a hashed
+        // image created in a nested subdirectory (images/.../new/) must also
+        // be git-added there, so it shows as staged rather than unversioned.
+        use std::process::Command;
+
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("gitnested_{}", tmp_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+
+        let vm = VersionManager::new(
+            Config {
+                hash_length: 8,
+                ..Default::default()
+            },
+            false,
+        );
+
+        // Nested image like images/xdrNormal/202505/new/gift-carousel2.png
+        let img_dir = dir.join("images/xdrNormal/202505/new");
+        std::fs::create_dir_all(&img_dir).unwrap();
+        let src = img_dir.join("gift-carousel2.png");
+        std::fs::write(&src, "PNGBYTES").unwrap();
+
+        let info = vm.rename_file_with_hash(src.to_str().unwrap()).unwrap();
+        let hashed_name = path_base(&info.hashed_path);
+        assert!(file_exists(&info.hashed_path), "nested hashed image must be created");
+
+        // git status from the repo root shows nested staged files with their
+        // repo-relative path, e.g. "A  images/.../gift-carousel2.<hash>.png".
+        let out = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&out.stdout);
+
+        let staged = status
+            .lines()
+            .any(|l| l.starts_with('A') && l.contains(&hashed_name));
+        assert!(
+            staged,
+            "nested hashed image should be staged (A) in git, not unversioned.\ngot:\n{}",
+            status
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1931,5 +2266,32 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_update_comment_dates() {
+        let html = "<!--\n@create date 2025-04-18 17:05:01\n@modify date 2025-04-18 17:05:01\n-->\n<div>hello</div>";
+        let (result, updated) = update_comment_dates(html);
+        assert!(updated, "dates should be updated");
+        assert!(
+            !result.contains("2025-04-18 17:05:01"),
+            "old date should be gone"
+        );
+        assert!(result.contains("@create date"), "keyword preserved");
+        assert!(result.contains("@modify date"), "keyword preserved");
+        // New date should be 19 chars matching YYYY-MM-DD HH:MM:SS
+        let create_idx = result.find("@create date ").unwrap() + "@create date ".len();
+        let new_date = &result[create_idx..create_idx + 19];
+        assert!(
+            is_date_time_format(new_date),
+            "new date should be valid: {new_date}"
+        );
+    }
+
+    #[test]
+    fn test_format_now() {
+        let now = format_now();
+        assert_eq!(now.len(), 19, "should be 19 chars: {now}");
+        assert!(is_date_time_format(&now), "should be valid date-time: {now}");
     }
 }

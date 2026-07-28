@@ -24,6 +24,8 @@ fn main() {
     let mut deploy_mode: i32 = 6;
     let mut commit_message = String::new();
     let mut dry_run = false;
+    let mut revert_svn = false;
+    let mut revert_git = false;
 
     let start = std::time::Instant::now();
 
@@ -79,6 +81,8 @@ fn main() {
                 }
             }
             "-dry-run" => dry_run = true,
+            "-revert-svn" => revert_svn = true,
+            "-revert-git" => revert_git = true,
             "-h" | "--help" | "-help" => {
                 print_usage();
                 return;
@@ -111,6 +115,25 @@ fn main() {
 
     apply_deploy_mode(&mut config, deploy_mode);
     println!("📋 部署模式: {}", deploy_mode);
+
+    // Revert local changes: dest SVN (-revert-svn) and/or src git (-revert-git).
+    if revert_svn || revert_git {
+        let dm = DeployManager::new(config.deploy.clone(), debug_mode);
+        if revert_svn {
+            if let Err(e) = dm.revert_all_svn() {
+                eprintln!("❌ SVN回退失败: {}", e);
+                std::process::exit(1);
+            }
+        }
+        if revert_git {
+            if let Err(e) = dm.revert_src_git() {
+                eprintln!("❌ Git回退失败: {}", e);
+                std::process::exit(1);
+            }
+        }
+        print_total_elapsed(start);
+        return;
+    }
 
     if dry_run {
         println!("\n=== dry-run preview ===");
@@ -191,6 +214,7 @@ fn main() {
     if config.deploy.enabled {
         run_deploy(&config, debug_mode, &commit_message, dry_run);
     }
+    println!("\n✨ 处理完成!");
     print_total_elapsed(start);
 }
 
@@ -219,7 +243,7 @@ fn apply_deploy_mode(config: &mut Config, mode: i32) {
 
 /// Creates a DeployManager and runs the deploy workflow, then always rolls back
 /// the source HTML file so it is not left with CDN references.
-fn run_deploy(config: &Config, debug_mode: bool, _commit_message: &str, dry_run: bool) {
+fn run_deploy(config: &Config, debug_mode: bool, commit_message: &str, dry_run: bool) {
     if dry_run {
         println!(
             "[dry-run] 部署预览: 将复制 {} 个文件路径",
@@ -234,7 +258,7 @@ fn run_deploy(config: &Config, debug_mode: bool, _commit_message: &str, dry_run:
     println!("{}", "=".repeat(60));
 
     let mut dm = DeployManager::new(config.deploy.clone(), debug_mode);
-    if let Err(e) = dm.run(&config.single_html_file, &config.cdn_domain) {
+    if let Err(e) = dm.run(config.deploy.auto_commit, commit_message, &config.single_html_file, &config.cdn_domain) {
         eprintln!("❌ 部署失败: {}", e);
         return;
     }
@@ -279,4 +303,6 @@ fn print_usage() {
     eprintln!("  -mode <n>           deploy mode 1-9 (default: 6)");
     eprintln!("  -message <text>     custom commit message");
     eprintln!("  -dry-run            preview without modifying files");
+    eprintln!("  -revert-svn         revert dest SVN local changes + remove unversioned files");
+    eprintln!("  -revert-git         revert src git working tree (git reset --hard + git clean -fd)");
 }

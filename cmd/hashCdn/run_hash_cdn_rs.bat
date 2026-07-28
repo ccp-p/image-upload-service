@@ -12,20 +12,20 @@ if "%IS_HOME%"=="" (
     echo [warn] IS_HOME not set, defaulting to Office paths
     echo [tip]  set IS_HOME=1 for home or set IS_HOME=0 for office
     echo.
-    cd /d D:\self_project\go_project\image-upload-service\cmd\hashCdn
+    cd /d D:\project\my_go_project\image-upload-service\cmd\hashCdn
+    set "RS_EXE=D:\project\my_go_project\image-upload-service\target\release\hash-cdn.exe"
 ) else (
     if "%IS_HOME%"=="1" (
         echo [info] env: Home IS_HOME=1
         cd /d D:\self_project\go_project\image-upload-service\cmd\hashCdn
+        set "RS_EXE=D:\self_project\go_project\image-upload-service\target\release\hash-cdn.exe"
     ) else (
         echo [info] env: Office IS_HOME=0
-        cd /d D:\self_project\go_project\image-upload-service\cmd\hashCdn
+        cd /d D:\project\my_go_project\image-upload-service\cmd\hashCdn
+        set "RS_EXE=D:\project\my_go_project\image-upload-service\target\release\hash-cdn.exe"
     )
     echo.
 )
-
-REM Rust binary path (built via: cargo build --release)
-set "RS_EXE=D:\self_project\go_project\image-upload-service\target\release\hash-cdn.exe"
 
 if not exist "%RS_EXE%" (
     echo [error] Rust binary not found: %RS_EXE%
@@ -66,6 +66,8 @@ echo [9]  copy-commit + git dark components, rollback HTML
 echo [10] deploy only, then copy
 echo [11] deploy only, then copy-commit
 echo [12] revert dest SVN local changes
+echo [13] revert dest SVN + revert src git
+echo [14] revert src git only
 echo.
 echo [last] mode=%last_mode%  press Enter to reuse, or input r to reset
 echo.
@@ -105,6 +107,8 @@ goto save_cache
 :save_cache
 REM Save mode to cache (skip for revert to avoid accidental reuse)
 if /i "!mode_input!"=="12" goto run
+if /i "!mode_input!"=="13" goto run
+if /i "!mode_input!"=="14" goto run
 echo mode=!mode_input!> "!cache_file!"
 goto run
 
@@ -127,8 +131,21 @@ if "!mode_input!"=="11" (
     goto check_result
 )
 if "!mode_input!"=="12" (
-    echo [error] -revert-svn is not yet implemented in the Rust version
-    echo [tip]   use run_hash_cdn.bat Go version for svn revert
+    echo [cmd] "%RS_EXE%" -config version.config.json -revert-svn
+    echo.
+    "%RS_EXE%" -config version.config.json -revert-svn
+    goto check_result
+)
+if "!mode_input!"=="13" (
+    echo [cmd] "%RS_EXE%" -config version.config.json -revert-svn -revert-git
+    echo.
+    "%RS_EXE%" -config version.config.json -revert-svn -revert-git
+    goto check_result
+)
+if "!mode_input!"=="14" (
+    echo [cmd] "%RS_EXE%" -config version.config.json -revert-git
+    echo.
+    "%RS_EXE%" -config version.config.json -revert-git
     goto check_result
 )
 

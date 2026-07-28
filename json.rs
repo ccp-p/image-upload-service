@@ -6,6 +6,11 @@ pub enum JsonValue {
     Null,
     Bool(bool),
     Number(f64),
+    /// Exact integer. Used for values that exceed f64 precision (2^53),
+    /// e.g. nanosecond modTime timestamps in the deploy cache. Parsed from
+    /// any JSON integer literal; serialised back as a bare number so Go's
+    /// `encoding/json` can unmarshal it into an int64.
+    Integer(i64),
     String(String),
     Array(Vec<JsonValue>),
     Object(Vec<(String, JsonValue)>),
@@ -44,8 +49,31 @@ impl JsonValue {
             JsonValue::Object(entries) => {
                 for (k, v) in entries {
                     if k.eq_ignore_ascii_case(key) {
-                        if let JsonValue::Number(n) = v {
-                            return Some(*n);
+                        match v {
+                            JsonValue::Number(n) => return Some(*n),
+                            JsonValue::Integer(n) => return Some(*n as f64),
+                            _ => {}
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns an exact i64 for Integer or Number values. Used for the deploy
+    /// cache modTime field where f64 precision loss would cause false cache
+    /// misses.
+    pub fn get_i64(&self, key: &str) -> Option<i64> {
+        match self {
+            JsonValue::Object(entries) => {
+                for (k, v) in entries {
+                    if k.eq_ignore_ascii_case(key) {
+                        match v {
+                            JsonValue::Integer(n) => return Some(*n),
+                            JsonValue::Number(n) => return Some(*n as i64),
+                            _ => {}
                         }
                     }
                 }
@@ -122,6 +150,7 @@ impl JsonValue {
                     format!("{}", n)
                 }
             }
+            JsonValue::Integer(n) => format!("{}", n),
             JsonValue::String(s) => format!("\"{}\"", escape_json_string(s)),
             JsonValue::Array(arr) => {
                 let items: Vec<String> = arr.iter().map(|v| v.to_json_string()).collect();
@@ -379,6 +408,11 @@ fn parse_number(bytes: &[u8], pos: &mut usize) -> Result<JsonValue, String> {
         }
     }
     let s = std::str::from_utf8(&bytes[start..*pos]).map_err(|_| "Invalid number".to_string())?;
+    // Try i64 first to preserve precision for large integers (e.g.
+    // nanosecond timestamps > 2^53). Falls back to f64 for decimals/exponents.
+    if let Ok(n) = s.parse::<i64>() {
+        return Ok(JsonValue::Integer(n));
+    }
     s.parse::<f64>()
         .map(JsonValue::Number)
         .map_err(|_| format!("Invalid number: {}", s))

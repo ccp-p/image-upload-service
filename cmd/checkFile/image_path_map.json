@@ -1,5 +1,5 @@
 {
-  "totalCount": 513,
+  "totalCount": 515,
   "lastUpdate": "0001-01-01T00:00:00Z",
   "mapping": {
     "afterGetEquityPop.png": [
@@ -326,8 +326,16 @@
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\new\\gift-carousel.png",
         "width": 654,
-        "height": 199,
-        "size": 49430
+        "height": 201,
+        "size": 44430
+      }
+    ],
+    "gift-carousel2.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\new\\gift-carousel2.png",
+        "width": 654,
+        "height": 200,
+        "size": 31625
       }
     ],
     "gztc.png": [
@@ -1443,15 +1451,15 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\rule_bg.png",
         "width": 650,
         "height": 4475,
-        "size": 217199
+        "size": 217451
       }
     ],
     "rule_bg_act.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\rule_bg_act.png",
-        "width": 579,
-        "height": 4595,
-        "size": 206976
+        "width": 650,
+        "height": 4822,
+        "size": 226704
       }
     ],
     "rule_bg_backup.png": [
@@ -1467,7 +1475,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\rule_bg_nor.png",
         "width": 650,
         "height": 4475,
-        "size": 217199
+        "size": 217451
       }
     ],
     "rule_bg_wechat.png": [
@@ -1600,6 +1608,14 @@
         "width": 88,
         "height": 91,
         "size": 2154
+      }
+    ],
+    "sign-bg-d.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\components\\xdrsignNew\\static\\sign-bg-d.png",
+        "width": 692,
+        "height": 418,
+        "size": 26016
       }
     ],
     "sign-bg-n.png": [
@@ -2941,9 +2957,9 @@
       },
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\new\\xdrblblyk.png",
-        "width": 1310,
-        "height": 400,
-        "size": 255749
+        "width": 655,
+        "height": 200,
+        "size": 82780
       }
     ],
     "xdrbwcj10q.png": [

@@ -3,7 +3,7 @@
 //! Uses a persistent on-disk cache to avoid recomputing MD5 on unchanged files.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::{is_home_env, DeployConfig};
 use crate::json::JsonValue;
@@ -35,6 +35,29 @@ fn path_join(dir: &str, name: &str) -> String {
     // producing "D:\foo" instead of "dir\foo".
     let name = name.trim_start_matches(|c| c == '/' || c == '\\');
     PathBuf::from(dir).join(name).to_string_lossy().to_string()
+}
+
+/// Recursively collects every regular file under `root`, recording each path
+/// relative to `base` using forward slashes. Directories are descended into.
+fn walk_dir_collect(root: &Path, base: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    for entry in std::fs::read_dir(root).map_err(|e| e.to_string())?.flatten() {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            walk_dir_collect(&entry.path(), base, out)?;
+        } else if ft.is_file() {
+            let rel = entry
+                .path()
+                .strip_prefix(base)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(rel);
+        }
+    }
+    Ok(())
 }
 
 fn get_ext(filename: &str) -> String {
@@ -78,9 +101,9 @@ pub struct DeployCache {
 }
 
 /// Loads the deploy cache from disk. Returns an empty cache if the file is
-/// missing or unparseable. modTime is stored as a string in the JSON to
-/// preserve i64 nanosecond precision (f64 would lose bits past 2^53), but we
-/// also accept the Go-format numeric form for interoperability.
+/// missing or unparseable. modTime is read as an exact i64 (Integer variant)
+/// so nanosecond precision is preserved; the legacy string form written by
+/// older Rust builds is still accepted as a fallback.
 pub fn load_deploy_cache(cache_path: &str) -> DeployCache {
     let mut cache = DeployCache {
         files: HashMap::new(),
@@ -100,13 +123,13 @@ pub fn load_deploy_cache(cache_path: &str) -> DeployCache {
 
     if let JsonValue::Object(entries) = &json {
         for (key, val) in entries {
-            let hash = val.get_str("hash").unwrap_or("").to_string();
-            let size = val.get_num("size").map(|n| n as i64).unwrap_or(0);
-            // modTime: prefer string form (Rust), fall back to number (Go format)
+           let hash = val.get_str("hash").unwrap_or("").to_string();
+           let size = val.get_num("size").map(|n| n as i64).unwrap_or(0);
+            // modTime: prefer exact integer (Go numeric form), fall back to
+            // legacy Rust string form for older cache files.
             let mod_time = val
-                .get_str("modTime")
-                .and_then(|s| s.parse::<i64>().ok())
-                .or_else(|| val.get_num("modTime").map(|n| n as i64))
+                .get_i64("modTime")
+                .or_else(|| val.get_str("modTime").and_then(|s| s.parse::<i64>().ok()))
                 .unwrap_or(0);
             cache.files.insert(
                 key.clone(),
@@ -122,18 +145,16 @@ pub fn load_deploy_cache(cache_path: &str) -> DeployCache {
     cache
 }
 
-/// Serialises the cache to pretty JSON, storing modTime as a string so that
-/// i64 nanosecond timestamps survive a save/reload round-trip exactly.
+/// Serialises the cache to pretty JSON. modTime is stored as a JSON integer
+/// (not a string) so that Go's `encoding/json` can unmarshal it into int64,
+/// and i64 precision is preserved exactly via the Integer variant.
 fn serialize_cache(files: &HashMap<String, FileCacheEntry>) -> String {
     let mut entries: Vec<(String, JsonValue)> = Vec::new();
     for (k, v) in files {
         let entry = JsonValue::Object(vec![
             ("hash".to_string(), JsonValue::String(v.hash.clone())),
             ("size".to_string(), JsonValue::Number(v.size as f64)),
-            (
-                "modTime".to_string(),
-                JsonValue::String(v.mod_time.to_string()),
-            ),
+            ("modTime".to_string(), JsonValue::Integer(v.mod_time)),
         ]);
         entries.push((k.clone(), entry));
     }
@@ -425,6 +446,55 @@ impl DeployManager {
         Ok((copied, skipped))
     }
 
+    /// Handles a wildcard path like "/images/*" by walking the source
+    /// directory tree recursively and copying every file found (base + hash
+    /// versions). Mirrors Go's DeployManager.handleWildcardPath, which uses
+    /// filepath.WalkDir and therefore descends into subdirectories.
+    ///
+    /// The previous implementation used a single non-recursive read_dir that
+    /// only listed immediate children, so files nested one level deeper
+    /// (e.g. images/.../new/gift-carousel2.<hash>.png referenced from CSS)
+    /// were silently skipped during deploy.
+    pub fn handle_wildcard_path(
+        &mut self,
+        wildcard_path: &str,
+    ) -> Result<(usize, usize, usize), String> {
+        let dir_rel = wildcard_path.trim_end_matches("/*");
+        let src_dir = path_join(&self.source_path, dir_rel);
+        if !file_exists(&src_dir) {
+            return Err(format!("源目录不存在: {}", src_dir));
+        }
+
+        // Collect every file under src_dir, expressed relative to src_dir with
+        // forward slashes (matching Go's filepath.Rel output).
+        let mut files: Vec<String> = Vec::new();
+        walk_dir_collect(Path::new(&src_dir), Path::new(&src_dir), &mut files)?;
+
+        let mut copied = 0;
+        let mut skipped = 0;
+        let mut failed = 0;
+
+        for rel_sub in &files {
+            // rel_to_source keeps the leading-slash form (e.g.
+            // "/images/xdrNormal/202505/new/gift-carousel2.<hash>.png") so
+            // path_join strips it consistently for both source and dest.
+            let rel_to_source = format!("{}/{}", dir_rel, rel_sub);
+            let dest = path_join(&self.dest_path, &rel_to_source);
+            match self.copy_file_with_versions(&rel_to_source, &dest) {
+                Ok((c, s)) => {
+                    copied += c;
+                    skipped += s;
+                }
+                Err(e) => {
+                    println!("⚠️  处理失败: {} - {}", rel_to_source, e);
+                    failed += 1;
+                }
+            }
+        }
+
+        Ok((copied, skipped, failed))
+    }
+
     /// Validates that every CDN URL referenced in an HTML file exists in the
     /// dest directory. Returns Err with the first missing file path.
     pub fn validate_cdn_resources(&self, html_path: &str, cdn_domain: &str) -> Result<(), String> {
@@ -502,7 +572,15 @@ impl DeployManager {
         Ok(())
     }
     /// Runs the full deploy workflow: copy files, validate CDN, save cache.
-    pub fn run(&mut self, single_html_file: &str, cdn_domain: &str) -> Result<(), String> {
+    /// Runs the full deploy workflow: svn update, copy files, validate CDN,
+    /// svn add, and optionally svn commit. Mirrors Go's DeployManager.Run.
+    pub fn run(
+        &mut self,
+        auto_commit: bool,
+        commit_message: &str,
+        single_html_file: &str,
+        cdn_domain: &str,
+    ) -> Result<(), String> {
         println!("🚀 开始部署操作...");
         println!("📂 源路径: {}", self.source_path);
         println!("📂 目标路径: {}", self.dest_path);
@@ -511,6 +589,13 @@ impl DeployManager {
         println!();
         println!("📦 开始复制文件...");
 
+        // Update SVN repo first (mirrors Go's updateSvnRepo).
+        if is_svn_repo(&self.dest_path) {
+            if let Err(e) = self.update_svn_repo() {
+                println!("⚠️  SVN更新失败: {}，继续部署...", e);
+            }
+        }
+
         let file_paths = self.config.file_paths.clone();
         let mut total_copied = 0;
         let mut total_skipped = 0;
@@ -518,30 +603,15 @@ impl DeployManager {
 
         for file_path in &file_paths {
             if file_path.ends_with("/*") {
-                let dir_rel = file_path.trim_end_matches("/*");
-                let src_dir = path_join(&self.source_path, dir_rel);
-                if !file_exists(&src_dir) {
-                    println!("⚠️  目录不存在: {}", src_dir);
-                    total_failed += 1;
-                    continue;
-                }
-                if let Ok(entries) = std::fs::read_dir(&src_dir) {
-                    for entry in entries.flatten() {
-                        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            let rel = format!("{}/{}", dir_rel, name);
-                            let dest = path_join(&self.dest_path, &rel);
-                            match self.copy_file_with_versions(&rel, &dest) {
-                                Ok((c, s)) => {
-                                    total_copied += c;
-                                    total_skipped += s;
-                                }
-                                Err(e) => {
-                                    println!("⚠️  处理失败: {} - {}", rel, e);
-                                    total_failed += 1;
-                                }
-                            }
-                        }
+                match self.handle_wildcard_path(file_path) {
+                    Ok((c, s, f)) => {
+                        total_copied += c;
+                        total_skipped += s;
+                        total_failed += f;
+                    }
+                    Err(e) => {
+                        println!("⚠️  {}", e);
+                        total_failed += 1;
                     }
                 }
             } else {
@@ -592,6 +662,348 @@ impl DeployManager {
         }
         println!("{}\n", "=".repeat(50));
 
+        // SVN add + commit (mirrors Go's svnAddAll / svnCommit).
+        if auto_commit && is_svn_repo(&self.dest_path) {
+            let svn_message = if !commit_message.is_empty() {
+                println!();
+                println!("📝 使用自定义提交信息: {}", commit_message);
+                commit_message.to_string()
+            } else {
+                match self.get_latest_git_commit() {
+                    Ok((hash, message)) => {
+                        println!();
+                        println!("📝 Git提交: {} - {}", hash, message);
+                        message
+                    }
+                    Err(e) => {
+                        println!("⚠️  获取Git提交信息失败: {}", e);
+                        println!("💡 请手动提交SVN修改");
+                        return Ok(());
+                    }
+                }
+            };
+
+            println!("⏳ 2秒后开始提交...");
+            std::thread::sleep(std::time::Duration::from_secs(2));
+
+            if let Err(e) = self.svn_commit(&svn_message) {
+                println!("❌ 自动提交失败: {}", e);
+            } else {
+                println!("🎉 自动提交完成！");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Updates the SVN working copy at dest_path (mirrors Go's updateSvnRepo).
+    /// If the repo is locked, runs `svn cleanup` and retries once.
+    pub fn update_svn_repo(&self) -> Result<(), String> {
+        println!("🔄 正在更新SVN仓库: {}", self.dest_path);
+
+        let output = std::process::Command::new("svn")
+            .arg("update")
+            .current_dir(&self.dest_path)
+            .output()
+            .map_err(|e| format!("svn update failed: {}", e))?;
+
+        if !output.status.success() {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if combined.contains("locked") || combined.contains("cleanup") {
+                println!("🔧 检测到SVN锁定，尝试清理...");
+                let clean = std::process::Command::new("svn")
+                    .arg("cleanup")
+                    .current_dir(&self.dest_path)
+                    .status();
+                if clean.map(|s| s.success()).unwrap_or(false) {
+                    return self.update_svn_repo();
+                }
+            }
+            return Err(format!("svn update failed: {}", combined.trim()));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        println!("✅ SVN更新成功");
+        println!("{}", stdout.trim());
+        Ok(())
+    }
+
+    /// Adds all unversioned (?) files to SVN (mirrors Go's svnAddAll).
+    pub fn svn_add_all(&self) {
+        println!("📁 正在添加新文件到SVN...");
+
+        let output = match std::process::Command::new("svn")
+            .arg("status")
+            .current_dir(&self.dest_path)
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return,
+        };
+
+        let status_text = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut added_count = 0;
+
+        for line in status_text.lines() {
+            let line = line.trim();
+            if !line.starts_with('?') {
+                continue;
+            }
+            let file = line[1..].trim();
+            if file.is_empty() {
+                continue;
+            }
+
+            let ok = std::process::Command::new("svn")
+                .arg("add")
+                .arg(file)
+                .current_dir(&self.dest_path)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                added_count += 1;
+            }
+        }
+
+        if added_count > 0 {
+            println!("✅ 已添加 {} 个新文件", added_count);
+        }
+    }
+
+    /// Commits SVN changes (mirrors Go's svnCommit). Calls svn_add_all first.
+    pub fn svn_commit(&self, message: &str) -> Result<(), String> {
+        println!("📤 正在提交SVN更改...");
+        println!("   提交信息: {}", message);
+
+        // Add all new files first.
+        self.svn_add_all();
+
+        // Write commit message to a temp file with UTF-8 BOM (like Go).
+        let temp_file = path_join(&self.dest_path, ".svn_commit_msg.tmp");
+        let content = format!("\u{FEFF}{}", message);
+        std::fs::write(&temp_file, content.as_bytes()).map_err(|e| e.to_string())?;
+
+        let output = std::process::Command::new("svn")
+            .args(["commit", "--file", &temp_file, "--encoding", "UTF-8"])
+            .current_dir(&self.dest_path)
+            .output()
+            .map_err(|e| format!("svn commit failed: {}", e))?;
+
+        // Clean up temp file.
+        let _ = std::fs::remove_file(&temp_file);
+
+        if !output.status.success() {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if combined.contains("no changes") || combined.contains("没有修改") {
+                println!("ℹ️  没有需要提交的修改");
+                return Ok(());
+            }
+            return Err(format!("SVN提交失败: {}", combined.trim()));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        println!("✅ SVN提交成功");
+        println!("{}", stdout.trim());
+        Ok(())
+    }
+
+    /// Gets the latest Git commit hash and message from the source repo,
+    /// filtering by configured authors (mirrors Go's getLatestGitCommit).
+    pub fn get_latest_git_commit(&self) -> Result<(String, String), String> {
+        if !is_git_repo(&self.source_path) {
+            return Err("源路径不是Git仓库".to_string());
+        }
+
+        let authors = if self.config.git_authors.is_empty() {
+            vec!["chenchengpeng".to_string(), "ccp".to_string()]
+        } else {
+            self.config.git_authors.clone()
+        };
+
+        let mut args: Vec<String> = vec![
+            "log".to_string(),
+            "-1".to_string(),
+            "--pretty=format:%h|%s".to_string(),
+        ];
+        for author in &authors {
+            args.push(format!("--author={}", author));
+        }
+
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        let output = std::process::Command::new("git")
+            .args(&arg_refs)
+            .current_dir(&self.source_path)
+            .output()
+            .map_err(|e| format!("git log failed: {}", e))?;
+
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        let parts: Vec<&str> = text.splitn(2, '|').collect();
+        if parts.len() != 2 {
+            return Err("无法解析Git提交信息".to_string());
+        }
+
+        Ok((parts[0].trim().to_string(), parts[1].trim().to_string()))
+    }
+
+    /// Reverts all local changes in the dest SVN working copy (mirrors Go's
+    /// revertAllSvn). Runs svn cleanup, prints status, then svn revert -R .
+    pub fn revert_all_svn(&self) -> Result<(), String> {
+        println!();
+        println!("{}", "=".repeat(60));
+        println!("🔄 回退dest SVN的所有本地变更");
+        println!("{}", "=".repeat(60));
+        println!("📂 目标路径: {}", self.dest_path);
+
+        if self.dest_path.is_empty() {
+            return Err(
+                "未设置dest路径（请检查 version.config.json 中的 deploy.homeDestPath / deploy.companyDestPath）"
+                    .to_string(),
+            );
+        }
+
+        if !is_svn_repo(&self.dest_path) {
+            return Err(format!("目标路径不是SVN仓库: {}", self.dest_path));
+        }
+
+        // 1. svn cleanup (handle possible interrupted/locked state)
+        let clean = std::process::Command::new("svn")
+            .arg("cleanup")
+            .current_dir(&self.dest_path)
+            .output();
+        match clean {
+            Ok(o) if o.status.success() => println!("✅ SVN cleanup 完成"),
+            Ok(o) => {
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                println!("⚠️  SVN cleanup 失败（可忽略）: {}", combined.trim());
+            }
+            Err(e) => println!("⚠️  SVN cleanup 失败（可忽略）: {}", e),
+        }
+
+        // 2. Show current pending changes before reverting
+        let status = std::process::Command::new("svn")
+            .arg("status")
+            .current_dir(&self.dest_path)
+            .output();
+        if let Ok(o) = status {
+            let status_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if status_str.is_empty() {
+                println!("ℹ️  当前没有待提交的本地变更，无需回退");
+                println!("{}", "=".repeat(60));
+                return Ok(());
+            }
+            println!("📋 待回退的本地变更:");
+            println!("{}", status_str);
+        }
+
+        // 3. Recursive revert: restore modified files, undo add/delete marks
+        println!();
+        println!("⏳ 正在执行 svn revert -R . ...");
+        let revert = std::process::Command::new("svn")
+            .args(["revert", "-R", "."])
+            .current_dir(&self.dest_path)
+            .status()
+            .map_err(|e| format!("SVN回退失败: {}", e))?;
+
+        if !revert.success() {
+            return Err("SVN回退失败".to_string());
+        }
+
+        // 4. Remove unversioned files. `svn revert -R .` only restores
+        //    versioned items; build artifacts deployed to dest survive
+        //    unless explicitly deleted, leaving the workspace dirty.
+        match clean_svn_unversioned(&self.dest_path) {
+            Ok((0, 0)) => println!("ℹ️  没有未版本化文件需要清理"),
+            Ok((removed, failed)) => {
+                println!("🧹 已清理未版本化文件: 删除 {} 个, 失败 {} 个", removed, failed)
+            }
+            Err(e) => println!("⚠️  清理未版本化文件失败（可忽略）: {}", e),
+        }
+
+        println!("✅ dest SVN的所有本地变更已回退");
+        println!("{}", "=".repeat(60));
+        Ok(())
+    }
+
+    /// Reverts all local changes in the src git working tree so it is fully
+    /// clean: `git reset --hard HEAD` discards tracked modifications, then
+    /// `git clean -fd` removes unversioned (untracked) files and directories.
+    /// Ignored files (.gitignore) such as node_modules/dist are preserved.
+    pub fn revert_src_git(&self) -> Result<(), String> {
+        println!();
+        println!("{}", "=".repeat(60));
+        println!("🔄 回退src Git工作区的所有本地改动");
+        println!("{}", "=".repeat(60));
+        println!("📁 源路径: {}", self.source_path);
+
+        if self.source_path.is_empty() {
+            return Err(
+                "未设置source路径（请检查 version.config.json 中的 deploy.homeSourcePath / deploy.companySourcePath）"
+                    .to_string(),
+            );
+        }
+
+        if !git_available() {
+            return Err("未找到git命令".to_string());
+        }
+
+        if !is_git_repo(&self.source_path) {
+            return Err(format!("源路径不是Git仓库: {}", self.source_path));
+        }
+
+        // 1. git reset --hard HEAD: discard all tracked modifications and
+        //    undo staged adds/deletes across the working tree.
+        println!("⏳ 正在执行 git reset --hard HEAD ...");
+        let reset = std::process::Command::new("git")
+            .args(["reset", "--hard", "HEAD"])
+            .current_dir(&self.source_path)
+            .status()
+            .map_err(|e| format!("git reset 失败: {}", e))?;
+        if !reset.success() {
+            return Err("git reset --hard HEAD 失败".to_string());
+        }
+
+        // 2. git clean -fd: remove unversioned (untracked) files and dirs.
+        //    -x is intentionally omitted so .gitignore'd paths (node_modules,
+        //    dist, build, target) are kept.
+        println!("⏳ 正在执行 git clean -fd ...");
+        let clean = std::process::Command::new("git")
+            .args(["clean", "-fd"])
+            .current_dir(&self.source_path)
+            .status()
+            .map_err(|e| format!("git clean 失败: {}", e))?;
+        if !clean.success() {
+            return Err("git clean -fd 失败".to_string());
+        }
+
+        // 3. Show git status to confirm the workspace is clean.
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&self.source_path)
+            .output();
+        if let Ok(o) = status {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() {
+                println!("✅ src Git工作区已干净");
+            } else {
+                println!("⚠️  Git状态仍有未清理的变更:\n{}", s);
+            }
+        }
+
+        println!("{}", "=".repeat(60));
         Ok(())
     }
 }
@@ -627,6 +1039,86 @@ fn is_git_repo(dir: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Returns true if `dir` is an SVN working copy (mirrors Go's isSvnRepo).
+fn is_svn_repo(dir: &str) -> bool {
+    std::process::Command::new("svn")
+        .arg("info")
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Parses `svn status` output and returns the relative paths of every
+/// unversioned item (lines whose first status column is `?`).
+///
+/// `svn status` uses a fixed 7-column status prefix followed by a space and
+/// the path, so the path always begins at byte offset 8. Reading from a fixed
+/// column preserves paths that contain spaces (a whitespace split would
+/// corrupt them). Lines shorter than the prefix, or without a leading `?`,
+/// are ignored.
+fn parse_svn_unversioned_paths(status_output: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in status_output.lines() {
+        let bytes = line.as_bytes();
+        if bytes.len() >= 8 && bytes[0] == b'?' {
+            // Bytes 0..8 are the ASCII status prefix, so offset 8 is always a
+            // valid char boundary even when the path itself is non-ASCII.
+            let path = line[8..].trim();
+            if !path.is_empty() {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    paths
+}
+
+/// Removes the given relative paths (as printed by `svn status`) from
+/// `base_dir`. Files are unlinked; directories are removed recursively.
+/// Returns `(removed, failed)`; failures are logged but do not abort.
+fn remove_unversioned_paths(base_dir: &str, paths: &[String]) -> (usize, usize) {
+    let mut removed = 0;
+    let mut failed = 0;
+    for rel in paths {
+        let full = path_join(base_dir, rel);
+        let p = std::path::Path::new(&full);
+        let res = if p.is_dir() {
+            std::fs::remove_dir_all(p)
+        } else {
+            std::fs::remove_file(p)
+        };
+        match res {
+            Ok(_) => removed += 1,
+            Err(e) => {
+                failed += 1;
+                println!("⚠️  删除未版本化文件失败: {} - {}", rel, e);
+            }
+        }
+    }
+    (removed, failed)
+}
+
+/// Runs `svn status`, parses unversioned (`?`) entries, and removes them from
+/// `dest_path` so the working copy is fully clean. `svn revert -R .` only
+/// restores versioned files; unversioned files survive, so this step is
+/// required to remove build artifacts left by a deploy. Returns
+/// `(removed, failed)`.
+fn clean_svn_unversioned(dest_path: &str) -> Result<(usize, usize), String> {
+    let output = std::process::Command::new("svn")
+        .arg("status")
+        .current_dir(dest_path)
+        .output()
+        .map_err(|e| format!("svn status 失败: {}", e))?;
+    let status_str = String::from_utf8_lossy(&output.stdout);
+    let paths = parse_svn_unversioned_paths(&status_str);
+    if paths.is_empty() {
+        return Ok((0, 0));
+    }
+    Ok(remove_unversioned_paths(dest_path, &paths))
 }
 
 /// Resolves a possibly-relative path to absolute (like Go's filepath.Abs).
@@ -920,7 +1412,55 @@ mod tests {
             dst_meta.len() as i64,
             mod_time_nanos(&dst_meta),
         );
-        assert_eq!(dc2.files.len(), 2);
+       assert_eq!(dc2.files.len(), 2);
+
+       let _ = std::fs::remove_dir_all(&dir);
+   }
+
+    #[test]
+    fn test_cache_modtime_interop_with_go() {
+        // Regression: Rust previously stored modTime as a JSON string, which
+        // Go's encoding/json could not unmarshal into int64, forcing Go to
+        // rebuild the cache from scratch every run. modTime must now be a JSON
+        // number (Integer variant) that both tools can read, and the exact
+        // nanosecond value must survive a save/reload round-trip.
+        let dir = std::env::temp_dir().join(format!("cache_interop_{}", tmp_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache_file = dir.join(".deploy-cache.json");
+
+        let mut dc = load_deploy_cache(cache_file.to_str().unwrap());
+        // Nanosecond timestamp well beyond 2^53 (f64 precision limit).
+        let big_mod_time: i64 = 1_785_000_000_000_000_123;
+        dc.update_cache(
+            dir.join("app.js").to_str().unwrap(),
+            "deadbeef",
+            42,
+            big_mod_time,
+        );
+        dc.save().unwrap();
+
+        // The written JSON must contain modTime as a bare number, not a string.
+        let raw = std::fs::read_to_string(cache_file.to_str().unwrap()).unwrap();
+        assert!(
+            raw.contains("\"modTime\": 1785000000000000123"),
+            "modTime must be a JSON number for Go interop, got: {}",
+            raw
+        );
+        assert!(
+            !raw.contains("\"modTime\": \"1785000000000000123\""),
+            "modTime must NOT be a string"
+        );
+
+        // Reload and verify exact preservation.
+        let dc2 = load_deploy_cache(cache_file.to_str().unwrap());
+        let entry = dc2
+            .files
+            .get(&clean_key(dir.join("app.js").to_str().unwrap()))
+            .expect("cache entry should exist after reload");
+        assert_eq!(
+            entry.mod_time, big_mod_time,
+            "modTime must survive save/reload exactly"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1037,12 +1577,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dst_dir);
     }
 
-    // ===================================================================
-    // CDN validation regression tests
-    //
-    // These tests verify that validate_cdn_resources correctly handles
-    // various URL formats and catches the double-prefix bug.
-    // ===================================================================
+    #[test]
+    fn test_wildcard_path_copies_subdirectory_files() {
+        // Regression for the gift-carousel2 production incident: a wildcard
+        // path like "/images/xdrNormal/202505/*" must walk into subdirectories
+        // (mirroring Go's filepath.WalkDir). The previous Rust deploy used a
+        // non-recursive read_dir, so a hashed image referenced from CSS and
+        // living in a nested folder (images/.../202505/new/gift-carousel2.<hash>.png)
+        // was never copied to dest, even though its CSS/JS siblings were.
+        let id = tmp_id();
+        let src_root = std::env::temp_dir().join(format!("wc_src_{}", id));
+        let dst_root = std::env::temp_dir().join(format!("wc_dst_{}", id));
+        let img_dir = src_root.join("images/xdrNormal/202505/new");
+        std::fs::create_dir_all(&img_dir).unwrap();
+        // immediate-child file directly under the wildcard root
+        std::fs::write(src_root.join("images/xdrNormal/202505/icon.png"), "i").unwrap();
+        // base + hashed image nested one level deeper
+        std::fs::write(img_dir.join("gift-carousel2.png"), "carousel").unwrap();
+        std::fs::write(img_dir.join("gift-carousel2.114b07c2.png"), "carousel").unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+
+        let mut dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: src_root.to_string_lossy().to_string(),
+            dest_path: dst_root.to_string_lossy().to_string(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(dst_root.join(".deploy-cache.json").to_str().unwrap()),
+        };
+
+        let (copied, _skipped, failed) = dm
+            .handle_wildcard_path("/images/xdrNormal/202505/*")
+            .expect("wildcard deploy should succeed");
+
+        assert_eq!(failed, 0, "no file should fail to copy");
+        assert!(copied > 0, "expected files to be copied");
+
+        // immediate-child file copied
+        assert!(file_exists(
+            dst_root
+                .join("images/xdrNormal/202505/icon.png")
+                .to_str()
+                .unwrap()
+        ));
+        // nested base + hashed image copied (the production incident)
+        assert!(
+            file_exists(
+                dst_root
+                    .join("images/xdrNormal/202505/new/gift-carousel2.png")
+                    .to_str()
+                    .unwrap()
+            ),
+            "nested base image must be deployed"
+        );
+        assert!(
+            file_exists(
+                dst_root
+                    .join("images/xdrNormal/202505/new/gift-carousel2.114b07c2.png")
+                    .to_str()
+                    .unwrap()
+            ),
+            "nested hashed image must be deployed (production incident)"
+        );
+
+       let _ = std::fs::remove_dir_all(&src_root);
+       let _ = std::fs::remove_dir_all(&dst_root);
+  }
+
+   // ===================================================================
+   // CDN validation regression tests
+   //
+   // These tests verify that validate_cdn_resources correctly handles
+   // various URL formats and catches the double-prefix bug.
+   // ===================================================================
+
+   #[test]
+   fn test_wildcard_deploy_cleans_old_hash_and_copies_nested() {
+        // End-to-end regression for the production incident: deploy via
+        // wildcard must (1) copy nested hashed images to dest and (2) clean
+        // old hash files from dest, exactly like Go's filepath.WalkDir +
+        // cleanHashFiles. The old Rust binary used non-recursive read_dir so
+        // nested files were skipped, and old hash files were left behind.
+        let id = tmp_id();
+        let src_root = std::env::temp_dir().join(format!("e2e_src_{}", id));
+        let dst_root = std::env::temp_dir().join(format!("e2e_dst_{}", id));
+
+        // Source tree mimicking the real layout.
+        let src_nested = src_root.join("images/xdrNormal/202505/new");
+        std::fs::create_dir_all(&src_nested).unwrap();
+        std::fs::write(src_nested.join("gift-carousel2.png"), "new-content").unwrap();
+        std::fs::write(src_nested.join("gift-carousel2.114b07c2.png"), "new-content").unwrap();
+
+        // Dest already has an OLD hash file that must be cleaned.
+        let dst_nested = dst_root.join("images/xdrNormal/202505/new");
+        std::fs::create_dir_all(&dst_nested).unwrap();
+        std::fs::write(dst_nested.join("gift-carousel2.deadbeef.png"), "stale").unwrap();
+
+        let mut dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: src_root.to_string_lossy().to_string(),
+            dest_path: dst_root.to_string_lossy().to_string(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(dst_root.join(".deploy-cache.json").to_str().unwrap()),
+        };
+
+        let (copied, _skipped, failed) = dm
+            .handle_wildcard_path("/images/xdrNormal/202505/*")
+            .expect("wildcard deploy should succeed");
+
+        assert_eq!(failed, 0, "no file should fail to copy");
+        assert!(copied > 0, "expected files to be copied");
+
+        // Nested base + new hash deployed to dest.
+        assert!(
+            file_exists(dst_nested.join("gift-carousel2.png").to_str().unwrap()),
+            "nested base image must be deployed"
+        );
+        assert!(
+            file_exists(dst_nested.join("gift-carousel2.114b07c2.png").to_str().unwrap()),
+            "nested hashed image must be deployed"
+        );
+        // Old hash file cleaned from dest.
+        assert!(
+            !file_exists(dst_nested.join("gift-carousel2.deadbeef.png").to_str().unwrap()),
+            "old hash file must be cleaned from dest (production incident)"
+        );
+
+        let _ = std::fs::remove_dir_all(&src_root);
+        let _ = std::fs::remove_dir_all(&dst_root);
+    }
+
+   // ===================================================================
+   // CDN validation regression tests (continued)
+   //
+   // These tests verify that validate_cdn_resources correctly handles
+   // various URL formats and catches the double-prefix bug.
+   // ===================================================================
 
     #[test]
     fn test_validate_cdn_with_path_prefix() {
@@ -1163,6 +1834,153 @@ mod tests {
         assert!(
             dm.validate_cdn_resources(html_path.to_str().unwrap(), cdn_domain).is_ok(),
             "validation should pass when query params are stripped"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_svn_unversioned_paths() {
+        // svn status: 7 status columns + space + path. Only '?' rows are
+        // unversioned; M/A/D rows are versioned changes handled by svn revert.
+        let status = "?       css/xdrNormal.688db72b.css\nM       css/xdrNormal.css\n?       images/xdrNormal/202505/new/gift-carousel2.114b07c2.png\n?       images/xdrNormal/202505/new/gift-carousel2.png\nA       scripts/js/xdrNormal.64afb25c.js\n?       scripts/js/xdrNormal.64afb25c.js\n";
+        let paths = parse_svn_unversioned_paths(status);
+        assert_eq!(
+            paths,
+            vec![
+                "css/xdrNormal.688db72b.css",
+                "images/xdrNormal/202505/new/gift-carousel2.114b07c2.png",
+                "images/xdrNormal/202505/new/gift-carousel2.png",
+                "scripts/js/xdrNormal.64afb25c.js",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_svn_unversioned_paths_skips_non_question_and_footer() {
+        // Blank lines, the status footer, and short/garbled lines are ignored;
+        // only a well-formed '?' row yields a path.
+        let status = "\nM       tracked.css\nStatus against revision:      42\n?\n?       ok.txt\n";
+        let paths = parse_svn_unversioned_paths(status);
+        assert_eq!(paths, vec!["ok.txt"]);
+    }
+
+    #[test]
+    fn test_remove_unversioned_paths() {
+        let dir = std::env::temp_dir().join(format!("unversion_{}", tmp_id()));
+        std::fs::create_dir_all(dir.join("css")).unwrap();
+        std::fs::create_dir_all(dir.join("images/xdrNormal/202505/new")).unwrap();
+        std::fs::write(dir.join("css").join("xdr.688db72b.css"), "x").unwrap();
+        std::fs::write(
+            dir.join("images/xdrNormal/202505/new")
+                .join("gift-carousel2.114b07c2.png"),
+            "y",
+        )
+        .unwrap();
+        std::fs::write(dir.join("keep.css"), "z").unwrap();
+
+        // A whole unversioned directory and a single file, exactly as svn
+        // status prints them (one entry per unversioned item, no recursion).
+        let paths = vec![
+            "css/xdr.688db72b.css".to_string(),
+            "images/xdrNormal/202505/new".to_string(),
+        ];
+        let (removed, failed) = remove_unversioned_paths(dir.to_str().unwrap(), &paths);
+        assert_eq!(failed, 0);
+        assert_eq!(removed, 2);
+        assert!(!dir.join("css/xdr.688db72b.css").exists());
+        assert!(!dir.join("images/xdrNormal/202505/new").exists());
+        assert!(dir.join("keep.css").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_revert_src_git_errors_on_empty_source() {
+        let dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: String::new(),
+            dest_path: String::new(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(""),
+        };
+        let res = dm.revert_src_git();
+        assert!(res.is_err(), "empty source path should error");
+    }
+
+    #[test]
+    fn test_revert_src_git_cleans_workspace() {
+        // Integration test: requires a real git binary. Builds a throwaway
+        // repo, dirties it (tracked modification + untracked file/dir), then
+        // verifies revert_src_git leaves a clean working tree.
+        if !git_available() {
+            eprintln!("[skip] git not available");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("revert_git_{}", tmp_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .expect("git command failed")
+        };
+
+        run_git(&["init"]);
+        run_git(&["config", "user.name", "test"]);
+        run_git(&["config", "user.email", "test@test.com"]);
+
+        // Initial commit of a tracked file.
+        std::fs::write(dir.join("tracked.txt"), "v1").unwrap();
+        run_git(&["add", "tracked.txt"]);
+        run_git(&["commit", "-m", "init"]);
+
+        // Dirty the working tree: modify the tracked file + add untracked
+        // file/dir (mimicking hashed build artifacts left by a deploy).
+        std::fs::write(dir.join("tracked.txt"), "modified").unwrap();
+        std::fs::write(dir.join("untracked.688db72b.css"), "u").unwrap();
+        std::fs::create_dir_all(dir.join("untracked_dir")).unwrap();
+        std::fs::write(dir.join("untracked_dir").join("inside.png"), "i").unwrap();
+
+        let dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: dir.to_string_lossy().to_string(),
+            dest_path: String::new(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(dir.join(".deploy-cache.json").to_str().unwrap()),
+        };
+        dm.revert_src_git().expect("revert_src_git should succeed");
+
+        // Tracked file restored to committed content.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tracked.txt")).unwrap(),
+            "v1",
+            "tracked modification must be reverted"
+        );
+        // Untracked file and dir removed.
+        assert!(
+            !dir.join("untracked.688db72b.css").exists(),
+            "untracked file must be removed"
+        );
+        assert!(
+            !dir.join("untracked_dir").exists(),
+            "untracked dir must be removed"
+        );
+
+        // Working tree must be clean (porcelain output empty).
+        let st = run_git(&["status", "--porcelain"]);
+        assert!(
+            String::from_utf8_lossy(&st.stdout).trim().is_empty(),
+            "workspace should be clean, got: {}",
+            String::from_utf8_lossy(&st.stdout)
         );
 
         let _ = std::fs::remove_dir_all(&dir);
