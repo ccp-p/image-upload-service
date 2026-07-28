@@ -8,3 +8,16 @@
 
 .run_cache.ini
 .run_cache.json
+
+# node modules and build artifacts
+node_modules/
+**/node_modules/
+
+# VSCode extension
+vscode-smartdeploy/out/
+vscode-smartdeploy/*.vsix
+vscode-smartdeploy/package-lock.json
+
+# compiled binary
+**/smartDeploy.exe
+smartDeploy.exe

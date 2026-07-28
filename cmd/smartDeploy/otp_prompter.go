@@ -27,6 +27,13 @@ type interactiveOTPPrompter struct {
 	pollInterval time.Duration
 	active       *atomic.Bool // shared with REPL — when true the REPL yields stdin
 	writeMu      *sync.Mutex  // shared with REPL for interleaving-safe output
+
+	// autoConfirmFirstOTP: when true, the first PromptOTP call that finds
+	// a valid clipboard code sends it immediately without waiting for
+	// Enter. This lets SmartDeploy auto-authenticate on startup if the
+	// user already has a fresh OTP in their clipboard. After the first
+	// use, it reverts to interactive confirmation (codes expire).
+	autoConfirmFirstOTP bool
 }
 
 // NewInteractiveOTPPrompter creates a prompter that polls the clipboard every
@@ -45,12 +52,13 @@ func NewInteractiveOTPPrompter(
 		writeMu = &sync.Mutex{}
 	}
 	return &interactiveOTPPrompter{
-		reader:       reader,
-		writer:       writer,
-		clip:         clip,
-		pollInterval: 500 * time.Millisecond,
-		active:       active,
-		writeMu:      writeMu,
+		reader:              reader,
+		writer:              writer,
+		clip:                clip,
+		pollInterval:        500 * time.Millisecond,
+		active:              active,
+		writeMu:             writeMu,
+		autoConfirmFirstOTP: false,
 	}
 }
 
@@ -61,11 +69,34 @@ func (p *interactiveOTPPrompter) SetPollInterval(d time.Duration) {
 	}
 }
 
+// SetAutoConfirmFirstOTP enables auto-send on the first OTP prompt: if the
+// clipboard already contains a valid code when the SSH server requests
+// authentication, it is sent immediately without waiting for Enter.
+func (p *interactiveOTPPrompter) SetAutoConfirmFirstOTP(on bool) {
+	p.autoConfirmFirstOTP = on
+}
+
 // PromptOTP displays the current clipboard OTP in real time and waits for the
 // user to press Enter to confirm (or type a code). Returns the confirmed OTP.
 func (p *interactiveOTPPrompter) PromptOTP(ctx context.Context) (string, error) {
 	p.active.Store(true)
 	defer p.active.Store(false)
+
+	// If auto-confirm is enabled for this call, do a quick clipboard poll.
+	// If a valid OTP is found, send it immediately without user interaction.
+	if p.autoConfirmFirstOTP {
+		p.autoConfirmFirstOTP = false // one-shot: only the first call auto-confirms
+		if p.clip != nil {
+			content, err := p.clip.Read()
+			if err == nil {
+				if otp, ok := extractOTP(content); ok {
+					p.printf("[OTP] Auto-confirmed from clipboard: %s\n", otp)
+					return otp, nil
+				}
+			}
+		}
+		// No clipboard code found -- fall through to interactive mode.
+	}
 
 	p.printf("\n")
 	p.printf("========================================\n")

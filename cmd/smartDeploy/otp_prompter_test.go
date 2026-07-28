@@ -267,3 +267,105 @@ func TestNoopOTPPrompter_Error(t *testing.T) {
 		t.Error("expected error")
 	}
 }
+
+// --- Auto-confirm first OTP tests ---
+
+func TestOTPPrompter_AutoConfirmFirstOTP(t *testing.T) {
+	clip := newMockClipboardReader("654321")
+	lr := NewSharedLineReader(strings.NewReader(""))
+	defer lr.Close()
+
+	p, buf := newTestPrompter(clip, lr)
+	p.SetAutoConfirmFirstOTP(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	otp, err := p.PromptOTP(ctx)
+	if err != nil {
+		t.Fatalf("PromptOTP error: %v", err)
+	}
+	if otp != "654321" {
+		t.Errorf("otp = %q, want '654321'", otp)
+	}
+	if !strings.Contains(buf.String(), "Auto-confirmed") {
+		t.Errorf("output should show auto-confirmed: %q", buf.String())
+	}
+	// Should NOT show the interactive prompt UI.
+	if strings.Contains(buf.String(), "OTP REQUIRED") {
+		t.Errorf("should not show interactive prompt when auto-confirming: %q", buf.String())
+	}
+}
+
+func TestOTPPrompter_AutoConfirmOneShot(t *testing.T) {
+	clip := newMockClipboardReader("111222")
+	// Provide two Enter presses: one is never consumed by first call,
+	// second call falls back to interactive and needs Enter.
+	lr := NewSharedLineReader(strings.NewReader("\n"))
+	defer lr.Close()
+
+	p, _ := newTestPrompter(clip, lr)
+	p.SetAutoConfirmFirstOTP(true)
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel1()
+
+	// First call auto-confirms.
+	otp, err := p.PromptOTP(ctx1)
+	if err != nil {
+		t.Fatalf("first PromptOTP error: %v", err)
+	}
+	if otp != "111222" {
+		t.Errorf("first otp = %q, want '111222'", otp)
+	}
+
+	// autoConfirmFirstOTP should now be false.
+	if p.autoConfirmFirstOTP {
+		t.Error("autoConfirmFirstOTP should be false after first call")
+	}
+
+	// Second call falls back to interactive mode.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+
+	otp2, err := p.PromptOTP(ctx2)
+	if err != nil {
+		t.Fatalf("second PromptOTP error: %v", err)
+	}
+	// Should use clipboard code with Enter confirmation.
+	if otp2 != "111222" {
+		t.Errorf("second otp = %q, want '111222'", otp2)
+	}
+}
+
+func TestOTPPrompter_AutoConfirmNoClipboard_FallsBackToInteractive(t *testing.T) {
+	clip := newMockClipboardReader("")
+	lr := NewSharedLineReader(strings.NewReader("\n654321\n"))
+	defer lr.Close()
+
+	p, buf := newTestPrompter(clip, lr)
+	p.SetAutoConfirmFirstOTP(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// No clipboard code, so auto-confirm can't fire. Should fall through
+	// to interactive mode. First Enter with no clipboard code -> "No code
+	// in clipboard", then user types a code.
+	otp, err := p.PromptOTP(ctx)
+	if err != nil {
+		t.Fatalf("PromptOTP error: %v", err)
+	}
+	if otp != "654321" {
+		t.Errorf("otp = %q, want '654321' (typed by user)", otp)
+	}
+
+	out := buf.String()
+	// Should show the interactive prompt since no clipboard code was found.
+	if !strings.Contains(out, "OTP REQUIRED") {
+		t.Errorf("should fall back to interactive prompt when no clipboard code: %q", out)
+	}
+	if !strings.Contains(out, "No code in clipboard") {
+		t.Errorf("should show 'No code in clipboard' on first Enter: %q", out)
+	}
+}

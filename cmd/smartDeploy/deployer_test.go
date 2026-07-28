@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -285,5 +286,122 @@ func TestNewDeployer_NilLogger(t *testing.T) {
 	d := NewDeployer(mc, mapper, true, nil)
 	if d.logger == nil {
 		t.Error("logger should not be nil even when passed nil")
+	}
+}
+
+// --- Upload history tests ---
+
+func TestDeployer_History_Empty(t *testing.T) {
+	d, _, _ := newTestDeployer(false)
+	if history := d.History(); len(history) != 0 {
+		t.Errorf("history should be empty initially, got %d", len(history))
+	}
+	if _, ok := d.LastUpload(); ok {
+		t.Error("LastUpload should return false when no history")
+	}
+}
+
+func TestDeployer_History_AfterUpload(t *testing.T) {
+	dir := t.TempDir()
+	d, _, _ := newTestDeployerWithDir(false, dir)
+
+	f := filepath.Join(dir, "style.css")
+	os.WriteFile(f, []byte("body{}"), 0644)
+
+	d.UploadFile(f)
+
+	history := d.History()
+	if len(history) != 1 {
+		t.Fatalf("history len = %d, want 1", len(history))
+	}
+	if history[0].LocalPath != f {
+		t.Errorf("history[0].LocalPath = %q, want %q", history[0].LocalPath, f)
+	}
+	if !history[0].Success {
+		t.Error("history[0] should be success")
+	}
+}
+
+func TestDeployer_History_MostRecentFirst(t *testing.T) {
+	dir := t.TempDir()
+	d, _, _ := newTestDeployerWithDir(false, dir)
+
+	f1 := filepath.Join(dir, "a.css")
+	f2 := filepath.Join(dir, "b.css")
+	os.WriteFile(f1, []byte("a"), 0644)
+	os.WriteFile(f2, []byte("b"), 0644)
+
+	d.UploadFile(f1)
+	d.UploadFile(f2)
+
+	history := d.History()
+	if len(history) != 2 {
+		t.Fatalf("history len = %d, want 2", len(history))
+	}
+	if history[0].LocalPath != f2 {
+		t.Errorf("history[0] should be most recent (f2), got %q", history[0].LocalPath)
+	}
+	if history[1].LocalPath != f1 {
+		t.Errorf("history[1] should be older (f1), got %q", history[1].LocalPath)
+	}
+}
+
+func TestDeployer_History_FailedUploadRecorded(t *testing.T) {
+	dir := t.TempDir()
+	d, mc, _ := newTestDeployerWithDir(true, dir)
+	mc.uploadErr = os.ErrInvalid
+
+	f := filepath.Join(dir, "style.css")
+	os.WriteFile(f, []byte("body{}"), 0644)
+
+	d.OnFileChange(f)
+
+	history := d.History()
+	if len(history) != 1 {
+		t.Fatalf("history len = %d, want 1", len(history))
+	}
+	if history[0].Success {
+		t.Error("failed upload should be recorded as Success=false")
+	}
+}
+
+func TestDeployer_History_CappedAt20(t *testing.T) {
+	dir := t.TempDir()
+	d, _, _ := newTestDeployerWithDir(false, dir)
+
+	for i := 0; i < 25; i++ {
+		f := filepath.Join(dir, fmt.Sprintf("file%d.css", i))
+		os.WriteFile(f, []byte("x"), 0644)
+		d.UploadFile(f)
+	}
+
+	history := d.History()
+	if len(history) != 20 {
+		t.Errorf("history len = %d, want 20 (capped)", len(history))
+	}
+	// Most recent should be file24 (last uploaded).
+	want := filepath.Join(dir, "file24.css")
+	if history[0].LocalPath != want {
+		t.Errorf("history[0] = %q, want %q", history[0].LocalPath, want)
+	}
+}
+
+func TestDeployer_LastUpload(t *testing.T) {
+	dir := t.TempDir()
+	d, _, _ := newTestDeployerWithDir(false, dir)
+
+	f := filepath.Join(dir, "style.css")
+	os.WriteFile(f, []byte("body{}"), 0644)
+	d.UploadFile(f)
+
+	entry, ok := d.LastUpload()
+	if !ok {
+		t.Fatal("LastUpload should return true after upload")
+	}
+	if entry.LocalPath != f {
+		t.Errorf("LastUpload.LocalPath = %q, want %q", entry.LocalPath, f)
+	}
+	if !entry.Success {
+		t.Error("LastUpload should be success")
 	}
 }

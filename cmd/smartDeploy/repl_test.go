@@ -593,3 +593,207 @@ func TestREPL_PWD_ShowsJailRoot(t *testing.T) {
 		t.Errorf("pwd should show server path with jailRoot: %q", out)
 	}
 }
+
+// --- repush (u) command tests ---
+
+func TestREPL_Repush_NoHistory(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "u\n", true)
+	if !strings.Contains(buf.String(), "No recent uploads") {
+		t.Errorf("repush with no history should say so: %q", buf.String())
+	}
+}
+
+func TestREPL_Repush_LastFile(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "test.css")
+	os.WriteFile(f, []byte("body{}"), 0644)
+
+	mc := newMockClient()
+	mapper := NewPathMapper(dir, "/remote", "")
+	d := NewDeployer(mc, mapper, false, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+
+	// First upload a file to populate history.
+	d.UploadFile(f)
+
+	r := NewREPL(d, mc, nil, slr("u\n"), buf)
+	r.Run()
+
+	out := buf.String()
+	if !strings.Contains(out, "Re-uploading") {
+		t.Errorf("repush should say Re-uploading: %q", out)
+	}
+	if !strings.Contains(out, "[OK]") {
+		t.Errorf("repush should report OK: %q", out)
+	}
+	// Should have uploaded twice (initial + repush).
+	uploads := mc.getUploads()
+	if len(uploads) != 2 {
+		t.Errorf("uploads = %d, want 2 (initial + repush)", len(uploads))
+	}
+}
+
+func TestREPL_Repush_ByNumber(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.css")
+	f2 := filepath.Join(dir, "b.css")
+	os.WriteFile(f1, []byte("a"), 0644)
+	os.WriteFile(f2, []byte("b"), 0644)
+
+	mc := newMockClient()
+	mapper := NewPathMapper(dir, "/remote", "")
+	d := NewDeployer(mc, mapper, false, log.New(io.Discard, "", 0))
+
+	// Upload two files to populate history (f2 is most recent).
+	d.UploadFile(f1)
+	d.UploadFile(f2)
+
+	// Reset upload count.
+	mc.mu.Lock()
+	mc.uploads = nil
+	mc.mu.Unlock()
+
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("u 2\n"), buf)
+	r.Run()
+
+	out := buf.String()
+	if !strings.Contains(out, "Re-uploading") {
+		t.Errorf("repush should say Re-uploading: %q", out)
+	}
+	// u 2 should re-upload f1 (history[1], 1-indexed as 2).
+	uploads := mc.getUploads()
+	if len(uploads) != 1 {
+		t.Fatalf("uploads = %d, want 1", len(uploads))
+	}
+	if uploads[0].Local != f1 {
+		t.Errorf("repush 2 should upload f1, got %q", uploads[0].Local)
+	}
+}
+
+func TestREPL_Repush_InvalidNumber(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "test.css")
+	os.WriteFile(f, []byte("body{}"), 0644)
+
+	mc := newMockClient()
+	mapper := NewPathMapper(dir, "/remote", "")
+	d := NewDeployer(mc, mapper, false, log.New(io.Discard, "", 0))
+	d.UploadFile(f)
+
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("u 99\n"), buf)
+	r.Run()
+
+	if !strings.Contains(buf.String(), "Invalid number") {
+		t.Errorf("repush with out-of-range number should say Invalid: %q", buf.String())
+	}
+}
+
+// --- recent (rec) command tests ---
+
+func TestREPL_Recent_Empty(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "rec\n", true)
+	if !strings.Contains(buf.String(), "No recent uploads") {
+		t.Errorf("recent with no history should say so: %q", buf.String())
+	}
+}
+
+func TestREPL_Recent_ShowsHistory(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.css")
+	f2 := filepath.Join(dir, "b.css")
+	os.WriteFile(f1, []byte("a"), 0644)
+	os.WriteFile(f2, []byte("b"), 0644)
+
+	mc := newMockClient()
+	mapper := NewPathMapper(dir, "/remote", "")
+	d := NewDeployer(mc, mapper, false, log.New(io.Discard, "", 0))
+	d.UploadFile(f1)
+	d.UploadFile(f2)
+
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("rec\n"), buf)
+	r.Run()
+
+	out := buf.String()
+	if !strings.Contains(out, "Recent uploads (2)") {
+		t.Errorf("recent should show count 2: %q", out)
+	}
+	if !strings.Contains(out, "a.css") {
+		t.Errorf("recent should show a.css: %q", out)
+	}
+	if !strings.Contains(out, "b.css") {
+		t.Errorf("recent should show b.css: %q", out)
+	}
+	if !strings.Contains(out, "[OK]") {
+		t.Errorf("recent should show status: %q", out)
+	}
+}
+
+func TestREPL_Recent_ShowsFailedUpload(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "test.css")
+	os.WriteFile(f, []byte("body{}"), 0644)
+
+	mc := newMockClient()
+	mc.uploadErr = os.ErrInvalid
+	mapper := NewPathMapper(dir, "/remote", "")
+	d := NewDeployer(mc, mapper, false, log.New(io.Discard, "", 0))
+	d.UploadFile(f)
+
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("rec\n"), buf)
+	r.Run()
+
+	out := buf.String()
+	if !strings.Contains(out, "[FAIL]") {
+		t.Errorf("recent should show FAIL for failed upload: %q", out)
+	}
+}
+
+// --- status shows last upload ---
+
+func TestREPL_Status_ShowsLastUpload(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "test.css")
+	os.WriteFile(f, []byte("body{}"), 0644)
+
+	mc := newMockClient()
+	mapper := NewPathMapper(dir, "/remote", "")
+	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
+	d.UploadFile(f)
+
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("s\n"), buf)
+	r.Run()
+
+	out := buf.String()
+	if !strings.Contains(out, "Last upload:") {
+		t.Errorf("status should show Last upload when history exists: %q", out)
+	}
+	if !strings.Contains(out, "test.css") {
+		t.Errorf("status should show last uploaded filename: %q", out)
+	}
+}
+
+func TestREPL_Status_NoLastUploadWhenEmpty(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "s\n", true)
+	out := buf.String()
+	if strings.Contains(out, "Last upload:") {
+		t.Errorf("status should not show Last upload when no history: %q", out)
+	}
+}
+
+// --- help shows new commands ---
+
+func TestREPL_Help_ShowsRepushAndRecent(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "h\n", true)
+	out := buf.String()
+	if !strings.Contains(out, "u, up") {
+		t.Errorf("help should mention u/up command: %q", out)
+	}
+	if !strings.Contains(out, "rec, recent") {
+		t.Errorf("help should mention rec/recent command: %q", out)
+	}
+}

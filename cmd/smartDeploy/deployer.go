@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 )
 
 // ChangeTracker tracks files that have changed but not yet been uploaded.
@@ -52,6 +53,14 @@ func (t *ChangeTracker) Clear() {
 	t.mu.Unlock()
 }
 
+// UploadEntry records a single upload attempt for history display.
+type UploadEntry struct {
+	LocalPath  string
+	RemotePath string
+	Time       time.Time
+	Success    bool
+}
+
 // Deployer orchestrates the file watcher, remote client, and path mapper.
 type Deployer struct {
 	client    RemoteClient
@@ -60,6 +69,11 @@ type Deployer struct {
 	autoWatch bool
 	mu        sync.Mutex
 	logger    *log.Logger
+
+	// Upload history (most recent first, capped at maxHistory).
+	historyMu  sync.Mutex
+	history    []UploadEntry
+	maxHistory int
 }
 
 func NewDeployer(client RemoteClient, mapper *PathMapper, autoWatch bool, logger *log.Logger) *Deployer {
@@ -67,11 +81,12 @@ func NewDeployer(client RemoteClient, mapper *PathMapper, autoWatch bool, logger
 		logger = log.New(io.Discard, "", 0)
 	}
 	return &Deployer{
-		client:    client,
-		mapper:    mapper,
-		tracker:   NewChangeTracker(),
-		autoWatch: autoWatch,
-		logger:    logger,
+		client:     client,
+		mapper:     mapper,
+		tracker:    NewChangeTracker(),
+		autoWatch:  autoWatch,
+		logger:     logger,
+		maxHistory: 20,
 	}
 }
 
@@ -100,13 +115,50 @@ func (d *Deployer) UploadFile(localPath string) (string, error) {
 		return "", fmt.Errorf("map path: %w", err)
 	}
 
-	if err := d.client.Upload(localPath, remotePath); err != nil {
-		return remotePath, fmt.Errorf("upload: %w", err)
+	uploadErr := d.client.Upload(localPath, remotePath)
+	d.recordHistory(localPath, remotePath, uploadErr == nil)
+	if uploadErr != nil {
+		return remotePath, fmt.Errorf("upload: %w", uploadErr)
 	}
 
 	d.tracker.Remove(localPath)
 	d.logger.Printf("[OK] %s -> %s", localPath, remotePath)
 	return remotePath, nil
+}
+
+// recordHistory prepends an upload entry, capping at maxHistory.
+func (d *Deployer) recordHistory(local, remote string, success bool) {
+	d.historyMu.Lock()
+	defer d.historyMu.Unlock()
+	entry := UploadEntry{
+		LocalPath:  local,
+		RemotePath: remote,
+		Time:       time.Now(),
+		Success:    success,
+	}
+	d.history = append([]UploadEntry{entry}, d.history...)
+	if len(d.history) > d.maxHistory {
+		d.history = d.history[:d.maxHistory]
+	}
+}
+
+// History returns a copy of recent upload entries (most recent first).
+func (d *Deployer) History() []UploadEntry {
+	d.historyMu.Lock()
+	defer d.historyMu.Unlock()
+	cp := make([]UploadEntry, len(d.history))
+	copy(cp, d.history)
+	return cp
+}
+
+// LastUpload returns the most recent upload entry, or false if none.
+func (d *Deployer) LastUpload() (UploadEntry, bool) {
+	d.historyMu.Lock()
+	defer d.historyMu.Unlock()
+	if len(d.history) == 0 {
+		return UploadEntry{}, false
+	}
+	return d.history[0], true
 }
 
 // UploadAll uploads all pending files, returning success and failure counts.

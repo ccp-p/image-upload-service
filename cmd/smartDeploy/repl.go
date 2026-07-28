@@ -5,6 +5,7 @@ import (
 	"io"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -116,6 +117,10 @@ func (r *REPL) handle(line string) (quit bool) {
 		r.pushAll()
 	case "l", "list":
 		r.listPending()
+	case "u", "up":
+		r.repush(args)
+	case "rec", "recent":
+		r.showRecent()
 	case "c", "clear":
 		r.deployer.ClearPending()
 		r.printf("Pending cleared.\n")
@@ -148,6 +153,8 @@ func (r *REPL) printHelp() {
   p, push <path>     Upload a specific file
   pa, pushall        Upload all pending files
   l, list            List pending files
+  u, up [N]          Re-upload last file (or Nth from recent history)
+  rec, recent        Show recent upload history
   c, clear           Clear pending queue
   r, reconnect       Reconnect to server (async, waits for OTP)
   otp [code]         Set or show current OTP code
@@ -190,6 +197,16 @@ func (r *REPL) printStatus() {
 		if pwd, err := r.client.RemotePWD(); err == nil {
 			r.printf("  Remote PWD:  %s\n", pwd)
 		}
+	}
+
+	// Show last uploaded file for quick reference.
+	if entry, ok := r.deployer.LastUpload(); ok {
+		name := filepath.Base(entry.LocalPath)
+		status := "OK"
+		if !entry.Success {
+			status = "FAIL"
+		}
+		r.printf("  Last upload: %s [%s] (%s)\n", name, status, entry.Time.Format("15:04:05"))
 	}
 }
 
@@ -306,6 +323,58 @@ func (r *REPL) listPending() {
 	r.printf("Pending files (%d):\n", len(files))
 	for i, f := range files {
 		r.printf("  %d. %s\n", i+1, f)
+	}
+}
+
+// repush re-uploads the most recent file from upload history.
+// With a numeric argument it re-uploads the Nth entry (1-indexed).
+func (r *REPL) repush(args []string) {
+	history := r.deployer.History()
+	if len(history) == 0 {
+		r.printf("No recent uploads. Use 'push <path>' to upload a file.\n")
+		return
+	}
+	if len(args) > 0 {
+		n, err := strconv.Atoi(args[0])
+		if err != nil || n < 1 || n > len(history) {
+			r.printf("Invalid number. Use 'u <1-%d>'.\n", len(history))
+			return
+		}
+		entry := history[n-1]
+		r.printf("Re-uploading: %s\n", entry.LocalPath)
+		remotePath, err := r.deployer.UploadFile(entry.LocalPath)
+		if err != nil {
+			r.printf("[ERR] %v\n", err)
+			return
+		}
+		r.printf("[OK] %s -> %s\n", entry.LocalPath, remotePath)
+		return
+	}
+	// No argument: re-push the most recent file.
+	entry := history[0]
+	r.printf("Re-uploading: %s\n", entry.LocalPath)
+	remotePath, err := r.deployer.UploadFile(entry.LocalPath)
+	if err != nil {
+		r.printf("[ERR] %v\n", err)
+		return
+	}
+	r.printf("[OK] %s -> %s\n", entry.LocalPath, remotePath)
+}
+
+// showRecent displays the upload history with indices for repush.
+func (r *REPL) showRecent() {
+	history := r.deployer.History()
+	if len(history) == 0 {
+		r.printf("No recent uploads.\n")
+		return
+	}
+	r.printf("Recent uploads (%d):\n", len(history))
+	for i, e := range history {
+		status := "OK"
+		if !e.Success {
+			status = "FAIL"
+		}
+		r.printf("  %d. [%s] %s -> %s (%s)\n", i+1, status, e.LocalPath, e.RemotePath, e.Time.Format("15:04:05"))
 	}
 }
 

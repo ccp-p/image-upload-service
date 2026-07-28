@@ -7,11 +7,17 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 func main() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	flag.Parse()
+
+	// Positional args after flags are file paths to upload immediately
+	// after connection. This lets the user drag a file onto the exe or
+	// use a right-click context menu without typing paths in the REPL.
+	queuedFiles := resolveQueuedPaths(flag.Args())
 
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
@@ -52,6 +58,7 @@ func main() {
 	var prompter OTPPrompter
 	if clipReader != nil {
 		p := NewInteractiveOTPPrompter(lineReader, os.Stdout, clipReader, &otpActive, writeMu)
+		p.SetAutoConfirmFirstOTP(true)
 		prompter = p
 	}
 
@@ -75,7 +82,7 @@ func main() {
 	// interactive prompter while the REPL is already responsive.
 	fmt.Printf("Connecting to %s:%d ...\n", cfg.Host, cfg.Port)
 	if prompter != nil {
-		fmt.Println("When prompted, copy your OTP to clipboard and press Enter to confirm.")
+		fmt.Println("OTP: auto-confirm on first connect if clipboard has a code.")
 	}
 	go func() {
 		if err := client.Connect(); err != nil {
@@ -86,6 +93,38 @@ func main() {
 	}()
 
 	deployer := NewDeployer(client, mapper, cfg.AutoWatch, logger)
+
+	// Start local HTTP API for editor integration (VSCode, etc.).
+	// Uses the already-connected SSH session, so no re-OTP needed.
+	var apiServer *APIServer
+	if cfg.APIEnabled && cfg.APIPort > 0 {
+		apiServer = NewAPIServer(deployer, client, logger)
+		if addr, err := apiServer.Start(cfg.APIPort); err != nil {
+			logger.Printf("[WARN] API server: %v", err)
+		} else {
+			fmt.Printf("API: http://%s\n", addr)
+		}
+	}
+	defer func() {
+		if apiServer != nil {
+			apiServer.Close()
+		}
+	}()
+
+	// If file paths were passed on the command line, display them and
+	// start a background goroutine that uploads them once connected.
+	if len(queuedFiles) > 0 {
+		fmt.Printf("Queued for upload (%d):\n", len(queuedFiles))
+		for _, qf := range queuedFiles {
+			if qf.Exists {
+				fmt.Printf("  - %s\n", qf.AbsPath)
+			} else {
+				fmt.Printf("  - %s [NOT FOUND]\n", qf.FilePath)
+			}
+		}
+		fmt.Println("(will upload automatically after connection)")
+		go uploadQueuedFiles(client, deployer, queuedFiles, logger, 5*time.Minute)
+	}
 
 	watcher, err := NewFileWatcher(
 		cfg.WatchFolder, matcher, cfg.FileExtensions,

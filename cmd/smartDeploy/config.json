@@ -38,5 +38,7 @@
   "clipboardPollMs": 2000,
   "autoReconnect": true,
   "otpTimeoutSec": 300,
-  "jailRoot": "/tmp"
+  "jailRoot": "/tmp",
+  "apiPort": 9721,
+  "apiEnabled": true
 }

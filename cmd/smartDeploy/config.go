@@ -32,6 +32,10 @@ type Config struct {
 	// Connection resilience
 	AutoReconnect bool `json:"autoReconnect"`
 	OTPTimeoutSec int  `json:"otpTimeoutSec"`
+
+	// Local HTTP API for editor/IDE integration (VSCode, etc.)
+	APIPort    int  `json:"apiPort"`
+	APIEnabled bool `json:"apiEnabled"`
 }
 
 func defaultConfig() Config {
@@ -52,6 +56,8 @@ func defaultConfig() Config {
 		ClipboardPollMs: 2000,
 		AutoReconnect:   true,
 		OTPTimeoutSec:   300,
+		APIPort:         9721,
+		APIEnabled:      true,
 	}
 }
 
@@ -107,6 +113,9 @@ func (c *Config) Validate() error {
 	}
 	if c.OTPTimeoutSec < 0 {
 		return fmt.Errorf("config: otpTimeoutSec must be >= 0")
+	}
+	if c.APIPort < 0 || c.APIPort > 65535 {
+		return fmt.Errorf("config: apiPort must be 0-65535, got %d", c.APIPort)
 	}
 	return nil
 }

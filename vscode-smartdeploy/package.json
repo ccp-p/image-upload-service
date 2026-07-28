@@ -1,0 +1,78 @@
+{
+  "name": "smartdeploy",
+  "displayName": "SmartDeploy",
+  "description": "Right-click to upload files to your server via SmartDeploy (multi-file support)",
+  "version": "0.2.0",
+  "publisher": "smartdeploy",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "smartdeploy.uploadFile",
+        "title": "SmartDeploy: Upload File(s)"
+      },
+      {
+        "command": "smartdeploy.uploadActiveFile",
+        "title": "SmartDeploy: Upload Current File"
+      },
+      {
+        "command": "smartdeploy.uploadAllOpenFiles",
+        "title": "SmartDeploy: Upload All Open Files"
+      },
+      {
+        "command": "smartdeploy.checkStatus",
+        "title": "SmartDeploy: Check Connection Status"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "smartdeploy.uploadFile",
+          "when": "resourceScheme == file",
+          "group": "navigation@100"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "smartdeploy.uploadFile",
+          "when": "resourceScheme == file",
+          "group": "navigation@100"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SmartDeploy",
+      "properties": {
+        "smartdeploy.apiPort": {
+          "type": "number",
+          "default": 9721,
+          "description": "Port the SmartDeploy API server listens on"
+        },
+        "smartdeploy.autoUploadOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Upload files automatically on save (uses SmartDeploy API)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^5.0.0"
+  }
+}
