@@ -9,18 +9,34 @@
   "remoteBasePath": "/ccp/xhmqqthy/",
   "stripPrefix": "src/main/webapp/res/wap",
   "ignorePatterns": [
-    ".git", "node_modules", "target", ".idea",
-    "*.log", "*.tmp", "*.swp", "*.bak"
+    ".git",
+    "node_modules",
+    "target",
+    ".idea",
+    "*.log",
+    "*.tmp",
+    "*.swp",
+    "*.bak"
   ],
   "fileExtensions": [
-    ".html", ".css", ".js", ".json", ".xml",
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"
+    ".html",
+    ".css",
+    ".js",
+    ".json",
+    ".xml",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg"
   ],
-  "debounceMs": 1500,
+  "debounceMs": 300,
   "autoWatch": true,
   "keepAliveIntervalSec": 30,
   "enableClipboard": true,
   "clipboardPollMs": 2000,
   "autoReconnect": true,
-  "otpTimeoutSec": 300
+  "otpTimeoutSec": 300,
+  "jailRoot": "/tmp"
 }

@@ -125,7 +125,7 @@ func TestDeployer_UploadFile_Success(t *testing.T) {
 	f := filepath.Join(dir, "style.css")
 	os.WriteFile(f, []byte("body{}"), 0644)
 
-	if err := d.UploadFile(f); err != nil {
+	if _, err := d.UploadFile(f); err != nil {
 		t.Fatalf("UploadFile error: %v", err)
 	}
 
@@ -141,7 +141,7 @@ func TestDeployer_UploadFile_FileNotExist(t *testing.T) {
 	// add to pending first
 	d.tracker.Add("/nonexistent/file.css")
 
-	err := d.UploadFile("/nonexistent/file.css")
+	_, err := d.UploadFile("/nonexistent/file.css")
 	if err == nil {
 		t.Error("expected error for nonexistent file")
 	}
@@ -163,7 +163,7 @@ func TestDeployer_UploadFile_MapError(t *testing.T) {
 	f := filepath.Join(dir, "outside.css")
 	os.WriteFile(f, []byte("x"), 0644)
 
-	err := d.UploadFile(f)
+	_, err := d.UploadFile(f)
 	if err == nil {
 		t.Error("expected map error for path outside watch folder")
 	}

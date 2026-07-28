@@ -17,6 +17,7 @@ type Config struct {
 	KeyPassphrase  string   `json:"keyPassphrase"`
 	WatchFolder    string   `json:"watchFolder"`
 	RemoteBasePath string   `json:"remoteBasePath"`
+	JailRoot       string   `json:"jailRoot"`
 	StripPrefix    string   `json:"stripPrefix"`
 	IgnorePatterns []string `json:"ignorePatterns"`
 	FileExtensions []string `json:"fileExtensions"`
@@ -36,7 +37,7 @@ type Config struct {
 func defaultConfig() Config {
 	return Config{
 		Port:         22,
-		DebounceMs:   1500,
+		DebounceMs:   300,
 		AutoWatch:    true,
 		KeepAliveSec: 30,
 		IgnorePatterns: []string{

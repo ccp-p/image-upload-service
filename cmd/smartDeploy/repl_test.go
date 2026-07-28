@@ -11,12 +11,17 @@ import (
 	"time"
 )
 
+// slr wraps a string in a SharedLineReader for test convenience.
+func slr(input string) *SharedLineReader {
+	return NewSharedLineReader(strings.NewReader(input))
+}
+
 func newTestREPL(autoWatch bool) (*REPL, *bytes.Buffer, *Deployer, *mockClient) {
 	mc := newMockClient()
 	mapper := NewPathMapper("/project/app", "/remote/app", "src/main/webapp/res/wap")
 	d := NewDeployer(mc, mapper, autoWatch, log.New(io.Discard, "", 0))
 	buf := &bytes.Buffer{}
-	r := NewREPL(d, mc, nil, strings.NewReader(""), buf)
+	r := NewREPL(d, mc, nil, slr(""), buf)
 	return r, buf, d, mc
 }
 
@@ -26,7 +31,8 @@ func runREPL(t *testing.T, input string, autoWatch bool) (*REPL, *bytes.Buffer, 
 	mapper := NewPathMapper("/project/app", "/remote/app", "src/main/webapp/res/wap")
 	d := NewDeployer(mc, mapper, autoWatch, log.New(io.Discard, "", 0))
 	buf := &bytes.Buffer{}
-	r := NewREPL(d, mc, nil, strings.NewReader(input), buf)
+	r := NewREPL(d, mc, nil, slr(input), buf)
+	r.SetRemoteBasePath("/remote/app")
 	r.Run()
 	return r, buf, d, mc
 }
@@ -37,7 +43,8 @@ func runREPLWithOTP(t *testing.T, input string, autoWatch bool, otp *OTPStore) (
 	mapper := NewPathMapper("/project/app", "/remote/app", "src/main/webapp/res/wap")
 	d := NewDeployer(mc, mapper, autoWatch, log.New(io.Discard, "", 0))
 	buf := &bytes.Buffer{}
-	r := NewREPL(d, mc, otp, strings.NewReader(input), buf)
+	r := NewREPL(d, mc, otp, slr(input), buf)
+	r.SetRemoteBasePath("/remote/app")
 	r.Run()
 	return r, buf, d, mc
 }
@@ -67,17 +74,39 @@ func TestREPL_Status_Disconnected(t *testing.T) {
 	mapper := NewPathMapper("/app", "/remote", "")
 	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
 	buf := &bytes.Buffer{}
-	r := NewREPL(d, mc, nil, strings.NewReader("s\n"), buf)
+	r := NewREPL(d, mc, nil, slr("s\n"), buf)
 	r.Run()
 	if !strings.Contains(buf.String(), "disconnected") {
 		t.Errorf("status should show disconnected")
 	}
 }
 
+func TestREPL_Status_ShowsRemotePWD(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "s\n", true)
+	out := buf.String()
+	if !strings.Contains(out, "Remote PWD:") {
+		t.Errorf("status should show Remote PWD when connected: %q", out)
+	}
+}
+
+func TestREPL_Status_ShowsRemoteBase(t *testing.T) {
+	mc := newMockClient()
+	mapper := NewPathMapper("/app", "/remote/base", "")
+	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("s\n"), buf)
+	r.SetRemoteBasePath("/remote/base")
+	r.Run()
+	out := buf.String()
+	if !strings.Contains(out, "Remote base:") {
+		t.Errorf("status should show Remote base path: %q", out)
+	}
+}
+
 func TestREPL_Help(t *testing.T) {
 	_, buf, _, _ := runREPL(t, "h\n", true)
 	out := buf.String()
-	for _, cmd := range []string{"status", "watch", "push", "pushall", "list", "reconnect", "quit", "otp"} {
+	for _, cmd := range []string{"status", "watch", "push", "pushall", "list", "reconnect", "quit", "otp", "pwd"} {
 		if !strings.Contains(out, cmd) {
 			t.Errorf("help output should mention %q: %q", cmd, out)
 		}
@@ -131,7 +160,7 @@ func TestREPL_PushFile(t *testing.T) {
 	mapper := NewPathMapper(dir, "/remote", "")
 	d := NewDeployer(mc, mapper, false, log.New(io.Discard, "", 0))
 	buf := &bytes.Buffer{}
-	r := NewREPL(d, mc, nil, strings.NewReader("push "+f+"\n"), buf)
+	r := NewREPL(d, mc, nil, slr("push "+f+"\n"), buf)
 	r.Run()
 
 	if !strings.Contains(buf.String(), "OK") {
@@ -140,6 +169,24 @@ func TestREPL_PushFile(t *testing.T) {
 	uploads := mc.getUploads()
 	if len(uploads) != 1 {
 		t.Fatalf("uploads = %d, want 1", len(uploads))
+	}
+}
+
+func TestREPL_PushFile_ShowsRemotePath(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "test.css")
+	os.WriteFile(f, []byte("body{}"), 0644)
+
+	mc := newMockClient()
+	mapper := NewPathMapper(dir, "/remote/deploy", "")
+	d := NewDeployer(mc, mapper, false, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("push "+f+"\n"), buf)
+	r.Run()
+
+	out := buf.String()
+	if !strings.Contains(out, "/remote/deploy/test.css") {
+		t.Errorf("push should show remote path: %q", out)
 	}
 }
 
@@ -171,7 +218,7 @@ func TestREPL_PushAll_WithFiles(t *testing.T) {
 	d.tracker.Add(f2)
 
 	buf := &bytes.Buffer{}
-	r := NewREPL(d, mc, nil, strings.NewReader("pushall\n"), buf)
+	r := NewREPL(d, mc, nil, slr("pushall\n"), buf)
 	r.Run()
 
 	out := buf.String()
@@ -195,7 +242,7 @@ func TestREPL_ListPending_WithFiles(t *testing.T) {
 	d.tracker.Add("/app/b.css")
 
 	buf := &bytes.Buffer{}
-	r := NewREPL(d, mc, nil, strings.NewReader("list\n"), buf)
+	r := NewREPL(d, mc, nil, slr("list\n"), buf)
 	r.Run()
 
 	out := buf.String()
@@ -221,7 +268,7 @@ func TestREPL_WatchToggle(t *testing.T) {
 	mapper2 := NewPathMapper("/app", "/remote", "")
 	d2 := NewDeployer(mc2, mapper2, false, log.New(io.Discard, "", 0))
 	buf2 := &bytes.Buffer{}
-	r2 := NewREPL(d2, mc2, nil, strings.NewReader("w\n"), buf2)
+	r2 := NewREPL(d2, mc2, nil, slr("w\n"), buf2)
 	r2.Run()
 	if !d2.IsAutoWatch() {
 		t.Error("watch toggle should turn on autoWatch")
@@ -255,6 +302,41 @@ func TestREPL_WatchInvalidArg(t *testing.T) {
 	}
 }
 
+func TestREPL_PWD(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "pwd\n", true)
+	out := buf.String()
+	if !strings.Contains(out, "Remote working directory:") {
+		t.Errorf("pwd should show remote working directory: %q", out)
+	}
+}
+
+func TestREPL_PWD_NotConnected(t *testing.T) {
+	mc := newMockClient()
+	mc.connected = false
+	mapper := NewPathMapper("/app", "/remote", "")
+	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("pwd\n"), buf)
+	r.Run()
+	if !strings.Contains(buf.String(), "Not connected") {
+		t.Errorf("pwd when disconnected should say Not connected: %q", buf.String())
+	}
+}
+
+func TestREPL_PWD_ShowsRemoteBase(t *testing.T) {
+	mc := newMockClient()
+	mapper := NewPathMapper("/app", "/remote/base", "")
+	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("pwd\n"), buf)
+	r.SetRemoteBasePath("/remote/base")
+	r.Run()
+	out := buf.String()
+	if !strings.Contains(out, "Remote base path:") {
+		t.Errorf("pwd should show remote base path when set: %q", out)
+	}
+}
+
 func TestREPL_Reconnect(t *testing.T) {
 	_, buf, _, mc := runREPL(t, "r\n", true)
 	out := buf.String()
@@ -274,7 +356,7 @@ func TestREPL_Reconnect_Failure(t *testing.T) {
 	mapper := NewPathMapper("/app", "/remote", "")
 	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
 	buf := &bytes.Buffer{}
-	r := NewREPL(d, mc, nil, strings.NewReader("reconnect\n"), buf)
+	r := NewREPL(d, mc, nil, slr("reconnect\n"), buf)
 	r.Run()
 	// Reconnect is async — wait for the goroutine to write the error
 	time.Sleep(100 * time.Millisecond)
@@ -291,7 +373,7 @@ func TestREPL_Clear(t *testing.T) {
 	d.tracker.Add("/app/a.css")
 
 	buf := &bytes.Buffer{}
-	r := NewREPL(d, mc, nil, strings.NewReader("c\n"), buf)
+	r := NewREPL(d, mc, nil, slr("c\n"), buf)
 	r.Run()
 
 	if !strings.Contains(buf.String(), "cleared") {
@@ -413,4 +495,101 @@ func TestREPL_Status_NoOTPWhenNotConfigured(t *testing.T) {
 	}
 }
 
-// --- helpers ---
+func TestREPL_LS(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "ls\n", true)
+	out := buf.String()
+	if !strings.Contains(out, "total") {
+		t.Errorf("ls should show directory listing: %q", out)
+	}
+}
+
+func TestREPL_LS_CustomPath(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "ls /remote/app\n", true)
+	out := buf.String()
+	if !strings.Contains(out, "total") {
+		t.Errorf("ls with path should show listing: %q", out)
+	}
+}
+
+func TestREPL_LS_NotConnected(t *testing.T) {
+	mc := newMockClient()
+	mc.connected = false
+	mapper := NewPathMapper("/app", "/remote", "")
+	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("ls\n"), buf)
+	r.Run()
+	if !strings.Contains(buf.String(), "Not connected") {
+		t.Errorf("ls when not connected should say Not connected: %q", buf.String())
+	}
+}
+
+func TestREPL_Stat(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "stat /remote/app/test.css\n", true)
+	out := buf.String()
+	if !strings.Contains(out, "/remote/app/test.css") {
+		t.Errorf("stat should show file path: %q", out)
+	}
+}
+
+func TestREPL_Stat_NoArgs(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "stat\n", true)
+	out := buf.String()
+	if !strings.Contains(out, "Usage: stat") {
+		t.Errorf("stat with no args should show usage: %q", out)
+	}
+}
+
+func TestREPL_Stat_NotConnected(t *testing.T) {
+	mc := newMockClient()
+	mc.connected = false
+	mapper := NewPathMapper("/app", "/remote", "")
+	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("stat /test.css\n"), buf)
+	r.Run()
+	if !strings.Contains(buf.String(), "Not connected") {
+		t.Errorf("stat when not connected should say Not connected: %q", buf.String())
+	}
+}
+
+func TestREPL_Help_ShowsLSAndStat(t *testing.T) {
+	_, buf, _, _ := runREPL(t, "h\n", true)
+	out := buf.String()
+	if !strings.Contains(out, "ls") {
+		t.Errorf("help should mention ls command: %q", out)
+	}
+	if !strings.Contains(out, "stat") {
+		t.Errorf("help should mention stat command: %q", out)
+	}
+}
+
+func TestREPL_Status_ShowsJailRoot(t *testing.T) {
+	mc := newMockClient()
+	mapper := NewPathMapper("/app", "/remote/base", "")
+	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("s\n"), buf)
+	r.SetRemoteBasePath("/remote/base")
+	r.SetJailRoot("/tmp")
+	r.Run()
+	out := buf.String()
+	if !strings.Contains(out, "server: /tmp/remote/base") {
+		t.Errorf("status should show server path with jailRoot: %q", out)
+	}
+}
+
+func TestREPL_PWD_ShowsJailRoot(t *testing.T) {
+	mc := newMockClient()
+	mapper := NewPathMapper("/app", "/remote/base", "")
+	d := NewDeployer(mc, mapper, true, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, nil, slr("pwd\n"), buf)
+	r.SetRemoteBasePath("/remote/base")
+	r.SetJailRoot("/tmp")
+	r.Run()
+	out := buf.String()
+	if !strings.Contains(out, "server: /tmp/remote/base") {
+		t.Errorf("pwd should show server path with jailRoot: %q", out)
+	}
+}

@@ -71,6 +71,18 @@ func (m *mockClient) IsReconnecting() bool {
 	return false
 }
 
+func (m *mockClient) RemotePWD() (string, error) {
+	return "/home/testuser", nil
+}
+
+func (m *mockClient) Stat(remotePath string) (string, error) {
+	return "-rw-r--r-- 1 test test 1234 Jan 01 00:00 " + remotePath, nil
+}
+
+func (m *mockClient) ListDir(remotePath string) (string, error) {
+	return "total 4\ndrwxr-xr-x 2 test test 4096 Jan 01 00:00 .\ndrwxr-xr-x 3 test test 4096 Jan 01 00:00 ..", nil
+}
+
 func (m *mockClient) getUploads() []mockUpload {
 	m.mu.Lock()
 	defer m.mu.Unlock()

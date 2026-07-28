@@ -78,7 +78,7 @@ func NewDeployer(client RemoteClient, mapper *PathMapper, autoWatch bool, logger
 // OnFileChange is called by the watcher after debounce settles.
 func (d *Deployer) OnFileChange(localPath string) {
 	if d.IsAutoWatch() {
-		if err := d.UploadFile(localPath); err != nil {
+		if _, err := d.UploadFile(localPath); err != nil {
 			d.logger.Printf("[ERR] auto-upload %s: %v", localPath, err)
 			d.tracker.Add(localPath)
 		}
@@ -89,31 +89,31 @@ func (d *Deployer) OnFileChange(localPath string) {
 }
 
 // UploadFile maps the local path and uploads a single file.
-func (d *Deployer) UploadFile(localPath string) error {
+func (d *Deployer) UploadFile(localPath string) (string, error) {
 	if _, err := os.Stat(localPath); os.IsNotExist(err) {
 		d.tracker.Remove(localPath)
-		return fmt.Errorf("file does not exist: %s", localPath)
+		return "", fmt.Errorf("file does not exist: %s", localPath)
 	}
 
 	remotePath, err := d.mapper.Map(localPath)
 	if err != nil {
-		return fmt.Errorf("map path: %w", err)
+		return "", fmt.Errorf("map path: %w", err)
 	}
 
 	if err := d.client.Upload(localPath, remotePath); err != nil {
-		return fmt.Errorf("upload: %w", err)
+		return remotePath, fmt.Errorf("upload: %w", err)
 	}
 
 	d.tracker.Remove(localPath)
 	d.logger.Printf("[OK] %s -> %s", localPath, remotePath)
-	return nil
+	return remotePath, nil
 }
 
 // UploadAll uploads all pending files, returning success and failure counts.
 func (d *Deployer) UploadAll() (success, failed int, err error) {
 	files := d.tracker.List()
 	for _, f := range files {
-		if err := d.UploadFile(f); err != nil {
+		if _, err := d.UploadFile(f); err != nil {
 			d.logger.Printf("[ERR] %s: %v", f, err)
 			failed++
 		} else {

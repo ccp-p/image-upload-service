@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -227,24 +228,64 @@ func handleSSHConnForTest(conn net.Conn, config *ssh.ServerConfig, rootDir strin
 					// Read stdin (client writes then closes)
 					stdinData, _ := io.ReadAll(ch)
 
+					// Handle combined commands (mkdir && cat && ls -ld) and
+					// individual commands by splitting on " && ".
 					exitCode := uint32(0)
-					if strings.HasPrefix(cmd, "mkdir -p ") {
-						dir := strings.TrimPrefix(cmd, "mkdir -p ")
-						dir = strings.Trim(dir, "'")
-						fullPath := filepath.Join(rootDir, dir)
-						if err := os.MkdirAll(fullPath, 0755); err != nil {
+					subCmds := strings.Split(cmd, " && ")
+					var output strings.Builder
+					for _, sc := range subCmds {
+						sc = strings.TrimSpace(sc)
+						switch {
+						case sc == "pwd":
+							fmt.Fprint(&output, rootDir)
+						case strings.HasPrefix(sc, "mkdir -p "):
+							dir := strings.TrimPrefix(sc, "mkdir -p ")
+							dir = strings.Trim(dir, "'")
+							fullPath := filepath.Join(rootDir, dir)
+							if err := os.MkdirAll(fullPath, 0755); err != nil {
+								exitCode = 1
+							}
+						case strings.HasPrefix(sc, "cat > "):
+							p := strings.TrimPrefix(sc, "cat > ")
+							p = strings.Trim(p, "'")
+							fullPath := filepath.Join(rootDir, p)
+							os.MkdirAll(filepath.Dir(fullPath), 0755)
+							if err := os.WriteFile(fullPath, stdinData, 0644); err != nil {
+								exitCode = 1
+							}
+						case strings.HasPrefix(sc, "ls -ld "):
+							p := strings.TrimPrefix(sc, "ls -ld ")
+							p = strings.Trim(p, "'")
+							fullPath := filepath.Join(rootDir, p)
+							info, err := os.Stat(fullPath)
+							if err != nil {
+								exitCode = 1
+							} else {
+								fmt.Fprintln(&output, lsLine(info, p))
+							}
+						case strings.HasPrefix(sc, "ls -la "):
+							p := strings.TrimPrefix(sc, "ls -la ")
+							p = strings.Trim(p, "'")
+							fullPath := filepath.Join(rootDir, p)
+							entries, err := os.ReadDir(fullPath)
+							if err != nil {
+								exitCode = 1
+							} else {
+								fmt.Fprintf(&output, "total %d\n", len(entries))
+								for _, e := range entries {
+									info, _ := e.Info()
+									fmt.Fprintln(&output, lsLine(info, e.Name()))
+								}
+							}
+						default:
 							exitCode = 1
 						}
-					} else if strings.HasPrefix(cmd, "cat > ") {
-						path := strings.TrimPrefix(cmd, "cat > ")
-						path = strings.Trim(path, "'")
-						fullPath := filepath.Join(rootDir, path)
-						os.MkdirAll(filepath.Dir(fullPath), 0755)
-						if err := os.WriteFile(fullPath, stdinData, 0644); err != nil {
-							exitCode = 1
+						if exitCode != 0 {
+							break
 						}
-					} else {
-						exitCode = 1
+					}
+					if output.Len() > 0 {
+						ch.Write([]byte(output.String()))
 					}
 
 					ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{exitCode}))
@@ -254,6 +295,15 @@ func handleSSHConnForTest(conn net.Conn, config *ssh.ServerConfig, rootDir strin
 			}
 		}(channel, requests)
 	}
+}
+
+// lsLine formats a simple ls -ld style line for the test SSH server.
+func lsLine(info os.FileInfo, name string) string {
+	prefix := "-rw-r--r--"
+	if info.IsDir() {
+		prefix = "drwxr-xr-x"
+	}
+	return fmt.Sprintf("%s 1 test test %d Jan 01 00:00 %s", prefix, info.Size(), name)
 }
 
 func TestSSHClient_Integration_Upload(t *testing.T) {
@@ -981,4 +1031,454 @@ func TestSSHClient_UploadWhenDisconnected_WaitsForReconnect(t *testing.T) {
 	}
 
 	client.Close()
+}
+
+// --- RemotePWD tests ---
+
+func TestSSHClient_Integration_RemotePWD(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	pwd, err := client.RemotePWD()
+	if err != nil {
+		t.Fatalf("RemotePWD error: %v", err)
+	}
+	if pwd == "" {
+		t.Error("pwd should not be empty")
+	}
+}
+
+func TestSSHClient_RemotePWD_NotConnected(t *testing.T) {
+	client := NewSSHClient("127.0.0.1", 22, "user", "pass", "", "", 0)
+	_, err := client.RemotePWD()
+	if err == nil {
+		t.Error("expected error when not connected")
+	}
+}
+
+func TestSSHClient_SetOTPPrompter(t *testing.T) {
+	client := NewSSHClient("h", 22, "u", "p", "", "", 0)
+	if client.otpPrompter != nil {
+		t.Error("otpPrompter should be nil initially")
+	}
+	prompter := newNoopOTPPrompter("123456")
+	client.SetOTPPrompter(prompter)
+	if client.otpPrompter == nil {
+		t.Error("otpPrompter should be set after SetOTPPrompter")
+	}
+}
+
+// --- OTPPrompter integration tests ---
+
+func TestSSHClient_OTPPrompter_AuthSucceeds(t *testing.T) {
+	expectedOTP := "648291"
+	addr, cleanup := startKeyboardInteractiveSSHServer(t, expectedOTP)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "", "", "", 0)
+	client.SetOTPStore(NewOTPStore(nil))
+	client.SetOTPPrompter(newNoopOTPPrompter(expectedOTP))
+	client.SetOTPTimeout(5 * time.Second)
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect with OTPPrompter error: %v", err)
+	}
+	defer client.Close()
+
+	if !client.IsConnected() {
+		t.Fatal("should be connected after OTP prompter auth")
+	}
+}
+
+func TestSSHClient_OTPPrompter_AuthFails(t *testing.T) {
+	addr, cleanup := startKeyboardInteractiveSSHServer(t, "999999")
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "", "", "", 0)
+	client.SetOTPStore(NewOTPStore(nil))
+	client.SetOTPPrompter(newNoopOTPPrompter("111111")) // wrong OTP
+	client.SetOTPTimeout(5 * time.Second)
+
+	err := client.Connect()
+	if err == nil {
+		client.Close()
+		t.Fatal("expected error for wrong OTP from prompter")
+	}
+}
+
+func TestSSHClient_OTPPrompter_NoStoreStillWorks(t *testing.T) {
+	expectedOTP := "555444"
+	addr, cleanup := startKeyboardInteractiveSSHServer(t, expectedOTP)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "", "", "", 0)
+	// Set prompter but NOT the store — buildConfig should still add
+	// keyboard-interactive auth because prompter is set.
+	client.SetOTPPrompter(newNoopOTPPrompter(expectedOTP))
+	client.SetOTPTimeout(5 * time.Second)
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+}
+
+func TestSSHClient_PostConnect_LogsPWD(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "", 0)
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	client.SetLogger(logger)
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "Remote working directory:") {
+		t.Errorf("postConnect should log remote PWD: %q", logOutput)
+	}
+}
+
+func TestSSHClient_Integration_Stat(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	// Create a file on the server side
+	os.WriteFile(filepath.Join(rootDir, "test.css"), []byte("body{}"), 0644)
+
+	detail, err := client.Stat("/test.css")
+	if err != nil {
+		t.Fatalf("Stat error: %v", err)
+	}
+	if !strings.Contains(detail, "test.css") {
+		t.Errorf("Stat should contain path: %q", detail)
+	}
+	if !strings.Contains(detail, "-rw-r--r--") {
+		t.Errorf("Stat should contain file mode: %q", detail)
+	}
+}
+
+func TestSSHClient_Integration_Stat_NotFound(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	_, err := client.Stat("/nonexistent.css")
+	if err == nil {
+		t.Error("Stat should error for nonexistent file")
+	}
+}
+
+func TestSSHClient_Integration_ListDir(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	os.WriteFile(filepath.Join(rootDir, "a.css"), []byte("a"), 0644)
+	os.WriteFile(filepath.Join(rootDir, "b.js"), []byte("b"), 0644)
+
+	output, err := client.ListDir("/")
+	if err != nil {
+		t.Fatalf("ListDir error: %v", err)
+	}
+	if !strings.Contains(output, "a.css") {
+		t.Errorf("ListDir should contain a.css: %q", output)
+	}
+	if !strings.Contains(output, "b.js") {
+		t.Errorf("ListDir should contain b.js: %q", output)
+	}
+}
+
+func TestSSHClient_Upload_LogsVerify(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "", 0)
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	client.SetLogger(logger)
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	localDir := t.TempDir()
+	localFile := filepath.Join(localDir, "test.css")
+	content := []byte("body { color: red; }")
+	os.WriteFile(localFile, content, 0644)
+
+	remotePath := "/css/style.css"
+	if err := client.Upload(localFile, remotePath); err != nil {
+		t.Fatalf("Upload error: %v", err)
+	}
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "[VERIFY]") {
+		t.Errorf("Upload should log [VERIFY] after success: %q", logOutput)
+	}
+	if !strings.Contains(logOutput, remotePath) {
+		t.Errorf("Verify log should contain remote path: %q", logOutput)
+	}
+}
+
+func TestSSHClient_Integration_UploadThenStat(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	localDir := t.TempDir()
+	localFile := filepath.Join(localDir, "app.js")
+	content := []byte("console.log('hello');")
+	os.WriteFile(localFile, content, 0644)
+
+	remotePath := "/js/app.js"
+	if err := client.Upload(localFile, remotePath); err != nil {
+		t.Fatalf("Upload error: %v", err)
+	}
+
+	// Stat the uploaded file to confirm it exists at the expected path.
+	detail, err := client.Stat(remotePath)
+	if err != nil {
+		t.Fatalf("Stat after upload error: %v", err)
+	}
+	if !strings.Contains(detail, "app.js") {
+		t.Errorf("Stat should contain filename: %q", detail)
+	}
+	if !strings.Contains(detail, "-rw-r--r--") {
+		t.Errorf("Stat should show regular file mode: %q", detail)
+	}
+}
+
+// --- jailRoot / resolveRemote tests ---
+
+func TestSSHClient_ResolveRemote_NoJailRoot(t *testing.T) {
+	c := NewSSHClient("h", 22, "u", "p", "", "", 0)
+	if got := c.resolveRemote("/css/style.css"); got != "/css/style.css" {
+		t.Errorf("resolveRemote without jailRoot = %q, want %q", got, "/css/style.css")
+	}
+}
+
+func TestSSHClient_ResolveRemote_WithJailRoot(t *testing.T) {
+	c := NewSSHClient("h", 22, "u", "p", "", "", 0)
+	c.SetJailRoot("/tmp")
+	if got := c.resolveRemote("/css/style.css"); got != "/tmp/css/style.css" {
+		t.Errorf("resolveRemote with jailRoot /tmp = %q, want %q", got, "/tmp/css/style.css")
+	}
+}
+
+func TestSSHClient_ResolveRemote_AlreadyPrefixed(t *testing.T) {
+	c := NewSSHClient("h", 22, "u", "p", "", "", 0)
+	c.SetJailRoot("/tmp")
+	// Path already under jailRoot should not be double-prepended.
+	if got := c.resolveRemote("/tmp/css/style.css"); got != "/tmp/css/style.css" {
+		t.Errorf("resolveRemote already-prefixed = %q, want %q", got, "/tmp/css/style.css")
+	}
+}
+
+func TestSSHClient_ResolveRoot_Itself(t *testing.T) {
+	c := NewSSHClient("h", 22, "u", "p", "", "", 0)
+	c.SetJailRoot("/tmp")
+	if got := c.resolveRemote("/tmp"); got != "/tmp" {
+		t.Errorf("resolveRemote jailRoot itself = %q, want %q", got, "/tmp")
+	}
+}
+
+func TestSSHClient_SetJailRoot_CleansTrailingSlash(t *testing.T) {
+	c := NewSSHClient("h", 22, "u", "p", "", "", 0)
+	c.SetJailRoot("/tmp/")
+	if c.jailRoot != "/tmp" {
+		t.Errorf("SetJailRoot should clean trailing slash: got %q", c.jailRoot)
+	}
+}
+
+func TestSSHClient_Integration_UploadWithJailRoot(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "", 0)
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	client.SetLogger(logger)
+	client.SetJailRoot("/tmp")
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	localDir := t.TempDir()
+	localFile := filepath.Join(localDir, "test.css")
+	content := []byte("body { color: red; }")
+	os.WriteFile(localFile, content, 0644)
+
+	// Logical remote path is /css/style.css, but with jailRoot=/tmp
+	// the file should land at /tmp/css/style.css (physically under rootDir/tmp/css/).
+	remotePath := "/css/style.css"
+	if err := client.Upload(localFile, remotePath); err != nil {
+		t.Fatalf("Upload with jailRoot error: %v", err)
+	}
+
+	// File should exist at the physical path under /tmp.
+	physicalFile := filepath.Join(rootDir, "tmp", "css", "style.css")
+	got, err := os.ReadFile(physicalFile)
+	if err != nil {
+		t.Fatalf("file not found at physical path %s: %v", physicalFile, err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("content = %q, want %q", got, content)
+	}
+
+	// Log should show the server (physical) path.
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "server: /tmp/css/style.css") {
+		t.Errorf("log should show server path: %q", logOutput)
+	}
+}
+
+func TestSSHClient_Integration_StatWithJailRoot(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	client.SetJailRoot("/tmp")
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	// Create file at physical path /tmp/test.css.
+	os.MkdirAll(filepath.Join(rootDir, "tmp"), 0755)
+	os.WriteFile(filepath.Join(rootDir, "tmp", "test.css"), []byte("body{}"), 0644)
+
+	// Stat with logical path /test.css; should resolve to /tmp/test.css.
+	detail, err := client.Stat("/test.css")
+	if err != nil {
+		t.Fatalf("Stat with jailRoot error: %v", err)
+	}
+	if !strings.Contains(detail, "test.css") {
+		t.Errorf("Stat should contain filename: %q", detail)
+	}
+}
+
+func TestSSHClient_Integration_ListDirWithJailRoot(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	client.SetJailRoot("/tmp")
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	// Create files at physical path /tmp/.
+	os.MkdirAll(filepath.Join(rootDir, "tmp"), 0755)
+	os.WriteFile(filepath.Join(rootDir, "tmp", "a.css"), []byte("a"), 0644)
+	os.WriteFile(filepath.Join(rootDir, "tmp", "b.js"), []byte("b"), 0644)
+
+	// ListDir with logical path /; should resolve to /tmp/.
+	output, err := client.ListDir("/")
+	if err != nil {
+		t.Fatalf("ListDir with jailRoot error: %v", err)
+	}
+	if !strings.Contains(output, "a.css") {
+		t.Errorf("ListDir should contain a.css: %q", output)
+	}
+	if !strings.Contains(output, "b.js") {
+		t.Errorf("ListDir should contain b.js: %q", output)
+	}
 }

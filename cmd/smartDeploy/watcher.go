@@ -199,11 +199,7 @@ func (w *FileWatcher) extOK(p string) bool {
 }
 
 func (w *FileWatcher) processDebounce() {
-	interval := w.deb.interval / 2
-	if interval < 50*time.Millisecond {
-		interval = 50 * time.Millisecond
-	}
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(debouncePollInterval(w.deb.interval))
 	defer ticker.Stop()
 
 	for {
@@ -216,6 +212,19 @@ func (w *FileWatcher) processDebounce() {
 			}
 		}
 	}
+}
+
+// debouncePollInterval calculates how frequently the debouncer should be
+// polled. It uses a quarter of the debounce interval (not half) to keep
+// worst-case upload latency low: at 300ms debounce the poll fires every
+// 75ms, so a settled file is uploaded within ~375ms instead of ~450ms.
+// The minimum poll is 50ms to avoid excessive CPU on tiny intervals.
+func debouncePollInterval(debounce time.Duration) time.Duration {
+	poll := debounce / 4
+	if poll < 50*time.Millisecond {
+		poll = 50 * time.Millisecond
+	}
+	return poll
 }
 
 func (w *FileWatcher) Close() error {

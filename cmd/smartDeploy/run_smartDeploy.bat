@@ -35,6 +35,7 @@ echo   SmartDeploy - SSH File Sync Tool
 echo ============================================
 echo.
 echo [INFO] Starting... Copy your OTP to clipboard when prompted.
+echo [INFO] When prompted for OTP, copy the code then press Enter to confirm.
 echo.
 smartDeploy.exe -config config.json
 

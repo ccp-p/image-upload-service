@@ -1,36 +1,94 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // REPL provides an interactive command interface for the deployer.
 type REPL struct {
-	deployer *Deployer
-	client   RemoteClient
-	otpStore *OTPStore // nil when OTP auth is not configured
-	reader   io.Reader
-	writer   io.Writer
-	writeMu  sync.Mutex
+	deployer       *Deployer
+	client         RemoteClient
+	otpStore       *OTPStore // nil when OTP auth is not configured
+	lineReader     *SharedLineReader
+	writer         io.Writer
+	writeMu        *sync.Mutex
+	otpActive      *atomic.Bool // when true the REPL yields stdin to the OTP prompter
+	remoteBasePath string
+	jailRoot       string
 }
 
-func NewREPL(d *Deployer, c RemoteClient, otp *OTPStore, r io.Reader, w io.Writer) *REPL {
-	return &REPL{deployer: d, client: c, otpStore: otp, reader: r, writer: w}
+func NewREPL(d *Deployer, c RemoteClient, otp *OTPStore, lr *SharedLineReader, w io.Writer) *REPL {
+	return &REPL{
+		deployer:   d,
+		client:     c,
+		otpStore:   otp,
+		lineReader: lr,
+		writer:     w,
+		writeMu:    &sync.Mutex{},
+		otpActive:  new(atomic.Bool),
+	}
+}
+
+// SetOTPActive sets the shared flag that signals the REPL to yield stdin.
+func (r *REPL) SetOTPActive(flag *atomic.Bool) {
+	if flag != nil {
+		r.otpActive = flag
+	}
+}
+
+// SetWriteMu overrides the internal write mutex so output is coordinated
+// with the OTP prompter.
+func (r *REPL) SetWriteMu(mu *sync.Mutex) {
+	if mu != nil {
+		r.writeMu = mu
+	}
+}
+
+// SetRemoteBasePath stores the configured remote base path for status display.
+func (r *REPL) SetRemoteBasePath(p string) {
+	r.remoteBasePath = p
+}
+
+// SetJailRoot stores the jailRoot for display in status output.
+func (r *REPL) SetJailRoot(root string) {
+	r.jailRoot = root
+}
+
+// physicalBasePath returns the full server path for the remote base.
+func (r *REPL) physicalBasePath() string {
+	if r.jailRoot == "" {
+		return r.remoteBasePath
+	}
+	return path.Join(r.jailRoot, r.remoteBasePath)
 }
 
 // Run reads commands until quit. Returns when input is exhausted or quit.
+// When the OTP prompter is active (otpActive=true), the REPL yields stdin
+// and does not consume input lines.
 func (r *REPL) Run() {
 	r.printf("SmartDeploy ready - type 'h' for help\n")
-	scanner := bufio.NewScanner(r.reader)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if r.handle(line) {
-			break
+	for {
+		if r.otpActive.Load() {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		select {
+		case line, ok := <-r.lineReader.Lines():
+			if !ok {
+				return
+			}
+			if r.handle(strings.TrimSpace(line)) {
+				return
+			}
+		case <-time.After(100 * time.Millisecond):
+			// Periodically re-check otpActive so the prompter can take over.
 		}
 	}
 }
@@ -63,6 +121,12 @@ func (r *REPL) handle(line string) (quit bool) {
 		r.printf("Pending cleared.\n")
 	case "r", "reconnect":
 		r.reconnect()
+	case "pwd":
+		r.showPWD()
+	case "ls":
+		r.listRemote(args)
+	case "stat":
+		r.statRemote(args)
 	case "otp":
 		r.handleOTP(args)
 	case "q", "quit", "exit":
@@ -77,6 +141,9 @@ func (r *REPL) handle(line string) (quit bool) {
 func (r *REPL) printHelp() {
 	r.printf(`Commands:
   s, status          Show connection status and pending count
+  pwd                Show remote working directory
+  ls [path]          List remote directory (default: remote base)
+  stat <path>        Show details of a remote file or directory
   w, watch [on|off]  Toggle or set auto-watch mode
   p, push <path>     Upload a specific file
   pa, pushall        Upload all pending files
@@ -110,6 +177,75 @@ func (r *REPL) printStatus() {
 		}
 	}
 	r.printf("%s\n", line)
+
+	// Show remote paths when connected for clarity.
+	if r.client.IsConnected() {
+		if r.remoteBasePath != "" {
+			if r.jailRoot != "" {
+				r.printf("  Remote base: %s (server: %s)\n", r.remoteBasePath, r.physicalBasePath())
+			} else {
+				r.printf("  Remote base: %s\n", r.remoteBasePath)
+			}
+		}
+		if pwd, err := r.client.RemotePWD(); err == nil {
+			r.printf("  Remote PWD:  %s\n", pwd)
+		}
+	}
+}
+
+func (r *REPL) showPWD() {
+	if !r.client.IsConnected() {
+		r.printf("Not connected.\n")
+		return
+	}
+	pwd, err := r.client.RemotePWD()
+	if err != nil {
+		r.printf("[ERR] pwd: %v\n", err)
+		return
+	}
+	r.printf("Remote working directory: %s\n", pwd)
+	if r.remoteBasePath != "" {
+		if r.jailRoot != "" {
+			r.printf("Remote base path: %s (server: %s)\n", r.remoteBasePath, r.physicalBasePath())
+		} else {
+			r.printf("Remote base path: %s\n", r.remoteBasePath)
+		}
+	}
+}
+
+func (r *REPL) listRemote(args []string) {
+	if !r.client.IsConnected() {
+		r.printf("Not connected.\n")
+		return
+	}
+	remotePath := r.remoteBasePath
+	if len(args) > 0 {
+		remotePath = strings.Trim(args[0], `"'`)
+	}
+	output, err := r.client.ListDir(remotePath)
+	if err != nil {
+		r.printf("[ERR] ls %s: %v\n", remotePath, err)
+		return
+	}
+	r.printf("%s\n", output)
+}
+
+func (r *REPL) statRemote(args []string) {
+	if !r.client.IsConnected() {
+		r.printf("Not connected.\n")
+		return
+	}
+	if len(args) == 0 {
+		r.printf("Usage: stat <remote path>\n")
+		return
+	}
+	remotePath := strings.Trim(args[0], `"'`)
+	output, err := r.client.Stat(remotePath)
+	if err != nil {
+		r.printf("[ERR] stat %s: %v\n", remotePath, err)
+		return
+	}
+	r.printf("%s\n", output)
 }
 
 func (r *REPL) toggleWatch(args []string) {
@@ -144,11 +280,12 @@ func (r *REPL) pushFile(args []string) {
 		r.printf("[ERR] resolve path: %v\n", err)
 		return
 	}
-	if err := r.deployer.UploadFile(abs); err != nil {
+	remotePath, err := r.deployer.UploadFile(abs)
+	if err != nil {
 		r.printf("[ERR] %v\n", err)
-	} else {
-		r.printf("[OK] uploaded\n")
+		return
 	}
+	r.printf("[OK] %s -> %s\n", abs, remotePath)
 }
 
 func (r *REPL) pushAll() {
@@ -173,7 +310,7 @@ func (r *REPL) listPending() {
 }
 
 func (r *REPL) reconnect() {
-	r.printf("Reconnecting... (copy OTP to clipboard or type 'otp <code>')\n")
+	r.printf("Reconnecting... (copy OTP to clipboard, then press Enter to confirm)\n")
 	go func() {
 		_ = r.client.Close()
 		if err := r.client.Connect(); err != nil {

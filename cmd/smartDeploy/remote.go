@@ -23,6 +23,9 @@ type RemoteClient interface {
 	MkdirAll(remoteDir string) error
 	IsConnected() bool
 	IsReconnecting() bool
+	RemotePWD() (string, error)
+	Stat(remotePath string) (string, error)
+	ListDir(remotePath string) (string, error)
 }
 
 // sshClient implements RemoteClient using SSH (mkdir -p + cat >).
@@ -34,12 +37,14 @@ type sshClient struct {
 	privateKeyPath string
 	keyPassphrase  string
 	keepAlive      time.Duration
+	jailRoot       string
 
 	// OTP / keyboard-interactive auth
-	otpStore   *OTPStore
-	otpTimeout time.Duration
-	lastOTPUse time.Time
-	clock      func() time.Time
+	otpStore    *OTPStore
+	otpPrompter OTPPrompter
+	otpTimeout  time.Duration
+	lastOTPUse  time.Time
+	clock       func() time.Time
 
 	// Auto-reconnect
 	autoReconnect bool
@@ -55,6 +60,7 @@ type sshClient struct {
 	client       *ssh.Client
 	connected    bool
 	reconnecting bool
+	remotePWD    string
 
 	// connectMu serialises dial attempts so concurrent callers don't
 	// open two SSH connections at the same time.
@@ -87,9 +93,37 @@ func (c *sshClient) SetOTPStore(s *OTPStore) {
 	c.otpStore = s
 }
 
+// SetOTPPrompter configures interactive OTP confirmation. When set, the
+// keyboard-interactive handler asks the user to confirm each OTP before
+// sending it, instead of auto-using the clipboard value.
+func (c *sshClient) SetOTPPrompter(p OTPPrompter) {
+	c.otpPrompter = p
+}
+
 // SetAutoReconnect enables or disables automatic reconnection on disconnect.
 func (c *sshClient) SetAutoReconnect(on bool) {
 	c.autoReconnect = on
+}
+
+// SetJailRoot sets a root directory prefix prepended to all remote paths.
+// This is needed when the SSH server chroots or sandboxes sessions to a
+// specific directory (e.g., /tmp on a jumpserver). When set, every remote
+// path is resolved as path.Join(jailRoot, remotePath).
+func (c *sshClient) SetJailRoot(root string) {
+	c.jailRoot = path.Clean(root)
+}
+
+// resolveRemote prepends the jailRoot to a remote path if one is set.
+// If the path already starts with jailRoot it is returned unchanged to
+// avoid double-prepending.
+func (c *sshClient) resolveRemote(p string) string {
+	if c.jailRoot == "" {
+		return p
+	}
+	if p == c.jailRoot || strings.HasPrefix(p, c.jailRoot+"/") {
+		return p
+	}
+	return path.Join(c.jailRoot, p)
 }
 
 // SetLogger configures where diagnostic messages go.
@@ -140,7 +174,7 @@ func (c *sshClient) buildConfig() (*ssh.ClientConfig, error) {
 		authMethods = append(authMethods, ssh.Password(c.password))
 	}
 
-	if c.otpStore != nil {
+	if c.otpStore != nil || c.otpPrompter != nil {
 		authMethods = append(authMethods, ssh.KeyboardInteractive(c.keyboardInteractiveHandler))
 	}
 
@@ -157,11 +191,32 @@ func (c *sshClient) buildConfig() (*ssh.ClientConfig, error) {
 }
 
 // keyboardInteractiveHandler is called by the SSH library during
-// keyboard-interactive auth. It waits for an OTP from the OTPStore that is
-// newer than the last one used (so reconnects require a fresh code).
+// keyboard-interactive auth. If an OTPPrompter is set it asks the user to
+// confirm each code interactively; otherwise it falls back to the OTPStore.
 func (c *sshClient) keyboardInteractiveHandler(name, instruction string, questions []string, echos []bool) ([]string, error) {
 	answers := make([]string, len(questions))
 	for i := range questions {
+		// Use interactive prompter if available — asks the user to confirm.
+		if c.otpPrompter != nil {
+			c.logf("[OTP] Server requesting authentication code. Waiting for user confirmation...")
+			ctx, cancel := context.WithTimeout(c.ctx, c.otpTimeout)
+			otp, err := c.otpPrompter.PromptOTP(ctx)
+			cancel()
+			if err != nil {
+				return nil, fmt.Errorf("OTP prompt: %w", err)
+			}
+			c.mu.Lock()
+			c.lastOTPUse = c.clock()
+			c.mu.Unlock()
+			if c.otpStore != nil {
+				c.otpStore.Set(otp)
+			}
+			c.logf("[OTP] Code confirmed and sent to server.")
+			answers[i] = otp
+			continue
+		}
+
+		// Fallback: non-interactive OTP store.
 		c.mu.Lock()
 		notBefore := c.lastOTPUse
 		c.mu.Unlock()
@@ -221,9 +276,7 @@ func (c *sshClient) connectInternal() error {
 	c.connected = true
 	c.mu.Unlock()
 
-	if c.keepAlive > 0 {
-		go c.keepalive()
-	}
+	c.postConnect()
 	return nil
 }
 
@@ -343,9 +396,7 @@ func (c *sshClient) dialLocked() error {
 	c.connected = true
 	c.mu.Unlock()
 
-	if c.keepAlive > 0 {
-		go c.keepalive()
-	}
+	c.postConnect()
 	return nil
 }
 
@@ -421,6 +472,42 @@ func (c *sshClient) getClient() (*ssh.Client, error) {
 	return c.client, nil
 }
 
+// RemotePWD runs pwd on the remote server and caches the result.
+func (c *sshClient) RemotePWD() (string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", err
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("ssh session: %w", err)
+	}
+	defer session.Close()
+	var stdout bytes.Buffer
+	session.Stdout = &stdout
+	if err := session.Run("pwd"); err != nil {
+		return "", fmt.Errorf("pwd: %w", err)
+	}
+	pwd := strings.TrimSpace(stdout.String())
+	c.mu.Lock()
+	c.remotePWD = pwd
+	c.mu.Unlock()
+	return pwd, nil
+}
+
+// postConnect runs after a successful dial: logs the remote working
+// directory and starts the keepalive goroutine.
+func (c *sshClient) postConnect() {
+	if pwd, err := c.RemotePWD(); err == nil {
+		c.logf("Remote working directory: %s", pwd)
+	} else {
+		c.logf("[WARN] could not determine remote working directory: %v", err)
+	}
+	if c.keepAlive > 0 {
+		go c.keepalive()
+	}
+}
+
 func (c *sshClient) MkdirAll(remoteDir string) error {
 	waitCtx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 	defer cancel()
@@ -437,7 +524,8 @@ func (c *sshClient) MkdirAll(remoteDir string) error {
 		return fmt.Errorf("ssh session: %w", err)
 	}
 	defer session.Close()
-	return session.Run(fmt.Sprintf("mkdir -p %s", shellQuote(remoteDir)))
+	physicalDir := c.resolveRemote(remoteDir)
+	return session.Run(fmt.Sprintf("mkdir -p %s", shellQuote(physicalDir)))
 }
 
 func (c *sshClient) Upload(localPath, remotePath string) error {
@@ -452,9 +540,13 @@ func (c *sshClient) Upload(localPath, remotePath string) error {
 		return fmt.Errorf("read local file: %w", err)
 	}
 
-	remoteDir := path.Dir(remotePath)
-	if err := c.MkdirAll(remoteDir); err != nil {
-		return fmt.Errorf("create remote dir: %w", err)
+	physicalPath := c.resolveRemote(remotePath)
+	remoteDir := path.Dir(physicalPath)
+
+	if physicalPath != remotePath {
+		c.logf("[UPLOAD] %s -> %s (server: %s) (%d bytes)", localPath, remotePath, physicalPath, len(data))
+	} else {
+		c.logf("[UPLOAD] %s -> %s (%d bytes)", localPath, remotePath, len(data))
 	}
 
 	client, err := c.getClient()
@@ -468,15 +560,68 @@ func (c *sshClient) Upload(localPath, remotePath string) error {
 	}
 	defer session.Close()
 
-	var stderr bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	session.Stdin = bytes.NewReader(data)
+	session.Stdout = &stdout
 	session.Stderr = &stderr
 
-	cmd := fmt.Sprintf("cat > %s", shellQuote(remotePath))
+	// Combine mkdir, upload, and verify into a single shell session so the
+	// directory cannot vanish between mkdir and cat (a real risk with
+	// jumpserver/bastion per-session sandboxes). If any step fails the
+	// whole command returns non-zero and Upload returns an error, so the
+	// caller never sees a false [OK].
+	cmd := fmt.Sprintf("mkdir -p %s && cat > %s && ls -ld %s",
+		shellQuote(remoteDir), shellQuote(physicalPath), shellQuote(physicalPath))
 	if err := session.Run(cmd); err != nil {
-		return fmt.Errorf("upload %s: %w (stderr: %s)", remotePath, err, stderr.String())
+		return fmt.Errorf("upload %s: %w (stderr: %s)", physicalPath, err, stderr.String())
+	}
+
+	if detail := strings.TrimSpace(stdout.String()); detail != "" {
+		c.logf("[VERIFY] %s", detail)
 	}
 	return nil
+}
+
+// Stat runs ls -ld on a remote path and returns the detail line.
+// Used for post-upload verification so the user can confirm the file
+// exists at the expected absolute path on the server filesystem.
+func (c *sshClient) Stat(remotePath string) (string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", err
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("ssh session: %w", err)
+	}
+	defer session.Close()
+	var stdout bytes.Buffer
+	session.Stdout = &stdout
+	physicalPath := c.resolveRemote(remotePath)
+	if err := session.Run(fmt.Sprintf("ls -ld %s", shellQuote(physicalPath))); err != nil {
+		return "", fmt.Errorf("stat %s: %w", remotePath, err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// ListDir runs ls -la on a remote directory and returns the output.
+func (c *sshClient) ListDir(remotePath string) (string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", err
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("ssh session: %w", err)
+	}
+	defer session.Close()
+	var stdout bytes.Buffer
+	session.Stdout = &stdout
+	physicalPath := c.resolveRemote(remotePath)
+	if err := session.Run(fmt.Sprintf("ls -la %s", shellQuote(physicalPath))); err != nil {
+		return "", fmt.Errorf("ls %s: %w", remotePath, err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // shellQuote wraps a string in single quotes for safe shell usage.

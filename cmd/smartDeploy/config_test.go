@@ -12,8 +12,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Port != 22 {
 		t.Errorf("default port = %d, want 22", cfg.Port)
 	}
-	if cfg.DebounceMs != 1500 {
-		t.Errorf("default debounceMs = %d, want 1500", cfg.DebounceMs)
+	if cfg.DebounceMs != 300 {
+		t.Errorf("default debounceMs = %d, want 300", cfg.DebounceMs)
 	}
 	if !cfg.AutoWatch {
 		t.Error("default autoWatch should be true")
