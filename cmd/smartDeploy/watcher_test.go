@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -168,6 +169,43 @@ func TestDebouncer_NilClockUsesTimeNow(t *testing.T) {
 	got := d.drain()
 	if len(got) != 1 {
 		t.Errorf("drain with nil clock = %v, want 1 item", got)
+	}
+}
+
+// --- debouncePollInterval tests ---
+
+func TestDebouncePollInterval_Quarter(t *testing.T) {
+	// At 300ms debounce the poll should be 75ms (quarter)
+	got := debouncePollInterval(300 * time.Millisecond)
+	want := 75 * time.Millisecond
+	if got != want {
+		t.Errorf("poll(300ms) = %v, want %v", got, want)
+	}
+}
+
+func TestDebouncePollInterval_OldDefault(t *testing.T) {
+	// At the old 1500ms default the poll should be 375ms
+	got := debouncePollInterval(1500 * time.Millisecond)
+	want := 375 * time.Millisecond
+	if got != want {
+		t.Errorf("poll(1500ms) = %v, want %v", got, want)
+	}
+}
+
+func TestDebouncePollInterval_MinClamp(t *testing.T) {
+	// Below the 200ms threshold the poll clamps to 50ms
+	got := debouncePollInterval(100 * time.Millisecond)
+	want := 50 * time.Millisecond
+	if got != want {
+		t.Errorf("poll(100ms) = %v, want %v", got, want)
+	}
+}
+
+func TestDebouncePollInterval_Zero(t *testing.T) {
+	got := debouncePollInterval(0)
+	want := 50 * time.Millisecond
+	if got != want {
+		t.Errorf("poll(0) = %v, want %v", got, want)
 	}
 }
 
@@ -374,5 +412,143 @@ func TestFileWatcher_NewDirWatched(t *testing.T) {
 		default:
 			time.Sleep(50 * time.Millisecond)
 		}
+	}
+}
+
+// --- async upload dispatch tests ---
+
+// TestFileWatcher_AsyncDispatch verifies that the debounce loop does not
+// block during a slow upload. Two files are written while the first
+// upload is in flight; both should be uploaded without the second being
+// delayed by the first.
+func TestFileWatcher_AsyncDispatch(t *testing.T) {
+	dir := t.TempDir()
+
+	var mu sync.Mutex
+	var uploaded []string
+	uploadDone := make(chan string, 10)
+
+	onChange := func(p string) {
+		// Simulate a slow upload.
+		time.Sleep(200 * time.Millisecond)
+		mu.Lock()
+		uploaded = append(uploaded, filepath.Base(p))
+		mu.Unlock()
+		uploadDone <- p
+	}
+
+	matcher := NewIgnoreMatcher(nil)
+	w, err := NewFileWatcher(dir, matcher, []string{".css"}, 100*time.Millisecond, onChange)
+	if err != nil {
+		t.Fatalf("NewFileWatcher error: %v", err)
+	}
+	defer w.Close()
+	w.Start()
+
+	// Write file A — triggers upload after debounce.
+	f1 := filepath.Join(dir, "a.css")
+	os.WriteFile(f1, []byte("a"), 0644)
+
+	// Wait for debounce to fire and the first upload to start.
+	time.Sleep(200 * time.Millisecond)
+
+	// Write file B while file A is still uploading.
+	f2 := filepath.Join(dir, "b.css")
+	os.WriteFile(f2, []byte("b"), 0644)
+
+	// Wait for both uploads to complete.
+	deadline := time.After(5 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-uploadDone:
+		case <-deadline:
+			mu.Lock()
+			t.Fatalf("timeout waiting for upload %d, uploaded: %v", i+1, uploaded)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(uploaded) != 2 {
+		t.Fatalf("uploaded = %v, want 2 files", uploaded)
+	}
+}
+
+// TestFileWatcher_CoalescesDuringUpload verifies that when a file is
+// modified multiple times while its upload is in flight, the changes are
+// coalesced into exactly one re-upload after the current upload completes.
+// This is the core fix for the "double refresh" problem.
+func TestFileWatcher_CoalescesDuringUpload(t *testing.T) {
+	dir := t.TempDir()
+
+	var mu sync.Mutex
+	var uploads []string
+	var callCount int
+
+	// Gate controls the first upload's duration.
+	gate := make(chan struct{})
+	started := make(chan struct{}, 1)
+
+	onChange := func(p string) {
+		mu.Lock()
+		callCount++
+		n := callCount
+		mu.Unlock()
+
+		started <- struct{}{}
+		if n == 1 {
+			// First upload: block until gate is closed.
+			<-gate
+		}
+		mu.Lock()
+		uploads = append(uploads, p)
+		mu.Unlock()
+	}
+
+	matcher := NewIgnoreMatcher(nil)
+	w, err := NewFileWatcher(dir, matcher, []string{".css"}, 100*time.Millisecond, onChange)
+	if err != nil {
+		t.Fatalf("NewFileWatcher error: %v", err)
+	}
+	defer w.Close()
+	w.Start()
+
+	// Write file — triggers first upload after debounce.
+	f := filepath.Join(dir, "style.css")
+	os.WriteFile(f, []byte("v1"), 0644)
+
+	// Wait for first upload to start (it blocks on gate).
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for first upload to start")
+	}
+
+	// While the first upload is blocked, modify the file 5 times.
+	for i := 0; i < 5; i++ {
+		os.WriteFile(f, []byte(fmt.Sprintf("v%d", i+2)), 0644)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Wait for debounce to settle (all 5 writes coalesced).
+	time.Sleep(300 * time.Millisecond)
+
+	// Release the first upload.
+	close(gate)
+
+	// Wait for the coalesced re-upload to start.
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for coalesced re-upload")
+	}
+
+	// Allow time for any unexpected extra uploads.
+	time.Sleep(500 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(uploads) != 2 {
+		t.Errorf("uploads = %d, want 2 (initial + 1 coalesced re-upload)", len(uploads))
 	}
 }

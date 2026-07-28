@@ -96,6 +96,13 @@ type FileWatcher struct {
 	mu     sync.Mutex
 	closed bool
 	stopCh chan struct{}
+
+	// Async upload dispatch: prevents the debounce loop from blocking
+	// during slow uploads. Files submitted while one is in flight are
+	// coalesced into a single re-upload after the current upload finishes.
+	uploadPending map[string]bool
+	uploadMu      sync.Mutex
+	uploadNotify  chan struct{}
 }
 
 func NewFileWatcher(root string, matcher *IgnoreMatcher, exts []string, debounce time.Duration, onChange func(string)) (*FileWatcher, error) {
@@ -110,13 +117,15 @@ func NewFileWatcher(root string, matcher *IgnoreMatcher, exts []string, debounce
 	}
 
 	w := &FileWatcher{
-		fsw:      fsw,
-		root:     filepath.Clean(root),
-		matcher:  matcher,
-		exts:     extSet,
-		deb:      newDebouncer(debounce, nil),
-		onChange: onChange,
-		stopCh:   make(chan struct{}),
+		fsw:           fsw,
+		root:          filepath.Clean(root),
+		matcher:       matcher,
+		exts:          extSet,
+		deb:           newDebouncer(debounce, nil),
+		onChange:      onChange,
+		stopCh:        make(chan struct{}),
+		uploadPending: make(map[string]bool),
+		uploadNotify:  make(chan struct{}, 1),
 	}
 
 	if err := w.addWatches(w.root); err != nil {
@@ -144,6 +153,7 @@ func (w *FileWatcher) addWatches(dir string) error {
 func (w *FileWatcher) Start() {
 	go w.processEvents()
 	go w.processDebounce()
+	go w.processUploads()
 }
 
 func (w *FileWatcher) processEvents() {
@@ -208,7 +218,49 @@ func (w *FileWatcher) processDebounce() {
 			return
 		case <-ticker.C:
 			for _, p := range w.deb.drain() {
-				w.onChange(p)
+				w.dispatchUpload(p)
+			}
+		}
+	}
+}
+
+// dispatchUpload adds a file to the async upload queue without blocking.
+// If the file is already pending, the submission is a no-op (map dedup).
+func (w *FileWatcher) dispatchUpload(p string) {
+	w.uploadMu.Lock()
+	w.uploadPending[p] = true
+	w.uploadMu.Unlock()
+	select {
+	case w.uploadNotify <- struct{}{}:
+	default:
+	}
+}
+
+// processUploads is the serial worker that drains the pending upload set
+// one file at a time. It never blocks the debounce loop; if a file is
+// re-added while its upload is in flight, the map entry persists and the
+// file is re-uploaded exactly once after the current upload completes.
+func (w *FileWatcher) processUploads() {
+	for {
+		select {
+		case <-w.stopCh:
+			return
+		case <-w.uploadNotify:
+			for {
+				w.uploadMu.Lock()
+				if len(w.uploadPending) == 0 {
+					w.uploadMu.Unlock()
+					break
+				}
+				var path string
+				for p := range w.uploadPending {
+					path = p
+					break
+				}
+				delete(w.uploadPending, path)
+				w.uploadMu.Unlock()
+
+				w.onChange(path)
 			}
 		}
 	}

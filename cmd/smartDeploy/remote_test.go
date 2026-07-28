@@ -181,7 +181,7 @@ func startTestSSHServer(t *testing.T, rootDir string) (addr string, cleanup func
 			if err != nil {
 				return
 			}
-			go handleSSHConnForTest(conn, config, rootDir)
+			go handleSSHConnForTest(conn, config, rootDir, false)
 		}
 	}()
 
@@ -192,7 +192,7 @@ func startTestSSHServer(t *testing.T, rootDir string) (addr string, cleanup func
 	return listener.Addr().String(), cleanup
 }
 
-func handleSSHConnForTest(conn net.Conn, config *ssh.ServerConfig, rootDir string) {
+func handleSSHConnForTest(conn net.Conn, config *ssh.ServerConfig, rootDir string, corruptWC bool) {
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
 	if err != nil {
 		return
@@ -276,6 +276,20 @@ func handleSSHConnForTest(conn net.Conn, config *ssh.ServerConfig, rootDir strin
 									info, _ := e.Info()
 									fmt.Fprintln(&output, lsLine(info, e.Name()))
 								}
+							}
+						case strings.HasPrefix(sc, "wc -c < "):
+							p := strings.TrimPrefix(sc, "wc -c < ")
+							p = strings.Trim(p, "'")
+							fullPath := filepath.Join(rootDir, p)
+							info, err := os.Stat(fullPath)
+							if err != nil {
+								exitCode = 1
+							} else {
+								size := info.Size()
+								if corruptWC {
+									size = 0
+								}
+								fmt.Fprintf(&output, "%d\n", size)
 							}
 						default:
 							exitCode = 1
@@ -667,7 +681,7 @@ func startKeyboardInteractiveSSHServer(t *testing.T, expectedOTP string) (addr s
 			if err != nil {
 				return
 			}
-			go handleSSHConnForTest(conn, config, t.TempDir())
+			go handleSSHConnForTest(conn, config, t.TempDir(), false)
 		}
 	}()
 
@@ -1249,6 +1263,172 @@ func TestSSHClient_Integration_ListDir(t *testing.T) {
 	}
 	if !strings.Contains(output, "b.js") {
 		t.Errorf("ListDir should contain b.js: %q", output)
+	}
+}
+
+// startTestSSHServerCorruptWC starts an SSH server whose wc -c handler
+// always reports 0 bytes, simulating a failed or truncated upload.
+func startTestSSHServerCorruptWC(t *testing.T, rootDir string) (addr string, cleanup func()) {
+	t.Helper()
+
+	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(serverKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config := &ssh.ServerConfig{
+		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+			if c.User() == "testuser" && string(pass) == "testpass" {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("invalid credentials")
+		},
+	}
+	config.AddHostKey(signer)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handleSSHConnForTest(conn, config, rootDir, true)
+		}
+	}()
+
+	cleanup = func() {
+		listener.Close()
+	}
+	return listener.Addr().String(), cleanup
+}
+
+// --- readStableFile tests ---
+
+func TestReadStableFile_Stable(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "test.css")
+	content := []byte("body { color: red; }")
+	os.WriteFile(f, content, 0644)
+
+	data, err := readStableFile(f, 3, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("readStableFile error: %v", err)
+	}
+	if string(data) != string(content) {
+		t.Errorf("data = %q, want %q", data, content)
+	}
+}
+
+func TestReadStableFile_ChangesThenStable(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "test.css")
+
+	// Initial content (shorter than final).
+	os.WriteFile(f, []byte("short"), 0644)
+
+	// Modify the file during readStableFile's wait window.
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		os.WriteFile(f, []byte("this is the final longer content"), 0644)
+	}()
+
+	// readStableFile with 50ms wait should detect the size change and re-read.
+	data, err := readStableFile(f, 3, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("readStableFile error: %v", err)
+	}
+	want := "this is the final longer content"
+	if string(data) != want {
+		t.Errorf("data = %q, want %q", data, want)
+	}
+}
+
+func TestReadStableFile_NonExistent(t *testing.T) {
+	_, err := readStableFile("/nonexistent/file.css", 3, 10*time.Millisecond)
+	if err == nil {
+		t.Error("expected error for nonexistent file")
+	}
+}
+
+// --- size verification tests ---
+
+func TestSSHClient_Upload_SizeVerification(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServer(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "", 0)
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+	client.SetLogger(logger)
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	localDir := t.TempDir()
+	localFile := filepath.Join(localDir, "test.css")
+	content := []byte("body { color: red; }")
+	os.WriteFile(localFile, content, 0644)
+
+	remotePath := "/css/style.css"
+	if err := client.Upload(localFile, remotePath); err != nil {
+		t.Fatalf("Upload error: %v", err)
+	}
+
+	// Log should include byte count confirmation.
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "bytes confirmed") {
+		t.Errorf("verify log should include byte count: %q", logOutput)
+	}
+	expectedSize := fmt.Sprintf("%d bytes confirmed", len(content))
+	if !strings.Contains(logOutput, expectedSize) {
+		t.Errorf("verify log should include correct size %q: %q", expectedSize, logOutput)
+	}
+}
+
+func TestSSHClient_Upload_SizeMismatch(t *testing.T) {
+	rootDir := t.TempDir()
+	addr, cleanup := startTestSSHServerCorruptWC(t, rootDir)
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	portInt := 22
+	fmt.Sscanf(port, "%d", &portInt)
+
+	client := NewSSHClient(host, portInt, "testuser", "testpass", "", "", 0)
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer client.Close()
+
+	localDir := t.TempDir()
+	localFile := filepath.Join(localDir, "test.css")
+	content := []byte("body { color: red; }")
+	os.WriteFile(localFile, content, 0644)
+
+	// Upload should fail because wc -c reports 0 (mismatch with local size).
+	err := client.Upload(localFile, "/css/style.css")
+	if err == nil {
+		t.Fatal("expected size mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "size mismatch") {
+		t.Errorf("error should mention size mismatch: %v", err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -528,6 +529,31 @@ func (c *sshClient) MkdirAll(remoteDir string) error {
 	return session.Run(fmt.Sprintf("mkdir -p %s", shellQuote(physicalDir)))
 }
 
+// readStableFile reads a local file and verifies its size is stable.
+// Editors may write files in multiple flushes; without this check we could
+// upload a partially-written file. It reads the file, waits briefly,
+// re-stats, and re-reads if the size changed.
+func readStableFile(localPath string, maxRetries int, wait time.Duration) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		data, err := os.ReadFile(localPath)
+		if err != nil {
+			return nil, err
+		}
+		if attempt >= maxRetries {
+			return data, nil
+		}
+		time.Sleep(wait)
+		info, err := os.Stat(localPath)
+		if err != nil {
+			return nil, err
+		}
+		if info.Size() == int64(len(data)) {
+			return data, nil
+		}
+		// Size changed between read and stat; re-read.
+	}
+}
+
 func (c *sshClient) Upload(localPath, remotePath string) error {
 	waitCtx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 	defer cancel()
@@ -535,7 +561,7 @@ func (c *sshClient) Upload(localPath, remotePath string) error {
 		return fmt.Errorf("not connected: %w", err)
 	}
 
-	data, err := os.ReadFile(localPath)
+	data, err := readStableFile(localPath, 3, 50*time.Millisecond)
 	if err != nil {
 		return fmt.Errorf("read local file: %w", err)
 	}
@@ -570,14 +596,29 @@ func (c *sshClient) Upload(localPath, remotePath string) error {
 	// jumpserver/bastion per-session sandboxes). If any step fails the
 	// whole command returns non-zero and Upload returns an error, so the
 	// caller never sees a false [OK].
-	cmd := fmt.Sprintf("mkdir -p %s && cat > %s && ls -ld %s",
-		shellQuote(remoteDir), shellQuote(physicalPath), shellQuote(physicalPath))
+	cmd := fmt.Sprintf("mkdir -p %s && cat > %s && ls -ld %s && wc -c < %s",
+		shellQuote(remoteDir), shellQuote(physicalPath), shellQuote(physicalPath), shellQuote(physicalPath))
 	if err := session.Run(cmd); err != nil {
-		return fmt.Errorf("upload %s: %w (stderr: %s)", physicalPath, err, stderr.String())
+		return fmt.Errorf("upload %s: %w (stderr: %s)", physicalPath, err, strings.TrimSpace(stderr.String()))
 	}
 
-	if detail := strings.TrimSpace(stdout.String()); detail != "" {
-		c.logf("[VERIFY] %s", detail)
+	// Verify uploaded size matches local size. The last line of stdout
+	// is the wc -c output (a bare number); earlier lines are ls -ld.
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) > 0 {
+		wcLine := strings.TrimSpace(lines[len(lines)-1])
+		if remoteBytes, parseErr := strconv.Atoi(wcLine); parseErr == nil {
+			if remoteBytes != len(data) {
+				return fmt.Errorf("upload %s: size mismatch (local %d, remote %d)",
+					physicalPath, len(data), remoteBytes)
+			}
+			c.logf("[VERIFY] %s (%d bytes confirmed)", physicalPath, remoteBytes)
+		} else {
+			// wc -c output unparseable; fall back to raw ls -ld detail.
+			if detail := strings.TrimSpace(stdout.String()); detail != "" {
+				c.logf("[VERIFY] %s", detail)
+			}
+		}
 	}
 	return nil
 }
