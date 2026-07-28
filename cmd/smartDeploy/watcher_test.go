@@ -1,0 +1,378 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+)
+
+// --- IgnoreMatcher tests ---
+
+func TestIgnoreMatch_ExactDir(t *testing.T) {
+	m := NewIgnoreMatcher([]string{".git", "node_modules"})
+	if !m.Match("/project/app/.git/config") {
+		t.Error("should match .git in path")
+	}
+	if !m.Match("/project/app/node_modules/lib/index.js") {
+		t.Error("should match node_modules in path")
+	}
+}
+
+func TestIgnoreMatch_WildcardExtension(t *testing.T) {
+	m := NewIgnoreMatcher([]string{"*.log", "*.tmp"})
+	if !m.Match("/project/app/debug.log") {
+		t.Error("should match *.log")
+	}
+	if !m.Match("/project/app/cache.tmp") {
+		t.Error("should match *.tmp")
+	}
+}
+
+func TestIgnoreMatch_ExactFile(t *testing.T) {
+	m := NewIgnoreMatcher([]string{"Thumbs.db", ".DS_Store"})
+	if !m.Match("/project/app/Thumbs.db") {
+		t.Error("should match Thumbs.db")
+	}
+	if !m.Match("/project/app/sub/.DS_Store") {
+		t.Error("should match .DS_Store")
+	}
+}
+
+func TestIgnoreMatch_NoMatch(t *testing.T) {
+	m := NewIgnoreMatcher([]string{".git", "*.log"})
+	if m.Match("/project/app/src/main.go") {
+		t.Error("should not match main.go")
+	}
+	if m.Match("/project/app/css/style.css") {
+		t.Error("should not match style.css")
+	}
+}
+
+func TestIgnoreMatch_EmptyPatterns(t *testing.T) {
+	m := NewIgnoreMatcher(nil)
+	if m.Match("/any/path") {
+		t.Error("nil patterns should not match")
+	}
+	m2 := NewIgnoreMatcher([]string{})
+	if m2.Match("/any/path") {
+		t.Error("empty patterns should not match")
+	}
+}
+
+func TestIgnoreMatch_NestedPath(t *testing.T) {
+	m := NewIgnoreMatcher([]string{"target"})
+	if !m.Match("/project/app/src/target/file.class") {
+		t.Error("should match target dir at any depth")
+	}
+	if m.Match("/project/app/src/main/file.go") {
+		t.Error("should not match when no ignore component")
+	}
+}
+
+func TestIgnoreMatch_BackslashPath(t *testing.T) {
+	m := NewIgnoreMatcher([]string{".git"})
+	if !m.Match(`C:\project\app\.git\config`) {
+		t.Error("should match .git in backslash path")
+	}
+}
+
+// --- debouncer tests ---
+
+func TestDebouncer_BasicDebounce(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	d := newDebouncer(100*time.Millisecond, clock)
+
+	d.add("/app/file.css")
+
+	// immediately, nothing ready
+	if got := d.drain(); len(got) != 0 {
+		t.Errorf("drain before interval = %v, want empty", got)
+	}
+	if d.count() != 1 {
+		t.Errorf("count = %d, want 1", d.count())
+	}
+
+	// after interval, should be ready
+	now = now.Add(150 * time.Millisecond)
+	got := d.drain()
+	if len(got) != 1 || got[0] != "/app/file.css" {
+		t.Errorf("drain = %v, want [/app/file.css]", got)
+	}
+	if d.count() != 0 {
+		t.Errorf("count after drain = %d, want 0", d.count())
+	}
+}
+
+func TestDebouncer_MultipleFiles(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	d := newDebouncer(100*time.Millisecond, clock)
+
+	d.add("/a.css")
+	d.add("/b.css")
+	d.add("/c.css")
+
+	if d.count() != 3 {
+		t.Errorf("count = %d, want 3", d.count())
+	}
+
+	now = now.Add(150 * time.Millisecond)
+	got := d.drain()
+	if len(got) != 3 {
+		t.Errorf("drain = %d items, want 3", len(got))
+	}
+}
+
+func TestDebouncer_ResetOnReAdd(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	d := newDebouncer(100*time.Millisecond, clock)
+
+	d.add("/file.css")
+	now = now.Add(80 * time.Millisecond)
+
+	// re-add before interval expires -> resets timer
+	d.add("/file.css")
+	now = now.Add(80 * time.Millisecond) // 160ms total since first add, 80ms since second
+
+	// should NOT be ready yet (only 80ms since last add)
+	if got := d.drain(); len(got) != 0 {
+		t.Errorf("drain after re-add = %v, want empty", got)
+	}
+
+	now = now.Add(30 * time.Millisecond) // 110ms since last add
+	got := d.drain()
+	if len(got) != 1 {
+		t.Errorf("drain after full interval = %v, want 1 item", got)
+	}
+}
+
+func TestDebouncer_EmptyDrain(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	d := newDebouncer(50*time.Millisecond, clock)
+
+	got := d.drain()
+	if len(got) != 0 {
+		t.Errorf("drain on empty = %v, want empty", got)
+	}
+}
+
+func TestDebouncer_NilClockUsesTimeNow(t *testing.T) {
+	d := newDebouncer(1*time.Millisecond, nil)
+	d.add("/test.css")
+	time.Sleep(20 * time.Millisecond)
+	got := d.drain()
+	if len(got) != 1 {
+		t.Errorf("drain with nil clock = %v, want 1 item", got)
+	}
+}
+
+// --- FileWatcher integration tests ---
+
+func TestFileWatcher_AutoUpload(t *testing.T) {
+	dir := t.TempDir()
+	cssDir := filepath.Join(dir, "css")
+	os.MkdirAll(cssDir, 0755)
+
+	var mu sync.Mutex
+	var changed []string
+	onChange := func(p string) {
+		mu.Lock()
+		changed = append(changed, p)
+		mu.Unlock()
+	}
+
+	matcher := NewIgnoreMatcher([]string{".git"})
+	w, err := NewFileWatcher(dir, matcher, []string{".css"}, 200*time.Millisecond, onChange)
+	if err != nil {
+		t.Fatalf("NewFileWatcher error: %v", err)
+	}
+	defer w.Close()
+	w.Start()
+
+	// write a file
+	cssFile := filepath.Join(cssDir, "style.css")
+	if err := os.WriteFile(cssFile, []byte("body{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// wait for debounce + processing
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(changed)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for file change event")
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(changed) != 1 {
+		t.Fatalf("got %d changes, want 1", len(changed))
+	}
+	// path may have different separators, compare cleaned
+	got := filepath.Clean(changed[0])
+	want := filepath.Clean(cssFile)
+	if got != want {
+		t.Errorf("changed path = %q, want %q", got, want)
+	}
+}
+
+func TestFileWatcher_IgnorePattern(t *testing.T) {
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "logs")
+	os.MkdirAll(logDir, 0755)
+
+	var mu sync.Mutex
+	var changed []string
+	onChange := func(p string) {
+		mu.Lock()
+		changed = append(changed, p)
+		mu.Unlock()
+	}
+
+	matcher := NewIgnoreMatcher([]string{"logs"})
+	w, err := NewFileWatcher(dir, matcher, nil, 100*time.Millisecond, onChange)
+	if err != nil {
+		t.Fatalf("NewFileWatcher error: %v", err)
+	}
+	defer w.Close()
+	w.Start()
+
+	// write a file in ignored dir
+	logFile := filepath.Join(logDir, "app.log")
+	os.WriteFile(logFile, []byte("log"), 0644)
+
+	time.Sleep(500 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(changed) != 0 {
+		t.Errorf("expected no changes for ignored dir, got %d", len(changed))
+	}
+}
+
+func TestFileWatcher_ExtensionFilter(t *testing.T) {
+	dir := t.TempDir()
+
+	var mu sync.Mutex
+	var changed []string
+	onChange := func(p string) {
+		mu.Lock()
+		changed = append(changed, p)
+		mu.Unlock()
+	}
+
+	matcher := NewIgnoreMatcher(nil)
+	w, err := NewFileWatcher(dir, matcher, []string{".css"}, 100*time.Millisecond, onChange)
+	if err != nil {
+		t.Fatalf("NewFileWatcher error: %v", err)
+	}
+	defer w.Close()
+	w.Start()
+
+	// write a .js file (should be ignored)
+	jsFile := filepath.Join(dir, "app.js")
+	os.WriteFile(jsFile, []byte("console.log(1)"), 0644)
+
+	time.Sleep(500 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(changed) != 0 {
+		t.Errorf("expected no changes for .js file with .css filter, got %d", len(changed))
+	}
+}
+
+func TestFileWatcher_DebounceCoalescing(t *testing.T) {
+	dir := t.TempDir()
+
+	var mu sync.Mutex
+	var changed []string
+	onChange := func(p string) {
+		mu.Lock()
+		changed = append(changed, p)
+		mu.Unlock()
+	}
+
+	matcher := NewIgnoreMatcher(nil)
+	w, err := NewFileWatcher(dir, matcher, []string{".txt"}, 300*time.Millisecond, onChange)
+	if err != nil {
+		t.Fatalf("NewFileWatcher error: %v", err)
+	}
+	defer w.Close()
+	w.Start()
+
+	// write to the same file multiple times rapidly
+	txtFile := filepath.Join(dir, "data.txt")
+	for i := 0; i < 5; i++ {
+		os.WriteFile(txtFile, []byte("content"), 0644)
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// wait for debounce
+	time.Sleep(1 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	// should have been coalesced to at most 1 event
+	if len(changed) > 1 {
+		t.Errorf("expected at most 1 change after debounce, got %d", len(changed))
+	}
+}
+
+func TestFileWatcher_NewDirWatched(t *testing.T) {
+	dir := t.TempDir()
+
+	var mu sync.Mutex
+	var changed []string
+	onChange := func(p string) {
+		mu.Lock()
+		changed = append(changed, p)
+		mu.Unlock()
+	}
+
+	matcher := NewIgnoreMatcher(nil)
+	w, err := NewFileWatcher(dir, matcher, []string{".css"}, 100*time.Millisecond, onChange)
+	if err != nil {
+		t.Fatalf("NewFileWatcher error: %v", err)
+	}
+	defer w.Close()
+	w.Start()
+
+	// create a new subdirectory with a file
+	newDir := filepath.Join(dir, "newdir")
+	os.MkdirAll(newDir, 0755)
+	time.Sleep(200 * time.Millisecond) // let watcher pick up new dir
+
+	cssFile := filepath.Join(newDir, "style.css")
+	os.WriteFile(cssFile, []byte("body{}"), 0644)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(changed)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for file in new directory")
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+}

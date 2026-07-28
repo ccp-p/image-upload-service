@@ -1,0 +1,26 @@
+{
+  "host": "192.168.18.169",
+  "port": 2222,
+  "username": "chenchengpeng@richpush@9701fdb9-d99f-471d-9f5e-bc70576e35cc",
+  "password": "",
+  "privateKeyPath": "C:\\Users\\83795\\.ssh\\id_rsa",
+  "keyPassphrase": "",
+  "watchFolder": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy",
+  "remoteBasePath": "/qqtCode/xhmqqthy/",
+  "stripPrefix": "src/main/webapp/res/wap",
+  "ignorePatterns": [
+    ".git", "node_modules", "target", ".idea",
+    "*.log", "*.tmp", "*.swp", "*.bak"
+  ],
+  "fileExtensions": [
+    ".html", ".css", ".js", ".json", ".xml",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"
+  ],
+  "debounceMs": 1500,
+  "autoWatch": true,
+  "keepAliveIntervalSec": 30,
+  "enableClipboard": true,
+  "clipboardPollMs": 2000,
+  "autoReconnect": true,
+  "otpTimeoutSec": 300
+}
