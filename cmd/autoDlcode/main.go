@@ -132,13 +132,19 @@ func main() {
 				localReplacements[rawURL] = primaryRef + className + filepath.Ext(rawURL)
 			}
 		}
+}
+
+	// 收集本次 HTML 中实际需要下载的图片文件名，后续仅移动对应的压缩文件
+	expectedFiles := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		expectedFiles = append(expectedFiles, t.fileName)
 	}
 
 	if len(tasks) == 0 {
 		if len(localReplacements) == 0 {
 			fmt.Println("✅ 未发现需要下载的 CDN 图片，本地路径已是最新")
 			// 检查并移动 compressed 目录中的文件
-			checkAndMoveCompressedFiles(basePaths[0], 0)
+			checkAndMoveCompressedFiles(basePaths[0], expectedFiles)
 			return
 		}
 		// 无 CDN 图片需下载，但本地路径与 resolveBasePaths 不一致 → 替换
@@ -152,7 +158,7 @@ func main() {
 		}
 		fmt.Printf("\n🎉 完成！共替换 %d 处本地路径\n", len(localReplacements))
 		// 检查并移动 compressed 目录中的文件
-		checkAndMoveCompressedFiles(basePaths[0], 0)
+		checkAndMoveCompressedFiles(basePaths[0], expectedFiles)
 		return
 	}
 
@@ -195,48 +201,58 @@ func main() {
 	fmt.Printf("🔗 HTML主引用路径: %s<className>.png\n", primaryRef)
 
 	// 检查并移动 compressed 目录中的文件
-	checkAndMoveCompressedFiles(basePaths[0], len(tasks))
+	checkAndMoveCompressedFiles(basePaths[0], expectedFiles)
 }
 
-// filterNonDirs 过滤出非目录文件
-func filterNonDirs(entries []os.DirEntry) []os.DirEntry {
-	var result []os.DirEntry
+// collectReadyFiles 返回 compressedDir 中存在的预期文件名列表
+func collectReadyFiles(compressedDir string, expectedFiles []string) []string {
+	entries, err := os.ReadDir(compressedDir)
+	if err != nil {
+		return nil
+	}
+	existing := make(map[string]bool)
 	for _, e := range entries {
 		if !e.IsDir() {
-			result = append(result, e)
+			existing[e.Name()] = true
 		}
 	}
-	return result
+	var ready []string
+	for _, name := range expectedFiles {
+		if existing[name] {
+			ready = append(ready, name)
+		}
+	}
+	return ready
 }
 
-// waitForAllReady 轮询 compressed 目录，等待文件数量达到预期后返回
-// expectedCount > 0 时会轮训等待所有文件就绪
-func waitForAllReady(compressedDir string, expectedCount int, initialFiles []os.DirEntry) []os.DirEntry {
-	if expectedCount <= 0 || len(initialFiles) >= expectedCount {
-		return initialFiles
+// waitForAllReady 轮询 compressed 目录，等待所有来自 HTML 的预期文件就绪后返回
+func waitForAllReady(compressedDir string, expectedFiles []string) []string {
+	if len(expectedFiles) == 0 {
+		return nil
 	}
 
-	fmt.Printf("⏳ compressed 目录中 %d/%d 个文件，等待剩余文件...\n", len(initialFiles), expectedCount)
+	ready := collectReadyFiles(compressedDir, expectedFiles)
+	if len(ready) == len(expectedFiles) {
+		fmt.Printf("✅ 所有 %d 个文件已就绪\n", len(expectedFiles))
+		return ready
+	}
+
+	fmt.Printf("⏳ compressed 目录中 %d/%d 个文件就绪，等待剩余文件...\n", len(ready), len(expectedFiles))
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	timeout := time.After(5 * time.Minute)
-	files := initialFiles
 
 	for {
 		select {
 		case <-timeout:
-			fmt.Printf("⚠️  等待超时(5分钟)，compressed 目录中仅 %d/%d 个文件\n", len(files), expectedCount)
-			return files
+			fmt.Printf("⚠️  等待超时(5分钟)，compressed 目录中仅 %d/%d 个文件就绪\n", len(ready), len(expectedFiles))
+			return ready
 		case <-ticker.C:
-			entries, err := os.ReadDir(compressedDir)
-			if err != nil {
-				continue
-			}
-			files = filterNonDirs(entries)
-			fmt.Printf("⏳ compressed 目录中 %d/%d 个文件\n", len(files), expectedCount)
-			if len(files) >= expectedCount {
-				fmt.Printf("✅ 所有 %d 个文件已就绪\n", expectedCount)
-				return files
+			ready = collectReadyFiles(compressedDir, expectedFiles)
+			fmt.Printf("⏳ compressed 目录中 %d/%d 个文件就绪\n", len(ready), len(expectedFiles))
+			if len(ready) == len(expectedFiles) {
+				fmt.Printf("✅ 所有 %d 个文件已就绪\n", len(expectedFiles))
+				return ready
 			}
 		}
 	}
@@ -244,8 +260,12 @@ func waitForAllReady(compressedDir string, expectedCount int, initialFiles []os.
 
 // checkAndMoveCompressedFiles 检查并移动压缩文件到源目录
 // targetDir 为 HTML 中替换后的目标路径（如 ../../components/xdrsignNew/static/）
-// expectedCount 为预期的压缩文件数量，>0 时会轮训等待所有文件就绪
-func checkAndMoveCompressedFiles(targetDir string, expectedCount int) {
+// expectedFiles 为本次 HTML 中实际需要移动的文件名列表，仅移动这些文件
+func checkAndMoveCompressedFiles(targetDir string, expectedFiles []string) {
+	if len(expectedFiles) == 0 {
+		return
+	}
+
 	compressedDir := `C:\Users\83795\Downloads\compressed`
 
 	// 检查compressed目录是否存在
@@ -253,19 +273,9 @@ func checkAndMoveCompressedFiles(targetDir string, expectedCount int) {
 		return
 	}
 
-	// 读取compressed目录中的文件
-	entries, err := os.ReadDir(compressedDir)
-	if err != nil {
-		fmt.Printf("⚠️  读取compressed目录失败: %v\n", err)
-		return
-	}
-
-	// 过滤出非目录文件
-	fileList := filterNonDirs(entries)
-
-	// 如果需要等待压缩文件，轮训直到所有文件就绪
-	fileList = waitForAllReady(compressedDir, expectedCount, fileList)
-	if len(fileList) == 0 {
+	// 等待所有来自 HTML 的预期文件就绪
+	readyFiles := waitForAllReady(compressedDir, expectedFiles)
+	if len(readyFiles) == 0 {
 		return
 	}
 
@@ -278,10 +288,10 @@ func checkAndMoveCompressedFiles(targetDir string, expectedCount int) {
 		sourcePath = `D:\project\cx_project\china_mobile\gitProject\richinfo_tyjf_xhmqqthy\src\main\webapp\res\wap`
 	}
 
-	// 列出所有文件
-	fmt.Println("\n📦 发现以下文件在 compressed 目录中:")
-	for i, file := range fileList {
-		fmt.Printf("  %d. %s\n", i+1, file.Name())
+	// 列出所有需要移动的文件
+	fmt.Println("\n📦 发现以下 HTML 相关文件在 compressed 目录中:")
+	for i, name := range readyFiles {
+		fmt.Printf("  %d. %s\n", i+1, name)
 	}
 
 	// 询问用户是否移动
@@ -300,9 +310,9 @@ func checkAndMoveCompressedFiles(targetDir string, expectedCount int) {
 
 	// 移动文件到目标目录
 	movedCount := 0
-	for _, file := range fileList {
-		srcPath := filepath.Join(compressedDir, file.Name())
-		dstPath := filepath.Join(dstDir, file.Name())
+	for _, name := range readyFiles {
+		srcPath := filepath.Join(compressedDir, name)
+		dstPath := filepath.Join(dstDir, name)
 
 		// 确保目标目录存在
 		if err := os.MkdirAll(filepath.Dir(dstPath), os.ModePerm); err != nil {
@@ -311,11 +321,11 @@ func checkAndMoveCompressedFiles(targetDir string, expectedCount int) {
 		}
 
 		if err := moveFile(srcPath, dstPath); err != nil {
-			fmt.Printf("⚠️  移动失败: %s - %v\n", file.Name(), err)
+			fmt.Printf("⚠️  移动失败: %s - %v\n", name, err)
 			continue
 		}
 
-		fmt.Printf("✅ 已移动: %s -> %s\n", file.Name(), dstPath)
+		fmt.Printf("✅ 已移动: %s -> %s\n", name, dstPath)
 		movedCount++
 	}
 
