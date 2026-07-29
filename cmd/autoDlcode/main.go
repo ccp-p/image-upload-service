@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -310,6 +311,7 @@ func checkAndMoveCompressedFiles(targetDir string, expectedFiles []string) {
 
 	// 移动文件到目标目录
 	movedCount := 0
+	movedFiles := make([]string, 0, len(readyFiles))
 	for _, name := range readyFiles {
 		srcPath := filepath.Join(compressedDir, name)
 		dstPath := filepath.Join(dstDir, name)
@@ -326,10 +328,16 @@ func checkAndMoveCompressedFiles(targetDir string, expectedFiles []string) {
 		}
 
 		fmt.Printf("✅ 已移动: %s -> %s\n", name, dstPath)
+		movedFiles = append(movedFiles, dstPath)
 		movedCount++
 	}
 
 	fmt.Printf("\n🎉 共移动 %d 个文件\n", movedCount)
+
+	// 将移动后的图片一次性加入版本控制
+	if len(movedFiles) > 0 {
+		gitAddFiles(movedFiles)
+	}
 }
 
 func downloadImage(url, dest, className string) {
@@ -383,6 +391,43 @@ func moveFile(src, dst string) error {
 	srcFile.Close()
 	dstFile.Close()
 	return os.Remove(src)
+}
+
+// isGitRepo 检查目录是否位于 Git 仓库内
+func isGitRepo(dir string) bool {
+	if _, err := exec.LookPath("git"); err != nil {
+		return false
+	}
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = dir
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run() == nil
+}
+
+// gitAddFiles 将多个文件一次性加入 Git 版本控制
+// 所有文件位于同一目录下，执行一次 git add
+func gitAddFiles(filePaths []string) {
+	if len(filePaths) == 0 {
+		return
+	}
+	dir := filepath.Dir(filePaths[0])
+	if !isGitRepo(dir) {
+		return
+	}
+	args := make([]string, 0, len(filePaths)+1)
+	args = append(args, "add")
+	for _, p := range filePaths {
+		args = append(args, filepath.Base(p))
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		fmt.Printf("⚠️  Git add 失败 (%v)\n", err)
+		fmt.Printf("      %s\n", strings.TrimSpace(string(output)))
+	} else {
+		fmt.Printf("➕ Git add: %d 个文件\n", len(filePaths))
+	}
 }
 
 // normalizePathSep 将路径中的反斜杠统一为正斜杠
