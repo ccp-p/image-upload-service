@@ -21,3 +21,7 @@ vscode-smartdeploy/package-lock.json
 # compiled binary
 **/smartDeploy.exe
 smartDeploy.exe
+
+# douyin-dl build artifacts & secrets
+**/douyin-dl.exe
+cmd/douyin-dl/cookies.txt
