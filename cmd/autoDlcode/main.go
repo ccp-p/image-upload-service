@@ -94,7 +94,7 @@ func main() {
 	htmlStr := string(content)
 
 	// 解析 CSS (支持 background 和 background-image 两种写法，兼容多行 CSS)
-	reRule := regexp.MustCompile(`\.([a-zA-Z0-9_-]+)\s*\{[^}]*background(?:-image)?:\s*url$$\s*['"]?(.*?)['"]?\s*$$[^}]*\}`)
+	reRule := regexp.MustCompile(`\.([a-zA-Z0-9_-]+)\s*\{[^}]*background(?:-image)?:\s*url\(\s*['"]?(.*?)['"]?\s*\)[^}]*\}`)
 	matches := reRule.FindAllStringSubmatch(htmlStr, -1)
 
 	tasks := []task{}
