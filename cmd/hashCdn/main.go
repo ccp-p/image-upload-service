@@ -2011,6 +2011,63 @@ func (dm *DeployManager) revertAllSvn() error {
 	return nil
 }
 
+// revertSrcGit 回退src Git工作区的所有本地改动
+// git reset --hard HEAD 丢弃所有已跟踪的修改并撤销暂存的 add/delete
+// git clean -fd 移除未跟踪的文件和目录（保留 .gitignore 排除的 node_modules/dist 等）
+func (dm *DeployManager) revertSrcGit() error {
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("🔄 回退src Git工作区的所有本地改动")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("📂 源路径: %s\n", dm.sourcePath)
+
+	if dm.sourcePath == "" {
+		return fmt.Errorf("未设置source路径（请检查 version.config.json 中的 deploy.homeSourcePath / deploy.companySourcePath）")
+	}
+
+	if _, err := exec.LookPath("git"); err != nil {
+		return fmt.Errorf("未找到git命令")
+	}
+
+	if !isGitRepo(dm.sourcePath) {
+		return fmt.Errorf("源路径不是Git仓库: %s", dm.sourcePath)
+	}
+
+	// 1. git reset --hard HEAD: 丢弃所有已跟踪的修改和暂存区
+	fmt.Println("⏳ 正在执行 git reset --hard HEAD ...")
+	resetCmd := exec.Command("git", "reset", "--hard", "HEAD")
+	resetCmd.Dir = dm.sourcePath
+	resetCmd.Stdout = os.Stdout
+	resetCmd.Stderr = os.Stderr
+	if err := resetCmd.Run(); err != nil {
+		return fmt.Errorf("git reset --hard HEAD 失败: %v", err)
+	}
+
+	// 2. git clean -fd: 移除未跟踪的文件和目录（不加 -x 以保留 .gitignore 排除项）
+	fmt.Println("⏳ 正在执行 git clean -fd ...")
+	cleanCmd := exec.Command("git", "clean", "-fd")
+	cleanCmd.Dir = dm.sourcePath
+	cleanCmd.Stdout = os.Stdout
+	cleanCmd.Stderr = os.Stderr
+	if err := cleanCmd.Run(); err != nil {
+		return fmt.Errorf("git clean -fd 失败: %v", err)
+	}
+
+	// 3. 显示 git status 确认工作区已干净
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = dm.sourcePath
+	if statusOut, statusErr := statusCmd.Output(); statusErr == nil {
+		statusStr := strings.TrimSpace(string(statusOut))
+		if statusStr == "" {
+			fmt.Println("✅ src Git工作区已干净")
+		} else {
+			fmt.Printf("⚠️  Git状态仍有未清理的变更:\n%s\n", statusStr)
+		}
+	}
+
+	fmt.Println(strings.Repeat("=", 60))
+	return nil
+}
+
 // openFolderInOS 跨平台打开文件夹
 func openFolderInOS(path string) error {
 	var cmd *exec.Cmd
@@ -2522,6 +2579,7 @@ func main() {
 	deployMode := flag.Int("mode", 6, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles)")
 	commitMessage := flag.String("message", "", "自定义SVN提交信息（不指定则使用Git最新提交信息）")
 	revertSvn := flag.Bool("revert-svn", false, "回退dest SVN工作副本的所有本地变更（递归 svn revert）")
+	revertGit := flag.Bool("revert-git", false, "回退src Git工作区的所有本地改动（git reset --hard HEAD + git clean -fd）")
 	dryRun := flag.Bool("dry-run", false, "预览模式（只显示将要执行的操作，不实际修改文件）")
 
 	flag.Parse()
@@ -2628,12 +2686,20 @@ func main() {
 		vm.commitMessage = *commitMessage
 	}
 
-	// 仅回退dest SVN的所有本地变更（递归 svn revert -R .）
-	if *revertSvn {
+	// 回退本地变更：-revert-svn 回退dest SVN，-revert-git 回退src Git，可同时使用
+	if *revertSvn || *revertGit {
 		dm := NewDeployManager(config.Deploy, *debugMode)
-		if err := dm.revertAllSvn(); err != nil {
-			fmt.Printf("❌ 回退失败: %v\n", err)
-			os.Exit(1)
+		if *revertSvn {
+			if err := dm.revertAllSvn(); err != nil {
+				fmt.Printf("❌ SVN回退失败: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		if *revertGit {
+			if err := dm.revertSrcGit(); err != nil {
+				fmt.Printf("❌ Git回退失败: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		duration := time.Since(startTime)
 		fmt.Printf("\n⏱️  总运行时间: %v\n", duration)

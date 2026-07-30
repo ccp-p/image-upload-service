@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -794,5 +795,91 @@ func TestCopyFileWithVersions(t *testing.T) {
 	// Hash version should exist in dest
 	if !fileExists(filepath.Join(dstDir, "app.aaaabbbb.js")) {
 		t.Error("hash file not copied to dest")
+	}
+}
+
+func TestRevertSrcGitErrorsOnEmptySource(t *testing.T) {
+	dm := &DeployManager{
+		config:     DeployConfig{},
+		sourcePath: "",
+		destPath:   "",
+		debugMode:  false,
+		cache:      loadDeployCache(""),
+	}
+	err := dm.revertSrcGit()
+	if err == nil {
+		t.Error("empty source path should return error")
+	}
+}
+
+func TestRevertSrcGitCleansWorkspace(t *testing.T) {
+	// 集成测试：需要 git 可执行文件。创建临时仓库，弄脏后验证 revertSrcGit 还原工作区
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := t.TempDir()
+
+	runGit := func(args ...string) []byte {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+		return out
+	}
+
+	runGit("init")
+	runGit("config", "user.name", "test")
+	runGit("config", "user.email", "test@test.com")
+
+	// 初始提交一个已跟踪文件
+	os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("v1"), 0644)
+	runGit("add", "tracked.txt")
+	runGit("commit", "-m", "init")
+
+	// 弄脏工作区：修改已跟踪文件 + 添加未跟踪文件和目录（模拟部署产生的 hash 文件）
+	os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("modified"), 0644)
+	os.WriteFile(filepath.Join(dir, "untracked.688db72b.css"), []byte("u"), 0644)
+	os.MkdirAll(filepath.Join(dir, "untracked_dir"), 0755)
+	os.WriteFile(filepath.Join(dir, "untracked_dir", "inside.png"), []byte("i"), 0644)
+
+	dm := &DeployManager{
+		config:     DeployConfig{},
+		sourcePath: dir,
+		destPath:   "",
+		debugMode:  false,
+		cache:      loadDeployCache(filepath.Join(dir, ".deploy-cache.json")),
+	}
+	if err := dm.revertSrcGit(); err != nil {
+		t.Fatalf("revertSrcGit failed: %v", err)
+	}
+
+	// 已跟踪文件应恢复到提交版本
+	content, err := os.ReadFile(filepath.Join(dir, "tracked.txt"))
+	if err != nil {
+		t.Fatalf("failed to read tracked.txt: %v", err)
+	}
+	if string(content) != "v1" {
+		t.Errorf("tracked modification not reverted, got %q want %q", string(content), "v1")
+	}
+
+	// 未跟踪文件和目录应被移除
+	if fileExists(filepath.Join(dir, "untracked.688db72b.css")) {
+		t.Error("untracked file should be removed")
+	}
+	if fileExists(filepath.Join(dir, "untracked_dir")) {
+		t.Error("untracked dir should be removed")
+	}
+
+	// 工作区应为干净状态
+	statusOut := runGit("status", "--porcelain")
+	if strings.TrimSpace(string(statusOut)) != "" {
+		t.Errorf("workspace should be clean, got: %s", statusOut)
 	}
 }
