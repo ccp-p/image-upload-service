@@ -72,19 +72,21 @@ echo.
 echo [last] mode=%last_mode%  press Enter to reuse, or input r to reset
 echo.
 
+set "mode_input="
 set /p mode_input="Enter number default=%last_mode%: "
 if "!mode_input!"=="" set mode_input=!last_mode!
 
-REM Trim trailing spaces/CR from mode_input
-for /f "tokens=*" %%t in ("!mode_input!") do set "mode_input=%%t"
+REM Trim leading/trailing spaces and CR from mode_input
+for /f "tokens=1" %%t in ("!mode_input!") do set "mode_input=%%t"
 
 if /i "!mode_input!"=="r" (
     if exist "!cache_file!" del "!cache_file!"
     echo [info] cache reset, please re-select
     echo.
+    set "mode_input="
     set /p mode_input="Enter number default=1: "
     if "!mode_input!"=="" set mode_input=1
-    for /f "tokens=*" %%t in ("!mode_input!") do set "mode_input=%%t"
+    for /f "tokens=1" %%t in ("!mode_input!") do set "mode_input=%%t"
 )
 
 set "message_flag="
