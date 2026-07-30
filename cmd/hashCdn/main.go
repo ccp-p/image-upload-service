@@ -56,7 +56,8 @@ func isHomeEnv() bool {
 }
 
 // vcsSvnDelete 通知SVN删除文件（保留本地副本），消除 VersionManager 和 DeployManager 中的重复实现
-func vcsSvnDelete(filePath string, debugMode bool) {
+// 声明为 var 以便测试替换，验证删除旧 hash 文件时会通知 SVN。
+var vcsSvnDelete = func(filePath string, debugMode bool) {
 	if _, err := exec.LookPath("svn"); err != nil {
 		return
 	}

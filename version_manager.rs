@@ -87,6 +87,46 @@ fn vcs_git_add(file_path: &str, debug_mode: bool) {
     }
 }
 
+/// Runs `svn delete --keep-local <basename>` from the file's directory,
+/// mirroring Go's vcsSvnDelete. Best-effort and non-fatal: failures (e.g. not
+/// an SVN working copy, or svn missing from PATH) only log a warning so the
+/// delete flow never aborts. `--keep-local` leaves the file on disk so the
+/// subsequent remove_file is what actually removes it.
+pub fn vcs_svn_delete(file_path: &str, debug_mode: bool) {
+    let dir = path_dir(file_path);
+    let base = path_base(file_path);
+    // Use .output() (not .status()) so svn's stderr is captured and never
+    // leaks to the console, mirroring Go's CombinedOutput(). Failures are
+    // non-fatal and only logged in debug mode, matching Go's vcsSvnDelete.
+    let output = std::process::Command::new("svn")
+        .arg("delete")
+        .arg("--keep-local")
+        .arg(&base)
+        .current_dir(&dir)
+        .output();
+    match output {
+        Ok(s) if s.status.success() => {
+            if debug_mode {
+                println!("    📝 SVN delete: {}", base);
+            }
+        }
+        Ok(o) => {
+            if debug_mode {
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                println!("      ⚠️  SVN delete 失败: {} ({})", base, o.status);
+                println!("      Output: {}", combined.trim());
+            }
+        }
+        Err(_) => {
+            // svn not in PATH, silently skip (mirrors Go's exec.LookPath guard)
+        }
+    }
+}
+
 /// Full MD5 hex of a file's contents (no truncation).
 pub fn get_file_hash(file_path: &str) -> Result<String, String> {
     let data = std::fs::read(file_path).map_err(|e| e.to_string())?;
@@ -375,12 +415,14 @@ impl VersionManager {
         for entry in entries.flatten() {
             let filename = entry.file_name().to_string_lossy().to_string();
             if let Some(hash) = patterns::matches_hex_hash(&filename, basename, ext) {
-           if hash != current_hash {
-                   let _ = std::fs::remove_file(path_join(dir, &filename));
+                if hash != current_hash {
+                    let old_path = path_join(dir, &filename);
+                    vcs_svn_delete(&old_path, self.debug_mode);
+                    let _ = std::fs::remove_file(&old_path);
                     if is_js_or_css(&filename) {
                         println!("    🗑️  已删除: {}", filename);
                     }
-               }
+                }
             }
         }
         Ok(())

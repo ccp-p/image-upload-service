@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{is_home_env, DeployConfig};
 use crate::json::JsonValue;
 use crate::patterns::{matches_alnum_hash, remove_html_comments};
-use crate::version_manager::{copy_file, file_exists, get_file_hash, is_js_or_css};
+use crate::version_manager::{copy_file, file_exists, get_file_hash, is_js_or_css, vcs_svn_delete};
 
 // ---------------------------------------------------------------------------
 // Path helpers (local copies; version_manager has its own private set)
@@ -348,6 +348,8 @@ impl DeployManager {
                 }
                 if matches_alnum_hash(&name, &basename, ext_no_dot) {
                     let file_path = path_join(&dest_dir, &name);
+                    // Notify SVN first, then remove the local file (mirrors Go).
+                    vcs_svn_delete(&file_path, self.debug_mode);
                     if std::fs::remove_file(&file_path).is_ok() {
                         deleted += 1;
                     }

@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>签到赢惊喜</title>
+  <script src="https://cdn.jsdelivr.net/npm/amfe-flexible/index.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jquery/dist/jquery.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(180deg, #ffe8d6 0%, #fff5f0 35%, #f5f5f5 100%);
+      min-height: 100vh;
+    }
+    .page {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0.4rem 0.3rem;
+    }
+    .checkin-card {
+      display: flex;
+      justify-content: center;
+      width: 7.2rem;
+      margin-top: 0.3rem;
+      padding: 2.5rem 0.5rem 1.2rem;
+      background: #fff;
+      border-radius: 0.16rem;
+      box-shadow: 0 0.04rem 0.16rem rgba(0, 0, 0, 0.06);
+    }
+    .checkin-container {
+      position: relative;
+      width: 4.23rem;
+      height: 0.25rem;
+    }
+    .checkin-desc {
+      font-size: 0.12rem;
+      color: #999;
+      white-space: nowrap;
+      line-height: 0.25rem;
+      text-align: center;
+    }
+    .signin-title {
+      position: absolute;
+      left: 1.17rem;
+      top: -2.29rem;
+      width: 1.89rem;
+      height: 0.37rem;
+      font-size: 0.2rem;
+      font-weight: bold;
+      color: #e8483e;
+      text-align: center;
+      line-height: 0.37rem;
+      white-space: nowrap;
+    }
+    .makeup-remaining {
+      position: absolute;
+      left: 1.26rem;
+      top: -1.68rem;
+      width: 1.33rem;
+      height: 0.23rem;
+      font-size: 0.12rem;
+      color: #888;
+      text-align: center;
+      line-height: 0.23rem;
+      white-space: nowrap;
+    }
+    .signed-8, .signed-12, .signed-22 {
+      position: absolute;
+      width: 0.26rem;
+      height: 0.13rem;
+      font-size: 0.1rem;
+      color: #bbb;
+      text-align: center;
+      line-height: 0.13rem;
+      white-space: nowrap;
+    }
+    .signed-8 { left: -0.86rem; top: -0.55rem; }
+    .signed-12 { left: 0.09rem; top: -0.55rem; }
+    .signed-22 { left: 1.99rem; top: -0.56rem; }
+    .makeup-sign {
+      position: absolute;
+      left: 1.02rem;
+      top: -0.55rem;
+      width: 0.27rem;
+      height: 0.14rem;
+      font-size: 0.1rem;
+      color: #ff9500;
+      text-align: center;
+      line-height: 0.14rem;
+      white-space: nowrap;
+    }
+    .makeup-badge {
+      position: absolute;
+      left: 1.03rem;
+      top: -0.94rem;
+      width: 0.27rem;
+      height: 0.27rem;
+      font-size: 0.14rem;
+      font-weight: bold;
+      color: #fff;
+      text-align: center;
+      line-height: 0.27rem;
+      background: #ff9500;
+      border-radius: 50%;
+    }
+    .day-five, .day-six, .day-seven {
+      position: absolute;
+      width: 0.41rem;
+      height: 0.14rem;
+      font-size: 0.1rem;
+      color: #555;
+      text-align: center;
+      line-height: 0.14rem;
+      white-space: nowrap;
+    }
+    .day-five { left: 2.85rem; top: -0.56rem; }
+    .day-six { left: 3.79rem; top: -0.56rem; }
+    .day-seven { left: 4.75rem; top: -0.56rem; }
+    .signed-btn {
+      position: absolute;
+      left: 1.64rem;
+      top: 0.73rem;
+      width: 0.96rem;
+      height: 0.32rem;
+      font-size: 0.14rem;
+      font-weight: bold;
+      color: #fff;
+      text-align: center;
+      line-height: 0.32rem;
+      background: #e8483e;
+      border-radius: 0.16rem;
+      white-space: nowrap;
+    }
+    .checkin-desc, .signin-title, .makeup-remaining, .signed-8, .signed-12,
+    .makeup-sign, .makeup-badge, .signed-22, .day-five, .day-six,
+    .day-seven, .signed-btn {
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="checkin-card">
+      <div class="checkin-container">
+        <div class="checkin-desc">连续签到满1天、4天、7天，赢惊喜好礼</div>
+        <div class="signin-title">签到赢惊喜</div>
+        <div class="makeup-remaining">补签剩余3次</div>
+        <div class="signed-8">已签</div>
+        <div class="signed-12">已签</div>
+        <div class="makeup-sign">补签</div>
+        <div class="makeup-badge">补</div>
+        <div class="signed-22">已签</div>
+        <div class="day-five">第五天</div>
+        <div class="day-six">第六天</div>
+        <div class="day-seven">第七天</div>
+        <div class="signed-btn">已签到</div>
+      </div>
+    </div>
+  </div>
+  <script>
+    $(function() {
+      $(".checkin-desc").on("click", function(e) { console.log("连续签到满1天、4天、7天，赢惊喜好礼 clicked"); });
+      $(".signin-title").on("click", function(e) { console.log("签到赢惊喜 clicked"); });
+      $(".makeup-remaining").on("click", function(e) { console.log("补签剩余3次 clicked"); });
+      $(".signed-8").on("click", function(e) { console.log("已签 clicked"); });
+      $(".signed-12").on("click", function(e) { console.log("已签 clicked"); });
+      $(".makeup-sign").on("click", function(e) { console.log("补签 clicked"); });
+      $(".makeup-badge").on("click", function(e) { console.log("补 clicked"); });
+      $(".signed-22").on("click", function(e) { console.log("已签 clicked"); });
+      $(".day-five").on("click", function(e) { console.log("第五天 clicked"); });
+      $(".day-six").on("click", function(e) { console.log("第六天 clicked"); });
+      $(".day-seven").on("click", function(e) { console.log("第七天 clicked"); });
+      $(".signed-btn").on("click", function(e) { console.log("已签到 clicked"); });
+    });
+  </script>
+</body>
+</html>
