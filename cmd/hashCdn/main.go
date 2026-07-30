@@ -203,42 +203,6 @@ func NewVersionManager(config Config, debugMode bool) *VersionManager {
 	return vm
 }
 
-// runNodeCopyScript 执行Node.js复制脚本（路径从配置文件读取，回退到硬编码默认值）
-func (vm *VersionManager) runNodeCopyScript() {
-	var scriptPath string
-	if isHomeEnv() {
-		fmt.Println("🏠 当前环境: Home")
-		scriptPath = vm.config.Deploy.HomeNodeScript
-		if scriptPath == "" {
-			scriptPath = `D:\self_project\js_project\miaowei\test\auto\normal.js`
-		}
-	} else {
-		fmt.Println("🏢 当前环境: Office")
-		scriptPath = vm.config.Deploy.CompanyNodeScript
-		if scriptPath == "" {
-			scriptPath = `d:\project\my_web_project\web\train\miaov-disk\Cloud_disk\test\auto\normal.js`
-		}
-	}
-
-	fmt.Printf("🚀 执行部署脚本: node %s copy\n", scriptPath)
-
-	// 检查 node 是否存在
-	if _, err := exec.LookPath("node"); err != nil {
-		fmt.Printf("⚠️  未找到 node 命令，跳过脚本执行\n")
-		return
-	}
-
-	cmd := exec.Command("node", scriptPath, "copy")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("❌ 脚本执行失败: %v\n", err)
-	} else {
-		fmt.Println("✅ 脚本执行成功")
-	}
-}
-
 // shouldProcessComponent 检查是否应该处理指定组件
 func (vm *VersionManager) shouldProcessComponent(componentPath string) bool {
 	// 如果没有配置包含的组件列表，则处理所有组件
@@ -263,20 +227,10 @@ func (vm *VersionManager) shouldProcessComponent(componentPath string) bool {
 
 // calculateFileHash 计算文件hash
 func (vm *VersionManager) calculateFileHash(filePath string) (string, error) {
-	file, err := os.Open(filePath)
+	hashString, err := getFileHash(filePath)
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
-
-	hash := md5.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
-	}
-
-	hashBytes := hash.Sum(nil)
-	hashString := hex.EncodeToString(hashBytes)
-
 	if vm.config.HashLength > 0 && vm.config.HashLength < len(hashString) {
 		return hashString[:vm.config.HashLength], nil
 	}
@@ -610,6 +564,53 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
+}
+
+// fileCopyResult 文件复制结果
+type fileCopyResult struct {
+	copied  int
+	skipped int
+	failed  int
+}
+
+// runConcurrent 并发执行任务并收集结果
+func runConcurrent[T any](items []T, maxWorkers int, handler func(T) fileCopyResult) []fileCopyResult {
+	if len(items) == 0 {
+		return nil
+	}
+	if maxWorkers > len(items) {
+		maxWorkers = len(items)
+	}
+
+	jobs := make(chan T, len(items))
+	results := make(chan fileCopyResult, len(items))
+
+	var wg sync.WaitGroup
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range jobs {
+				results <- handler(item)
+			}
+		}()
+	}
+
+	for _, item := range items {
+		jobs <- item
+	}
+	close(jobs)
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var all []fileCopyResult
+	for r := range results {
+		all = append(all, r)
+	}
+	return all
 }
 
 // renameFileWithHash 重命名文件（如果hash改变）
@@ -1364,11 +1365,9 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 		return err
 	}
 
-	// 执行部署脚本（如果启用）
+	// 执行部署（如果启用）
 	if vm.config.Deploy.Enabled {
 		vm.runDeploy()
-	} else {
-		vm.runNodeCopyScript()
 	}
 
 	return nil
@@ -1794,58 +1793,21 @@ func (dm *DeployManager) handleWildcardPath(wildcardPath string) (int, int, erro
 	if workerCount > 4 {
 		workerCount = 4
 	}
-	if workerCount > len(tasks) {
-		workerCount = len(tasks)
-	}
-	if workerCount == 0 {
-		return 0, 0, nil
-	}
+	results := runConcurrent(tasks, workerCount, func(t fileTask) fileCopyResult {
+		copied, skipped, err := dm.copyFileWithVersions(t.relToSource, t.destPath)
+		failed := 0
+		if err != nil {
+			fmt.Printf("⚠️  处理失败: %s - %v\n", t.destPath, err)
+			failed = 1
+		}
+		return fileCopyResult{copied: copied, skipped: skipped, failed: failed}
+	})
 
-	jobCh := make(chan fileTask, len(tasks))
-	resultCh := make(chan struct {
-		copied  int
-		skipped int
-		failed  bool
-	}, len(tasks))
-
-	var wg sync.WaitGroup
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for t := range jobCh {
-				copied, skipped, err := dm.copyFileWithVersions(t.relToSource, t.destPath)
-				failed := false
-				if err != nil {
-					fmt.Printf("⚠️  处理失败: %s - %v\n", t.destPath, err)
-					failed = true
-				}
-				resultCh <- struct {
-					copied  int
-					skipped int
-					failed  bool
-				}{copied, skipped, failed}
-			}
-		}()
-	}
-
-	for _, t := range tasks {
-		jobCh <- t
-	}
-	close(jobCh)
-
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	totalCopied := 0
-	totalSkipped := 0
-	for r := range resultCh {
+	var totalCopied, totalSkipped int
+	for _, r := range results {
 		totalCopied += r.copied
 		totalSkipped += r.skipped
 	}
-
 	return totalCopied, totalSkipped, nil
 }
 
@@ -1927,26 +1889,19 @@ func (dm *DeployManager) svnAddAll() error {
 	return nil
 }
 
-// getLatestGitCommit 获取Git最新提交信息
-func (dm *DeployManager) getLatestGitCommit() (string, string, error) {
-	if !isGitRepo(dm.sourcePath) {
-		return "", "", fmt.Errorf("源路径不是Git仓库")
+// queryGitLatestCommit 查询指定目录的Git最新提交信息（可按author过滤）
+func queryGitLatestCommit(dir string, authors []string) (string, string, error) {
+	if !isGitRepo(dir) {
+		return "", "", fmt.Errorf("目录不是Git仓库: %s", dir)
 	}
 
-	authors := dm.config.GitAuthors
-	if len(authors) == 0 {
-		authors = []string{"chenchengpeng", "ccp"}
-	}
-
-	// 构建author过滤参数
 	args := []string{"log", "-1", "--pretty=format:%h|%s"}
 	for _, author := range authors {
 		args = append(args, "--author="+author)
 	}
 
 	cmd := exec.Command("git", args...)
-	cmd.Dir = dm.sourcePath
-
+	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
 		return "", "", err
@@ -1956,8 +1911,16 @@ func (dm *DeployManager) getLatestGitCommit() (string, string, error) {
 	if len(parts) != 2 {
 		return "", "", fmt.Errorf("无法解析Git提交信息")
 	}
-
 	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
+}
+
+// getLatestGitCommit 获取Git最新提交信息
+func (dm *DeployManager) getLatestGitCommit() (string, string, error) {
+	authors := dm.config.GitAuthors
+	if len(authors) == 0 {
+		authors = []string{"chenchengpeng", "ccp"}
+	}
+	return queryGitLatestCommit(dm.sourcePath, authors)
 }
 
 // svnCommit 提交SVN更改
@@ -2048,6 +2011,20 @@ func (dm *DeployManager) revertAllSvn() error {
 	return nil
 }
 
+// openFolderInOS 跨平台打开文件夹
+func openFolderInOS(path string) error {
+	var cmd *exec.Cmd
+	switch {
+	case isWindows():
+		cmd = exec.Command("explorer", path)
+	case isDarwin():
+		cmd = exec.Command("open", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	return cmd.Start()
+}
+
 // openFolder 打开文件夹（避免重复打开）
 func (dm *DeployManager) openFolder() {
 	if dm.folderOpened {
@@ -2059,17 +2036,7 @@ func (dm *DeployManager) openFolder() {
 		return
 	}
 
-	var cmd *exec.Cmd
-	switch {
-	case isWindows():
-		cmd = exec.Command("explorer", dm.destPath)
-	case isDarwin():
-		cmd = exec.Command("open", dm.destPath)
-	default:
-		cmd = exec.Command("xdg-open", dm.destPath)
-	}
-
-	if err := cmd.Start(); err != nil {
+	if err := openFolderInOS(dm.destPath); err != nil {
 		fmt.Printf("❌ 打开文件夹失败: %v\n", err)
 		fmt.Printf("📁 请手动打开: %s\n", dm.destPath)
 	} else {
@@ -2115,63 +2082,32 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 
 	fmt.Println("📦 开始复制文件...")
 
-	totalCopied := 0
-	totalSkipped := 0
-	totalFailed := 0
-
 	// 并发处理文件，提高复制效率
 	workerCount := runtime.NumCPU()
 	if workerCount > 8 {
 		workerCount = 8
 	}
 	filePaths := dm.config.FilePaths
-	jobs := make(chan string, len(filePaths))
-	results := make(chan struct {
-		copied  int
-		skipped int
-		failed  int
-	}, len(filePaths))
+	results := runConcurrent(filePaths, workerCount, func(filePath string) fileCopyResult {
+		var copied, skipped int
+		var err error
+		if strings.Contains(filePath, "*") {
+			copied, skipped, err = dm.handleWildcardPath(filePath)
+		} else {
+			sourcePath := strings.TrimPrefix(filePath, "/")
+			destPath := filepath.Join(dm.destPath, sourcePath)
+			copied, skipped, err = dm.copyFileWithVersions(sourcePath, destPath)
+		}
+		failed := 0
+		if err != nil {
+			fmt.Printf("⚠️  处理失败: %s - %v\n", filePath, err)
+			failed = 1
+		}
+		return fileCopyResult{copied: copied, skipped: skipped, failed: failed}
+	})
 
-	var wg sync.WaitGroup
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for filePath := range jobs {
-				var copied, skipped int
-				var err error
-				if strings.Contains(filePath, "*") {
-					copied, skipped, err = dm.handleWildcardPath(filePath)
-				} else {
-					sourcePath := strings.TrimPrefix(filePath, "/")
-					destPath := filepath.Join(dm.destPath, sourcePath)
-					copied, skipped, err = dm.copyFileWithVersions(sourcePath, destPath)
-				}
-				failed := 0
-				if err != nil {
-					fmt.Printf("⚠️  处理失败: %s - %v\n", filePath, err)
-					failed = 1
-				}
-				results <- struct {
-					copied  int
-					skipped int
-					failed  int
-				}{copied, skipped, failed}
-			}
-		}()
-	}
-
-	for _, fp := range filePaths {
-		jobs <- fp
-	}
-	close(jobs)
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	for r := range results {
+	var totalCopied, totalSkipped, totalFailed int
+	for _, r := range results {
 		totalCopied += r.copied
 		totalSkipped += r.skipped
 		totalFailed += r.failed
@@ -2491,24 +2427,7 @@ func (vm *VersionManager) gitCommitAndPushAfterRollback(htmlPath string) error {
 
 // getLatestGitCommitForRollback 获取指定目录的最新git提交hash
 func (vm *VersionManager) getLatestGitCommitForRollback(dir string) (string, string, error) {
-	if !isGitRepo(dir) {
-		return "", "", fmt.Errorf("目录不是Git仓库: %s", dir)
-	}
-
-	cmd := exec.Command("git", "log", "-1", "--pretty=format:%h|%s")
-	cmd.Dir = dir
-
-	output, err := cmd.Output()
-	if err != nil {
-		return "", "", err
-	}
-
-	parts := strings.SplitN(string(output), "|", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("无法解析Git提交信息")
-	}
-
-	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
+	return queryGitLatestCommit(dir, nil)
 }
 
 // openFolder 打开文件夹（避免重复打开）
@@ -2525,17 +2444,7 @@ func (vm *VersionManager) openFolder(folderPath string) {
 		return
 	}
 
-	var cmd *exec.Cmd
-	switch {
-	case isWindows():
-		cmd = exec.Command("explorer", folderPath)
-	case isDarwin():
-		cmd = exec.Command("open", folderPath)
-	default:
-		cmd = exec.Command("xdg-open", folderPath)
-	}
-
-	if err := cmd.Start(); err != nil {
+	if err := openFolderInOS(folderPath); err != nil {
 		fmt.Printf("❌ 打开文件夹失败: %v\n", err)
 		fmt.Printf("📁 请手动打开: %s\n", folderPath)
 	} else {
@@ -2546,13 +2455,12 @@ func (vm *VersionManager) openFolder(folderPath string) {
 
 // isWindows 检查是否Windows系统
 func isWindows() bool {
-	return os.PathSeparator == '\\' && os.PathListSeparator == ';'
+	return runtime.GOOS == "windows"
 }
 
 // isDarwin 检查是否macOS系统
 func isDarwin() bool {
-	// 简单检查，实际可以用runtime.GOOS
-	return false
+	return runtime.GOOS == "darwin"
 }
 
 // loadConfig 加载配置文件
