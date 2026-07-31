@@ -4,6 +4,8 @@
 $targetUrl   = 'http://192.168.241.10:3000'
 $pushPlusUrl = 'https://www.pushplus.plus/send'
 $found       = $false
+# State file shared with the watchdog so it can record/pick up the last successful tunnel URL.
+$stateFile   = Join-Path $PSScriptRoot 'tunnel-state.json'
 
 & 'D:\download\cloudflared.exe' tunnel --url $targetUrl 2>&1 | ForEach-Object {
     $line = $_.ToString()
@@ -11,6 +13,13 @@ $found       = $false
     if (-not $found -and $line -match 'https://[a-z0-9-]+\.trycloudflare\.com') {
         $found = $true
         $url = $matches[0]
+        try {
+            $state = [ordered]@{ url = $url; targetUrl = $targetUrl; recordedAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') }
+            [IO.File]::WriteAllText($stateFile, ($state | ConvertTo-Json))
+            Write-Host "Tunnel URL saved to state file: $stateFile" -ForegroundColor Cyan
+        } catch {
+            Write-Host "Failed to save tunnel state: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
         Set-Clipboard -Value $url
         Write-Host ''
         Write-Host "Tunnel URL copied to clipboard: $url" -ForegroundColor Green

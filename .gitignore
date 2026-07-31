@@ -25,3 +25,8 @@ smartDeploy.exe
 # douyin-dl build artifacts & secrets
 **/douyin-dl.exe
 cmd/douyin-dl/cookies.txt
+cookies.txt
+# cloudflared tunnel runtime artifacts
+/cmd/cloudflared-tunnel/tunnel-state.json
+/cmd/cloudflared-tunnel/cloudflared-watchdog.log
+/cmd/cloudflared-tunnel/cloudflared-watchdog.lock

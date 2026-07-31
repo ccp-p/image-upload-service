@@ -4,11 +4,15 @@ go 1.24.0
 
 toolchain go1.24.1
 
-require github.com/fsnotify/fsnotify v1.9.0
+require (
+	github.com/fsnotify/fsnotify v1.9.0
+	github.com/refraction-networking/utls v1.8.2
+)
 
 require (
 	fyne.io/systray v1.12.0 // indirect
 	github.com/BurntSushi/toml v1.5.0 // indirect
+	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

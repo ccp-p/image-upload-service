@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -23,15 +24,25 @@ func fetchVideoDetail(c *Client, awemeID string) (map[string]interface{}, error)
 		signed, ua := c.signedURL("/aweme/v1/web/aweme/detail/", params)
 		body, err := c.getJSON(signed, ua)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "  [aid=%s] request error: %v\n", aid, err)
+			if len(body) > 0 {
+				preview := body
+				if len(preview) > 300 {
+					preview = preview[:300]
+				}
+				fmt.Fprintf(os.Stderr, "  [aid=%s] response body: %s\n", aid, string(preview))
+			}
 			continue
 		}
 		var raw map[string]interface{}
 		if err := json.Unmarshal(body, &raw); err != nil {
+			fmt.Fprintf(os.Stderr, "  [aid=%s] json parse error: %v\n", aid, err)
 			continue
 		}
 		if detail, ok := raw["aweme_detail"].(map[string]interface{}); ok && detail != nil {
 			return detail, nil
 		}
+		fmt.Fprintf(os.Stderr, "  [aid=%s] no aweme_detail (status_code=%v)\n", aid, raw["status_code"])
 	}
 	return nil, fmt.Errorf("no aweme_detail for %s", awemeID)
 }
