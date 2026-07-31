@@ -1,9 +1,9 @@
 {
   "name": "smartdeploy",
   "displayName": "SmartDeploy",
-  "description": "Right-click to upload files to your server via SmartDeploy (multi-file support)",
-  "version": "0.2.0",
-  "publisher": "smartdeploy",
+ "description": "Right-click to upload files to your server via SmartDeploy (multi-file support)",
+  "version": "0.3.0",
+ "publisher": "smartdeploy",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -25,11 +25,15 @@
         "title": "SmartDeploy: Upload Current File"
       },
       {
-        "command": "smartdeploy.uploadAllOpenFiles",
-        "title": "SmartDeploy: Upload All Open Files"
-      },
+       "command": "smartdeploy.uploadAllOpenFiles",
+       "title": "SmartDeploy: Upload All Open Files"
+     },
       {
-        "command": "smartdeploy.checkStatus",
+        "command": "smartdeploy.uploadGitChangedFiles",
+        "title": "SmartDeploy: Upload All Changed Files"
+      },
+     {
+       "command": "smartdeploy.checkStatus",
         "title": "SmartDeploy: Check Connection Status"
       }
     ],
@@ -63,15 +67,29 @@
           "group": "navigation@101"
         }
       ],
-      "scm/resourceState/context": [
+     "scm/resourceState/context": [
+       {
+         "command": "smartdeploy.uploadFile",
+         "group": "navigation@100"
+        },
         {
-          "command": "smartdeploy.uploadFile",
-          "group": "navigation@100"
+          "command": "smartdeploy.uploadGitChangedFiles",
+          "group": "navigation@101"
         }
       ],
       "scm/resourceFolder/context": [
         {
           "command": "smartdeploy.uploadFile",
+          "group": "navigation@100"
+        },
+        {
+          "command": "smartdeploy.uploadGitChangedFiles",
+          "group": "navigation@101"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "smartdeploy.uploadGitChangedFiles",
           "group": "navigation@100"
         }
       ]

@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as http from "http";
 import * as path from "path";
 import * as fs from "fs";
+import { execFile } from "child_process";
 
 function getApiUrl(): string {
     const port = vscode.workspace.getConfiguration("smartdeploy").get<number>("apiPort", 9721);
@@ -194,6 +195,70 @@ function resolveUris(args: any[]): string[] {
     return filePaths;
 }
 
+// runGit executes git in cwd and resolves with stdout. It prefers the path
+// configured for VS Code's built-in git (git.path), falling back to "git" on
+// PATH; on Windows it runs through a shell so git.cmd resolves.
+function runGit(args: string[], cwd: string): Promise<string> {
+    const configured = vscode.workspace.getConfiguration("git").get<string>("path");
+    const git = configured && configured.length > 0 ? configured : "git";
+    return new Promise((resolve, reject) => {
+        execFile(git, args, {
+            cwd,
+            maxBuffer: 64 * 1024 * 1024,
+            shell: process.platform === "win32",
+        }, (err, stdout) => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(stdout);
+            }
+        });
+    });
+}
+
+// collectGitChangedFiles returns absolute paths of files git reports as changed
+// (modified, staged, added, untracked) in the repo at cwd. Deletions are skipped
+// (the file no longer exists); renames resolve to whichever path still exists.
+async function collectGitChangedFiles(cwd: string): Promise<string[]> {
+    const out = await runGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd);
+    const files: string[] = [];
+    const seen = new Set<string>();
+    const tokens = out.split("\0");
+    let i = 0;
+    while (i < tokens.length) {
+        const entry = tokens[i++];
+        if (entry.length === 0) {
+            continue;
+        }
+        // The primary path follows the "XY " status prefix.
+        const candidates: string[] = [entry.substring(3)];
+        // Renames/copies carry a second NUL-separated path (the source).
+        const x = entry.charAt(0);
+        const y = entry.charAt(1);
+        if (x === "R" || x === "C" || y === "R" || y === "C") {
+            candidates.push(tokens[i++]);
+        }
+        for (const rel of candidates) {
+            if (!rel) {
+                continue;
+            }
+            const full = path.isAbsolute(rel) ? rel : path.join(cwd, rel);
+            if (seen.has(full)) {
+                continue;
+            }
+            try {
+                if (fs.statSync(full).isFile()) {
+                    seen.add(full);
+                    files.push(full);
+                }
+            } catch {
+                // deleted or unreadable - skip
+            }
+        }
+    }
+    return files;
+}
+
 function showResult(result: UploadResponse, totalFiles: number) {
     if (result.uploaded > 0 && result.failed === 0) {
         const label = totalFiles === 1
@@ -267,6 +332,49 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // Upload every file git reports as changed across all workspace folders.
+    // Reachable from the Source Control view title menu and the changed-file
+    // right-click menu.
+    const uploadGitChangedCmd = vscode.commands.registerCommand("smartdeploy.uploadGitChangedFiles", async () => {
+        const folders = vscode.workspace.workspaceFolders;
+        if (!folders || folders.length === 0) {
+            vscode.window.showWarningMessage("SmartDeploy: No workspace folder open");
+            return;
+        }
+        const filePaths: string[] = [];
+        const seen = new Set<string>();
+        let foundRepo = false;
+        for (const folder of folders) {
+            const cwd = folder.uri.fsPath;
+            try {
+                const changed = await collectGitChangedFiles(cwd);
+                foundRepo = true;
+                for (const f of changed) {
+                    if (!seen.has(f)) {
+                        seen.add(f);
+                        filePaths.push(f);
+                    }
+                }
+            } catch {
+                // not a git repo, or git unavailable - skip this folder
+            }
+        }
+        if (!foundRepo) {
+            vscode.window.showWarningMessage("SmartDeploy: No git repository found in the workspace");
+            return;
+        }
+        if (filePaths.length === 0) {
+            vscode.window.showInformationMessage("SmartDeploy: No changed files to upload");
+            return;
+        }
+        try {
+            const result = await uploadFiles(filePaths);
+            showResult(result, filePaths.length);
+        } catch (err: any) {
+            vscode.window.showErrorMessage(`SmartDeploy: ${err.message}`);
+        }
+    });
+
     const statusCmd = vscode.commands.registerCommand("smartdeploy.checkStatus", async () => {
         try {
             const status = await checkStatus();
@@ -299,7 +407,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(uploadCmd, uploadActiveCmd, uploadAllOpenCmd, statusCmd, autoUploadOnSave);
+    context.subscriptions.push(uploadCmd, uploadActiveCmd, uploadAllOpenCmd, uploadGitChangedCmd, statusCmd, autoUploadOnSave);
 }
 
 export function deactivate() {}
