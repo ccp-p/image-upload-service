@@ -1,5 +1,5 @@
 {
-  "totalCount": 515,
+  "totalCount": 516,
   "lastUpdate": "0001-01-01T00:00:00Z",
   "mapping": {
     "afterGetEquityPop.png": [
@@ -1431,7 +1431,7 @@
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\riding-model-bg.png",
         "width": 652,
         "height": 709,
-        "size": 41868
+        "size": 44604
       }
     ],
     "rule_bg.png": [
@@ -1452,6 +1452,14 @@
         "width": 650,
         "height": 4475,
         "size": 217451
+      }
+    ],
+    "rule_bg_8.png": [
+      {
+        "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\rule_bg_8.png",
+        "width": 650,
+        "height": 4795,
+        "size": 244601
       }
     ],
     "rule_bg_act.png": [
@@ -3251,9 +3259,9 @@
     "xdrmgtkqb.png": [
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\new\\xdrmgtkqb.png",
-        "width": 420,
-        "height": 360,
-        "size": 39203
+        "width": 655,
+        "height": 200,
+        "size": 34522
       }
     ],
     "xdrmgydbj.png": [
@@ -3777,9 +3785,9 @@
       },
       {
         "path": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap\\images\\xdrNormal\\202505\\new\\xdrydyppyk.png",
-        "width": 1310,
-        "height": 400,
-        "size": 102102
+        "width": 210,
+        "height": 180,
+        "size": 10797
       }
     ],
     "xdryht10.png": [

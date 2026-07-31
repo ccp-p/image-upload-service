@@ -1,14 +1,21 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 const (
@@ -34,8 +41,50 @@ func NewClient(cookieStr string) *Client {
 	if c.msToken == "" {
 		c.msToken = genFakeMsToken()
 	}
-	c.http = &http.Client{Timeout: 30 * time.Second}
+	jar, _ := cookiejar.New(nil)
+	c.http = &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: newChromeTransport(),
+		Jar:       jar,
+	}
+	// Seed the jar for both Douyin domains so redirects carry cookies.
+	for _, host := range []string{"https://www.douyin.com", "https://v.douyin.com"} {
+		u, _ := url.Parse(host)
+		var cs []*http.Cookie
+		for k, v := range cookies {
+			cs = append(cs, &http.Cookie{Name: k, Value: v})
+		}
+		jar.SetCookies(u, cs)
+	}
 	return c
+}
+
+// newChromeTransport returns an *http.Transport whose TLS handshakes use
+// uTLS to mimic Chrome's JA3 fingerprint. Douyin's CDN drops connections
+// from Go's default crypto/tls ClientHello, so this is essential.
+func newChromeTransport() *http.Transport {
+	tr := &http.Transport{
+		MaxIdleConns:        20,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 15 * time.Second,
+		ForceAttemptHTTP2:   false,
+	}
+	tr.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(addr)
+		dialer := &net.Dialer{Timeout: 15 * time.Second}
+		rawConn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		config := &utls.Config{ServerName: host}
+		uconn := utls.UClient(rawConn, config, utls.HelloChrome_Auto)
+		if err := uconn.HandshakeContext(ctx); err != nil {
+			rawConn.Close()
+			return nil, err
+		}
+		return uconn, nil
+	}
+	return tr
 }
 
 func parseCookieStr(s string) map[string]string {
@@ -121,7 +170,25 @@ func (c *Client) signPlayURL(rawURL string) (string, string) {
 	return parsed.Scheme + "://" + parsed.Host + parsed.Path + "?" + signed, ua
 }
 
+// setBrowserHeaders sets common Chrome navigation headers on a request.
+func setBrowserHeaders(req *http.Request, ua string) {
+	req.Header.Set("User-Agent", ua)
+	req.Header.Set("Referer", "https://www.douyin.com/?recommend=1")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="139", "Not?A_Brand";v="24", "Google Chrome";v="139"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+}
+
 // getJSON performs a signed GET and returns the raw response body.
+// Cookies are sent automatically via the client's cookie jar.
 func (c *Client) getJSON(signedURL, ua string) ([]byte, error) {
 	req, err := http.NewRequest("GET", signedURL, nil)
 	if err != nil {
@@ -131,12 +198,11 @@ func (c *Client) getJSON(signedURL, ua string) ([]byte, error) {
 	req.Header.Set("Referer", "https://www.douyin.com/?recommend=1")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
-	for k, v := range c.cookies {
-		req.AddCookie(&http.Cookie{Name: k, Value: v})
-	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		// Fallback to PowerShell when Go's TLS is blocked by the CDN.
+		fmt.Fprintf(os.Stderr, "  Go HTTP failed (%v), trying PowerShell...\n", err)
+		return c.getJSONViaPowerShell(signedURL, ua)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
@@ -149,17 +215,81 @@ func (c *Client) getJSON(signedURL, ua string) ([]byte, error) {
 	return body, nil
 }
 
-// resolveShortURL follows redirects on a v.douyin.com short link and returns
-// the final URL. Mirrors DouyinAPIClient.resolve_short_url.
-func (c *Client) resolveShortURL(shortURL string) (string, error) {
-	checkClient := &http.Client{Timeout: 15 * time.Second}
-	req, _ := http.NewRequest("GET", shortURL, nil)
-	req.Header.Set("User-Agent", c.userAgent)
-	resp, err := checkClient.Do(req)
-	if err != nil {
-		return "", err
+// cookieString reconstructs the cookie header from the parsed map.
+func (c *Client) cookieString() string {
+	var parts []string
+	for k, v := range c.cookies {
+		parts = append(parts, k+"="+v)
 	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-	return resp.Request.URL.String(), nil
+	return strings.Join(parts, "; ")
+}
+
+// getJSONViaPowerShell uses PowerShell's Invoke-WebRequest as a fallback when
+// Go's TLS connections are blocked by Douyin's CDN.
+func (c *Client) getJSONViaPowerShell(signedURL, ua string) ([]byte, error) {
+	ck := strings.ReplaceAll(c.cookieString(), "'", "''")
+	u := strings.ReplaceAll(signedURL, "'", "''")
+	a := strings.ReplaceAll(ua, "'", "''")
+	ps := fmt.Sprintf(
+		`$ErrorActionPreference='Stop';$s=New-Object Microsoft.PowerShell.Commands.WebRequestSession;$ck='%s';foreach($c in $ck.Split(';')|%%{$_.Trim()}){if($c -match '^([^=]+)=(.*)$'){$s.Cookies.Add((New-Object System.Net.Cookie($Matches[1],$Matches[2],'/','.douyin.com')))}};$r=Invoke-WebRequest -Uri '%s' -WebSession $s -UseBasicParsing -TimeoutSec 20 -Headers @{'User-Agent'='%s';'Referer'='https://www.douyin.com/?recommend=1';'Accept'='*/*'};[Console]::Write($r.Content)`,
+		ck, u, a,
+	)
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", ps)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("powershell: %s", string(ee.Stderr))
+		}
+		return nil, fmt.Errorf("powershell: %w", err)
+	}
+	return out, nil
+}
+
+// resolveShortURL follows redirects on a v.douyin.com short link and returns
+// the final URL. Tries the Go HTTP client (with uTLS) first, then falls back
+// to PowerShell's Invoke-WebRequest on Windows if the connection is blocked.
+func (c *Client) resolveShortURL(shortURL string) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		req, err := http.NewRequest("GET", shortURL, nil)
+		if err != nil {
+			return "", err
+		}
+		setBrowserHeaders(req, c.userAgent)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
+		}
+		return resp.Request.URL.String(), nil
+	}
+	if lastErr != nil {
+		fmt.Fprintf(os.Stderr, "  Go HTTP failed (%v), trying PowerShell fallback...\n", lastErr)
+	}
+	return c.resolveShortURLViaPowerShell(shortURL)
+}
+
+// resolveShortURLViaPowerShell uses PowerShell's Invoke-WebRequest to follow
+// redirects. .NET's HTTP stack sometimes succeeds where Go's TLS fails.
+func (c *Client) resolveShortURLViaPowerShell(shortURL string) (string, error) {
+	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+		fmt.Sprintf(
+			`try { $r = Invoke-WebRequest -Uri '%s' -MaximumRedirection 10 -UseBasicParsing -TimeoutSec 15; Write-Output $r.BaseResponse.ResponseUri.AbsoluteUri } catch { Write-Error $_.Exception.Message; exit 1 }`,
+			shortURL,
+		),
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("powershell fallback failed: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
