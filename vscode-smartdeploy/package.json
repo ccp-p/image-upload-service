@@ -46,6 +46,33 @@
           "command": "smartdeploy.uploadFile",
           "when": "resourceScheme == file",
           "group": "navigation@100"
+        },
+        {
+          "command": "smartdeploy.uploadAllOpenFiles",
+          "group": "navigation@101"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "smartdeploy.uploadFile",
+          "when": "resourceScheme == file",
+          "group": "navigation@100"
+        },
+        {
+          "command": "smartdeploy.uploadAllOpenFiles",
+          "group": "navigation@101"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "smartdeploy.uploadFile",
+          "group": "navigation@100"
+        }
+      ],
+      "scm/resourceFolder/context": [
+        {
+          "command": "smartdeploy.uploadFile",
+          "group": "navigation@100"
         }
       ]
     },
@@ -71,8 +98,9 @@
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
-    "@types/vscode": "^1.80.0",
     "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^2.22.0",
     "typescript": "^5.0.0"
   }
 }

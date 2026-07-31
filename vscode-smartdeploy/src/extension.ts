@@ -124,25 +124,40 @@ function expandDirectory(dirPath: string): string[] {
     return results;
 }
 
-// resolveUris accepts the arguments VSCode passes to an explorer/editor
-// context menu command. These can be: a single Uri, an array of Uris,
-// or undefined (fall back to the active editor). It returns a flat list
-// of file paths, expanding any directories recursively.
+// resolveUris accepts the arguments VSCode passes to an explorer/editor/tab/SCM
+// context menu command. These can be: a single Uri, an array of Uris, a single
+// scm.ResourceState (which exposes `resourceUri`), an array of them, or a Tab
+// object (whose `input.uri` is the resource). It returns a flat, de-duplicated
+// list of file paths, expanding any directories recursively.
 function resolveUris(args: any[]): string[] {
     const uris: vscode.Uri[] = [];
-    for (const arg of args) {
-        if (arg instanceof vscode.Uri) {
-            uris.push(arg);
-        } else if (Array.isArray(arg)) {
-            for (const a of arg) {
-                if (a instanceof vscode.Uri) {
-                    uris.push(a);
-                }
+    const collect = (item: any): void => {
+        if (!item) {
+            return;
+        }
+        if (item instanceof vscode.Uri) {
+            uris.push(item);
+        } else if (Array.isArray(item)) {
+            for (const i of item) {
+                collect(i);
+            }
+        } else if (typeof item === "object") {
+            // SCM resource states (Git panel) expose `resourceUri`.
+            if (item.resourceUri instanceof vscode.Uri) {
+                uris.push(item.resourceUri);
+            } else if (item.uri instanceof vscode.Uri) {
+                uris.push(item.uri);
+            } else if (item.input && item.input.uri instanceof vscode.Uri) {
+                // Tab object passed by editor/title/context in some versions.
+                uris.push(item.input.uri);
             }
         }
+    };
+    for (const arg of args) {
+        collect(arg);
     }
 
-    // Fall back to active editor if no URIs from explorer.
+    // Fall back to active editor if no URIs from the invoking context.
     if (uris.length === 0) {
         const active = vscode.window.activeTextEditor;
         if (active) {
@@ -150,19 +165,29 @@ function resolveUris(args: any[]): string[] {
         }
     }
 
-    // Expand directories and collect files.
+    // Expand directories and collect files, de-duplicating by path.
     const filePaths: string[] = [];
+    const seen = new Set<string>();
     for (const uri of uris) {
         const fsPath = uri.fsPath;
+        if (seen.has(fsPath)) {
+            continue;
+        }
         try {
             const stat = fs.statSync(fsPath);
             if (stat.isDirectory()) {
-                filePaths.push(...expandDirectory(fsPath));
+                for (const f of expandDirectory(fsPath)) {
+                    if (!seen.has(f)) {
+                        seen.add(f);
+                        filePaths.push(f);
+                    }
+                }
             } else if (stat.isFile()) {
+                seen.add(fsPath);
                 filePaths.push(fsPath);
             }
         } catch {
-            // skip unreadable
+            // skip unreadable / non-file-scheme entries
         }
     }
 
