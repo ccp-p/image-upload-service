@@ -4,6 +4,17 @@ import * as path from "path";
 import * as fs from "fs";
 import { execFile } from "child_process";
 
+// Debug log: append upload request/response details to a temp file so that
+// failures which never surface a notification can still be diagnosed.
+// Enabled via the smartdeploy.debugLog setting.
+function debugLog(msg: string) {
+    const enabled = vscode.workspace.getConfiguration("smartdeploy").get<boolean>("debugLog", false);
+    if (!enabled) return;
+    const logPath = path.join(require("os").tmpdir(), "smartdeploy-debug.log");
+    const line = `${new Date().toISOString()} ${msg}\n`;
+    try { fs.appendFileSync(logPath, line); } catch { /* ignore */ }
+}
+
 function getApiUrl(): string {
     const port = vscode.workspace.getConfiguration("smartdeploy").get<number>("apiPort", 9721);
     return `http://127.0.0.1:${port}`;
@@ -30,6 +41,7 @@ function uploadFiles(filePaths: string[]): Promise<UploadResponse> {
     return new Promise((resolve, reject) => {
         const url = getApiUrl() + "/upload";
         const body = JSON.stringify({ paths: filePaths });
+        debugLog(`POST /upload ${filePaths.length} files: ${JSON.stringify(filePaths)}`);
 
         const req = http.request(url, {
             method: "POST",
@@ -42,6 +54,7 @@ function uploadFiles(filePaths: string[]): Promise<UploadResponse> {
             let data = "";
             res.on("data", (chunk) => data += chunk);
             res.on("end", () => {
+                debugLog(`/upload response: status=${res.statusCode} body=${data}`);
                 if (res.statusCode === undefined) {
                     reject(new Error("No status code"));
                     return;
@@ -51,7 +64,19 @@ function uploadFiles(filePaths: string[]): Promise<UploadResponse> {
                     if (res.statusCode >= 200 && res.statusCode < 300) {
                         resolve(parsed as UploadResponse);
                     } else {
-                        const errMsg = (parsed as any).error || `HTTP ${res.statusCode}`;
+                        const p = parsed as any;
+                        let errMsg = p.error || `HTTP ${res.statusCode}`;
+                        // The /upload endpoint returns per-file results on
+                        // failure (e.g. 500 when every file fails). Surface
+                        // the first failure's reason so the user sees *why*,
+                        // not just the bare status code.
+                        if (Array.isArray(p.results)) {
+                            const failed = (p.results as any[]).filter((r) => !r.success);
+                            if (failed.length > 0) {
+                                const detail = failed[0].error || "unknown";
+                                errMsg = `${errMsg} (${failed.length} failed: ${detail})`;
+                            }
+                        }
                         reject(new Error(errMsg));
                     }
                 } catch {
@@ -131,6 +156,7 @@ function expandDirectory(dirPath: string): string[] {
 // object (whose `input.uri` is the resource). It returns a flat, de-duplicated
 // list of file paths, expanding any directories recursively.
 function resolveUris(args: any[]): string[] {
+    debugLog(`resolveUris: args=${JSON.stringify(args, (k, v) => v instanceof vscode.Uri ? v.toString() : v)}`);
     const uris: vscode.Uri[] = [];
     const collect = (item: any): void => {
         if (!item) {
@@ -192,6 +218,7 @@ function resolveUris(args: any[]): string[] {
         }
     }
 
+    debugLog(`resolveUris: -> ${filePaths.length} files: ${JSON.stringify(filePaths)}`);
     return filePaths;
 }
 
@@ -220,7 +247,20 @@ function runGit(args: string[], cwd: string): Promise<string> {
 // (modified, staged, added, untracked) in the repo at cwd. Deletions are skipped
 // (the file no longer exists); renames resolve to whichever path still exists.
 async function collectGitChangedFiles(cwd: string): Promise<string[]> {
-    const out = await runGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd);
+    // Resolve the actual git repo root first - the workspace folder may be a
+    // subdirectory of the repo, and `git status` without the right cwd yields
+    // paths relative to the subdirectory which would be wrong.
+    let gitRoot = cwd;
+    try {
+        const root = await runGit(["rev-parse", "--show-toplevel"], cwd);
+        const trimmed = root.trim();
+        if (trimmed.length > 0) {
+            gitRoot = trimmed;
+        }
+    } catch {
+        // not a git repo - let the status call below fail naturally
+    }
+    const out = await runGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"], gitRoot);
     const files: string[] = [];
     const seen = new Set<string>();
     const tokens = out.split("\0");
@@ -242,7 +282,7 @@ async function collectGitChangedFiles(cwd: string): Promise<string[]> {
             if (!rel) {
                 continue;
             }
-            const full = path.isAbsolute(rel) ? rel : path.join(cwd, rel);
+            const full = path.isAbsolute(rel) ? rel : path.join(gitRoot, rel);
             if (seen.has(full)) {
                 continue;
             }
@@ -260,13 +300,11 @@ async function collectGitChangedFiles(cwd: string): Promise<string[]> {
 }
 
 function showResult(result: UploadResponse, totalFiles: number) {
+    debugLog(`showResult: totalFiles=${totalFiles} uploaded=${result.uploaded} failed=${result.failed} results=${JSON.stringify(result.results)}`);
     if (result.uploaded > 0 && result.failed === 0) {
-        const label = totalFiles === 1
-            ? path.basename(result.results[0]?.localPath || "")
-            : `${result.uploaded} files`;
-        const remote = result.results[0]?.remotePath || "";
+        const word = result.uploaded === 1 ? "file" : "files";
         vscode.window.showInformationMessage(
-            `SmartDeploy: ${label} uploaded${remote && totalFiles === 1 ? " -> " + remote : ""}`
+            `SmartDeploy: ${result.uploaded} ${word} transferred`
         );
     } else if (result.uploaded > 0 && result.failed > 0) {
         vscode.window.showWarningMessage(
@@ -275,12 +313,20 @@ function showResult(result: UploadResponse, totalFiles: number) {
     } else if (result.failed > 0) {
         const err = result.results[0]?.error || "Unknown error";
         vscode.window.showErrorMessage(`SmartDeploy: ${result.failed} files failed - ${err}`);
+    } else {
+        // No files reported as uploaded or failed (e.g. empty results from
+        // the server). Surface this so the user is never left with no
+        // feedback at all.
+        vscode.window.showWarningMessage(
+            `SmartDeploy: uploaded ${result.uploaded}, failed ${result.failed} (no per-file results)`
+        );
     }
 }
 
 export function activate(context: vscode.ExtensionContext) {
     // Upload from editor or explorer context menu (supports multi-select).
     const uploadCmd = vscode.commands.registerCommand("smartdeploy.uploadFile", async (...args: any[]) => {
+        debugLog("command: uploadFile");
         const filePaths = resolveUris(args);
         if (filePaths.length === 0) {
             vscode.window.showWarningMessage("SmartDeploy: No file selected");
@@ -290,12 +336,14 @@ export function activate(context: vscode.ExtensionContext) {
             const result = await uploadFiles(filePaths);
             showResult(result, filePaths.length);
         } catch (err: any) {
+            debugLog(`uploadFile error: ${err.message}`);
             vscode.window.showErrorMessage(`SmartDeploy: ${err.message}`);
         }
     });
 
     // Upload the active editor file via command palette.
     const uploadActiveCmd = vscode.commands.registerCommand("smartdeploy.uploadActiveFile", async () => {
+        debugLog("command: uploadActiveFile");
         const activeEditor = vscode.window.activeTextEditor;
         if (!activeEditor) {
             vscode.window.showWarningMessage("SmartDeploy: No active file");
@@ -306,20 +354,27 @@ export function activate(context: vscode.ExtensionContext) {
             const result = await uploadSingleFile(filePath);
             showResult(result, 1);
         } catch (err: any) {
+            debugLog(`uploadActiveFile error: ${err.message}`);
             vscode.window.showErrorMessage(`SmartDeploy: ${err.message}`);
         }
     });
 
     // Upload all open files from the command palette.
     const uploadAllOpenCmd = vscode.commands.registerCommand("smartdeploy.uploadAllOpenFiles", async () => {
+        debugLog("command: uploadAllOpenFiles");
         const filePaths: string[] = [];
         for (const group of vscode.window.tabGroups.all) {
             for (const tab of group.tabs) {
-                if (tab.input instanceof vscode.TabInputText) {
-                    filePaths.push(tab.input.uri.fsPath);
+                debugLog(`tab: label=${tab.label} inputType=${tab.input?.constructor?.name}`);
+                // Accept both text tabs and custom-editor tabs (image preview,
+                // webview editors, etc.) so that opened images are uploaded too.
+                const input: any = tab.input;
+                if (input && input.uri instanceof vscode.Uri) {
+                    filePaths.push(input.uri.fsPath);
                 }
             }
         }
+        debugLog(`uploadAllOpenFiles: collected ${filePaths.length} files`);
         if (filePaths.length === 0) {
             vscode.window.showWarningMessage("SmartDeploy: No open files");
             return;
@@ -336,6 +391,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Reachable from the Source Control view title menu and the changed-file
     // right-click menu.
     const uploadGitChangedCmd = vscode.commands.registerCommand("smartdeploy.uploadGitChangedFiles", async () => {
+        debugLog("command: uploadGitChangedFiles");
         const folders = vscode.workspace.workspaceFolders;
         if (!folders || folders.length === 0) {
             vscode.window.showWarningMessage("SmartDeploy: No workspace folder open");
@@ -349,6 +405,7 @@ export function activate(context: vscode.ExtensionContext) {
             try {
                 const changed = await collectGitChangedFiles(cwd);
                 foundRepo = true;
+                debugLog(`git changed in ${cwd}: ${changed.length} files: ${JSON.stringify(changed)}`);
                 for (const f of changed) {
                     if (!seen.has(f)) {
                         seen.add(f);
@@ -371,6 +428,7 @@ export function activate(context: vscode.ExtensionContext) {
             const result = await uploadFiles(filePaths);
             showResult(result, filePaths.length);
         } catch (err: any) {
+            debugLog(`uploadGitChangedFiles error: ${err.message}`);
             vscode.window.showErrorMessage(`SmartDeploy: ${err.message}`);
         }
     });

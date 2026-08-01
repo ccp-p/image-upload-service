@@ -26,6 +26,17 @@ func main() {
 	}
 
 	logger := log.New(os.Stdout, "", log.Ltime)
+	// Pick the watch folder based on the IS_HOME env var. When set to "1"
+	// (home machine), use watchFolderHome; otherwise use watchFolder. This
+	// lets the same binary/config run on both home and work machines where
+	// the project lives under different drives/paths.
+	watchFolder := cfg.WatchFolder
+	if os.Getenv("IS_HOME") == "1" && cfg.WatchFolderHome != "" {
+		watchFolder = cfg.WatchFolderHome
+		logger.Printf("IS_HOME=1 -> home watch folder: %s", watchFolder)
+	} else {
+		logger.Printf("watch folder: %s", watchFolder)
+	}
 
 	// Shared line reader — distributes stdin lines between the REPL and
 	// the OTP prompter so they never compete for the same input.
@@ -62,7 +73,7 @@ func main() {
 		prompter = p
 	}
 
-	mapper := NewPathMapper(cfg.WatchFolder, cfg.RemoteBasePath, cfg.StripPrefix)
+	mapper := NewPathMapper(watchFolder, cfg.RemoteBasePath, cfg.StripPrefix)
 	matcher := NewIgnoreMatcher(cfg.IgnorePatterns)
 	client := NewSSHClient(
 		cfg.Host, cfg.Port, cfg.Username,
@@ -127,7 +138,7 @@ func main() {
 	}
 
 	watcher, err := NewFileWatcher(
-		cfg.WatchFolder, matcher, cfg.FileExtensions,
+		watchFolder, matcher, cfg.FileExtensions,
 		cfg.DebounceDuration(), deployer.OnFileChange,
 	)
 	if err != nil {
@@ -141,7 +152,7 @@ func main() {
 	if !cfg.AutoWatch {
 		autoMode = "OFF"
 	}
-	fmt.Printf("Watching: %s\n", cfg.WatchFolder)
+	fmt.Printf("Watching: %s\n", watchFolder)
 	fmt.Printf("AutoWatch: %s (debounce: %dms)\n", autoMode, cfg.DebounceMs)
 	fmt.Printf("Remote: %s\n", cfg.RemoteBasePath)
 	if cfg.JailRoot != "" {

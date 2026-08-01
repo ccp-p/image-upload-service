@@ -102,11 +102,16 @@
           "default": 9721,
           "description": "Port the SmartDeploy API server listens on"
         },
-        "smartdeploy.autoUploadOnSave": {
-          "type": "boolean",
+       "smartdeploy.autoUploadOnSave": {
+         "type": "boolean",
+         "default": false,
+         "description": "Upload files automatically on save (uses SmartDeploy API)"
+        },
+       "smartdeploy.debugLog": {
+         "type": "boolean",
           "default": false,
-          "description": "Upload files automatically on save (uses SmartDeploy API)"
-        }
+         "description": "Log upload requests/responses to %TEMP%/smartdeploy-debug.log"
+       }
       }
     }
   },

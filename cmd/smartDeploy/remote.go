@@ -569,11 +569,7 @@ func (c *sshClient) Upload(localPath, remotePath string) error {
 	physicalPath := c.resolveRemote(remotePath)
 	remoteDir := path.Dir(physicalPath)
 
-	if physicalPath != remotePath {
-		c.logf("[UPLOAD] %s -> %s (server: %s) (%d bytes)", localPath, remotePath, physicalPath, len(data))
-	} else {
-		c.logf("[UPLOAD] %s -> %s (%d bytes)", localPath, remotePath, len(data))
-	}
+	c.logf("[UPLOAD] %s (%d bytes)", path.Base(localPath), len(data))
 
 	client, err := c.getClient()
 	if err != nil {
@@ -612,11 +608,11 @@ func (c *sshClient) Upload(localPath, remotePath string) error {
 				return fmt.Errorf("upload %s: size mismatch (local %d, remote %d)",
 					physicalPath, len(data), remoteBytes)
 			}
-			c.logf("[VERIFY] %s (%d bytes confirmed)", physicalPath, remoteBytes)
+			c.logf("[VERIFY] %s (%d bytes)", path.Base(physicalPath), remoteBytes)
 		} else {
 			// wc -c output unparseable; fall back to raw ls -ld detail.
 			if detail := strings.TrimSpace(stdout.String()); detail != "" {
-				c.logf("[VERIFY] %s", detail)
+				c.logf("[VERIFY] %s", path.Base(physicalPath))
 			}
 		}
 	}

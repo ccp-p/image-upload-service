@@ -9,21 +9,22 @@ import (
 
 // Config holds all deployment tool settings loaded from JSON.
 type Config struct {
-	Host           string   `json:"host"`
-	Port           int      `json:"port"`
-	Username       string   `json:"username"`
-	Password       string   `json:"password"`
-	PrivateKeyPath string   `json:"privateKeyPath"`
-	KeyPassphrase  string   `json:"keyPassphrase"`
-	WatchFolder    string   `json:"watchFolder"`
-	RemoteBasePath string   `json:"remoteBasePath"`
-	JailRoot       string   `json:"jailRoot"`
-	StripPrefix    string   `json:"stripPrefix"`
-	IgnorePatterns []string `json:"ignorePatterns"`
-	FileExtensions []string `json:"fileExtensions"`
-	DebounceMs     int      `json:"debounceMs"`
-	AutoWatch      bool     `json:"autoWatch"`
-	KeepAliveSec   int      `json:"keepAliveIntervalSec"`
+	Host            string   `json:"host"`
+	Port            int      `json:"port"`
+	Username        string   `json:"username"`
+	Password        string   `json:"password"`
+	PrivateKeyPath  string   `json:"privateKeyPath"`
+	KeyPassphrase   string   `json:"keyPassphrase"`
+	WatchFolder     string   `json:"watchFolder"`
+	WatchFolderHome string   `json:"watchFolderHome"`
+	RemoteBasePath  string   `json:"remoteBasePath"`
+	JailRoot        string   `json:"jailRoot"`
+	StripPrefix     string   `json:"stripPrefix"`
+	IgnorePatterns  []string `json:"ignorePatterns"`
+	FileExtensions  []string `json:"fileExtensions"`
+	DebounceMs      int      `json:"debounceMs"`
+	AutoWatch       bool     `json:"autoWatch"`
+	KeepAliveSec    int      `json:"keepAliveIntervalSec"`
 
 	// Clipboard OTP monitoring
 	EnableClipboard bool `json:"enableClipboard"`

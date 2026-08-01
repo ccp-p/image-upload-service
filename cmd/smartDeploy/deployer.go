@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -122,7 +123,7 @@ func (d *Deployer) UploadFile(localPath string) (string, error) {
 	}
 
 	d.tracker.Remove(localPath)
-	d.logger.Printf("[OK] %s -> %s", localPath, remotePath)
+	d.logger.Printf("[OK] %s", filepath.Base(localPath))
 	return remotePath, nil
 }
 

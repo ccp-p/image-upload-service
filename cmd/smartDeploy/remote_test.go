@@ -1392,10 +1392,7 @@ func TestSSHClient_Upload_SizeVerification(t *testing.T) {
 
 	// Log should include byte count confirmation.
 	logOutput := logBuf.String()
-	if !strings.Contains(logOutput, "bytes confirmed") {
-		t.Errorf("verify log should include byte count: %q", logOutput)
-	}
-	expectedSize := fmt.Sprintf("%d bytes confirmed", len(content))
+	expectedSize := fmt.Sprintf("%d bytes)", len(content))
 	if !strings.Contains(logOutput, expectedSize) {
 		t.Errorf("verify log should include correct size %q: %q", expectedSize, logOutput)
 	}
@@ -1464,9 +1461,6 @@ func TestSSHClient_Upload_LogsVerify(t *testing.T) {
 	logOutput := logBuf.String()
 	if !strings.Contains(logOutput, "[VERIFY]") {
 		t.Errorf("Upload should log [VERIFY] after success: %q", logOutput)
-	}
-	if !strings.Contains(logOutput, remotePath) {
-		t.Errorf("Verify log should contain remote path: %q", logOutput)
 	}
 }
 
@@ -1590,12 +1584,6 @@ func TestSSHClient_Integration_UploadWithJailRoot(t *testing.T) {
 	}
 	if string(got) != string(content) {
 		t.Errorf("content = %q, want %q", got, content)
-	}
-
-	// Log should show the server (physical) path.
-	logOutput := logBuf.String()
-	if !strings.Contains(logOutput, "server: /tmp/css/style.css") {
-		t.Errorf("log should show server path: %q", logOutput)
 	}
 }
 

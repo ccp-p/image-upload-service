@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -151,25 +152,45 @@ func (a *APIServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Expand any directories to their contained files.
 	filePaths := expandPaths(paths)
 
-	resp := UploadResponse{Results: []UploadResult{}}
-	for _, p := range filePaths {
-		remote, err := a.deployer.UploadFile(p)
-		if err != nil {
-			resp.Failed++
-			resp.Results = append(resp.Results, UploadResult{
-				LocalPath: p,
-				Success:   false,
-				Error:     err.Error(),
-			})
-			continue
-		}
+	// Upload concurrently (bounded by a semaphore) to avoid serial round-trip
+	// latency when many files are sent at once. The SSH client multiplexes
+	// multiple sessions over a single connection, so parallel NewSession calls
+	// are safe. A modest cap keeps the jumpserver from being overwhelmed.
+	const maxConcurrent = 4
+	results := make([]UploadResult, len(filePaths))
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	for i, p := range filePaths {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, localPath string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			remote, err := a.deployer.UploadFile(localPath)
+			if err != nil {
+				results[idx] = UploadResult{
+					LocalPath: localPath,
+					Success:   false,
+					Error:     err.Error(),
+				}
+				return
+			}
+			results[idx] = UploadResult{
+				LocalPath:  localPath,
+				RemotePath: remote,
+				Success:    true,
+			}
+		}(i, p)
+	}
+	wg.Wait()
 
-		resp.Uploaded++
-		resp.Results = append(resp.Results, UploadResult{
-			LocalPath:  p,
-			RemotePath: remote,
-			Success:    true,
-		})
+	resp := UploadResponse{Results: results}
+	for _, r := range results {
+		if r.Success {
+			resp.Uploaded++
+		} else {
+			resp.Failed++
+		}
 	}
 	status := http.StatusOK
 	if resp.Uploaded == 0 && resp.Failed > 0 {
