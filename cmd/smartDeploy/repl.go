@@ -23,6 +23,8 @@ type REPL struct {
 	otpActive      *atomic.Bool // when true the REPL yields stdin to the OTP prompter
 	remoteBasePath string
 	jailRoot       string
+	clearCommand   string
+	syncCommand    string
 }
 
 func NewREPL(d *Deployer, c RemoteClient, otp *OTPStore, lr *SharedLineReader, w io.Writer) *REPL {
@@ -34,6 +36,64 @@ func NewREPL(d *Deployer, c RemoteClient, otp *OTPStore, lr *SharedLineReader, w
 		writer:     w,
 		writeMu:    &sync.Mutex{},
 		otpActive:  new(atomic.Bool),
+	}
+}
+
+// SetClearCommand configures the shell command to clear the temp directory.
+func (r *REPL) SetClearCommand(cmd string) {
+	r.clearCommand = cmd
+}
+
+// SetSyncCommand configures the shell command to rsync temp to webapp.
+func (r *REPL) SetSyncCommand(cmd string) {
+	r.syncCommand = cmd
+}
+
+func (r *REPL) clearTemp() {
+	if r.clearCommand == "" {
+		r.printf("No clearCommand configured.\n")
+		return
+	}
+	if !r.client.IsConnected() {
+		r.printf("Not connected.\n")
+		return
+	}
+	r.printf("Clearing temp directory...\n")
+	output, err := r.client.RunCommand(r.clearCommand)
+	if err != nil {
+		r.printf("[ERR] clear: %v\n", err)
+		if output != "" {
+			r.printf("%s\n", output)
+		}
+		return
+	}
+	r.printf("[OK] temp directory cleared\n")
+	if output != "" {
+		r.printf("%s\n", output)
+	}
+}
+
+func (r *REPL) syncToWebapp() {
+	if r.syncCommand == "" {
+		r.printf("No syncCommand configured.\n")
+		return
+	}
+	if !r.client.IsConnected() {
+		r.printf("Not connected.\n")
+		return
+	}
+	r.printf("Syncing to webapp...\n")
+	output, err := r.client.RunCommand(r.syncCommand)
+	if err != nil {
+		r.printf("[ERR] sync: %v\n", err)
+		if output != "" {
+			r.printf("%s\n", output)
+		}
+		return
+	}
+	r.printf("[OK] sync done\n")
+	if output != "" {
+		r.printf("%s\n", output)
 	}
 }
 
@@ -134,6 +194,10 @@ func (r *REPL) handle(line string) (quit bool) {
 		r.statRemote(args)
 	case "otp":
 		r.handleOTP(args)
+	case "ct", "cleartemp":
+		r.clearTemp()
+	case "sy", "sync":
+		r.syncToWebapp()
 	case "q", "quit", "exit":
 		r.printf("Bye.\n")
 		return true
@@ -157,6 +221,8 @@ func (r *REPL) printHelp() {
   rec, recent        Show recent upload history
   c, clear           Clear pending queue
   r, reconnect       Reconnect to server (async, waits for OTP)
+  ct, cleartemp      Clear temp directory on server
+  sy, sync           Rsync temp directory to webapp root
   otp [code]         Set or show current OTP code
   h, help            Show this help
   q, quit            Exit

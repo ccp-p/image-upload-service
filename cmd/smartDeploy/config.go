@@ -26,6 +26,14 @@ type Config struct {
 	AutoWatch       bool     `json:"autoWatch"`
 	KeepAliveSec    int      `json:"keepAliveIntervalSec"`
 
+	// Remote commands run via SSH. clearCommand wipes the temp staging
+	// directory; syncCommand rsyncs from temp to the webapp root. The two
+	// are separate so the user can upload files between clearing and
+	// syncing. clearPath is shown in IDE confirmation dialogs.
+	ClearCommand string `json:"clearCommand"`
+	ClearPath    string `json:"clearPath"`
+	SyncCommand  string `json:"syncCommand"`
+
 	// Clipboard OTP monitoring
 	EnableClipboard bool `json:"enableClipboard"`
 	ClipboardPollMs int  `json:"clipboardPollMs"`

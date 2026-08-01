@@ -40,6 +40,9 @@
   "autoReconnect": true,
   "otpTimeoutSec": 300,
   "jailRoot": "/tmp",
-  "apiPort": 9721,
-  "apiEnabled": true
+ "apiPort": 9721,
+  "apiEnabled": true,
+  "clearCommand": "rm -rf /tmp/ccp/xhmqqthy/*",
+  "clearPath": "/tmp/ccp/xhmqqthy/",
+  "syncCommand": "rsync -av --ignore-times /tmp/ccp/xhmqqthy/ /code/xhmqqthy/res/wap/"
 }

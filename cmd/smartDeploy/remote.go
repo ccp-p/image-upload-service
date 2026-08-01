@@ -27,6 +27,7 @@ type RemoteClient interface {
 	RemotePWD() (string, error)
 	Stat(remotePath string) (string, error)
 	ListDir(remotePath string) (string, error)
+	RunCommand(cmd string) (string, error)
 }
 
 // sshClient implements RemoteClient using SSH (mkdir -p + cat >).
@@ -657,6 +658,36 @@ func (c *sshClient) ListDir(remotePath string) (string, error) {
 	physicalPath := c.resolveRemote(remotePath)
 	if err := session.Run(fmt.Sprintf("ls -la %s", shellQuote(physicalPath))); err != nil {
 		return "", fmt.Errorf("ls %s: %w", remotePath, err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// RunCommand executes an arbitrary shell command on the remote server and
+// returns its combined stdout. Used for deploy operations like clearing a
+// temp directory and rsyncing to the webapp root.
+func (c *sshClient) RunCommand(cmd string) (string, error) {
+	waitCtx, cancel := context.WithTimeout(c.ctx, 120*time.Second)
+	defer cancel()
+	if err := c.ensureConnected(waitCtx); err != nil {
+		return "", fmt.Errorf("not connected: %w", err)
+	}
+
+	client, err := c.getClient()
+	if err != nil {
+		return "", err
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("ssh session: %w", err)
+	}
+	defer session.Close()
+
+	var stdout, stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
+	c.logf("[CMD] %s", cmd)
+	if err := session.Run(cmd); err != nil {
+		return stdout.String(), fmt.Errorf("command failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }

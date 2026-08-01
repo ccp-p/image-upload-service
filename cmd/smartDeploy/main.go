@@ -110,6 +110,8 @@ func main() {
 	var apiServer *APIServer
 	if cfg.APIEnabled && cfg.APIPort > 0 {
 		apiServer = NewAPIServer(deployer, client, logger)
+		apiServer.SetClearCommand(cfg.ClearCommand)
+		apiServer.SetSyncCommand(cfg.SyncCommand)
 		if addr, err := apiServer.Start(cfg.APIPort); err != nil {
 			logger.Printf("[WARN] API server: %v", err)
 		} else {
@@ -170,6 +172,8 @@ func main() {
 	repl.SetOTPActive(&otpActive)
 	repl.SetWriteMu(writeMu)
 	repl.SetRemoteBasePath(cfg.RemoteBasePath)
+	repl.SetClearCommand(cfg.ClearCommand)
+	repl.SetSyncCommand(cfg.SyncCommand)
 	repl.Run()
 
 	if clipWatcher != nil {

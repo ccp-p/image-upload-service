@@ -37,6 +37,39 @@ interface StatusInfo {
     lastUpload: string;
 }
 
+function runRemoteCommand(endpoint: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const url = getApiUrl() + endpoint;
+        const req = http.request(url, { method: "POST", timeout: 180000 }, (res) => {
+            let data = "";
+            res.on("data", (chunk) => data += chunk);
+            res.on("end", () => {
+                try {
+                    const parsed = JSON.parse(data);
+                    if (res.statusCode !== undefined && res.statusCode >= 200 && res.statusCode < 300) {
+                        resolve(parsed.output || "");
+                    } else {
+                        reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+                    }
+                } catch {
+                    reject(new Error(`Invalid response: ${data}`));
+                }
+            });
+        });
+        req.on("error", (err) => reject(new Error(`Cannot connect to SmartDeploy. Is it running? (${err.message})`)));
+        req.on("timeout", () => { req.destroy(); reject(new Error("Request timed out")); });
+        req.end();
+    });
+}
+
+function clearTemp(): Promise<string> {
+    return runRemoteCommand("/clear");
+}
+
+function syncToWebapp(): Promise<string> {
+    return runRemoteCommand("/sync");
+}
+
 function uploadFiles(filePaths: string[]): Promise<UploadResponse> {
     return new Promise((resolve, reject) => {
         const url = getApiUrl() + "/upload";
@@ -446,6 +479,47 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // Clear the temp staging directory on the server. Shows a strong
+    // confirmation with the path being deleted to prevent accidents.
+    const clearTempCmd = vscode.commands.registerCommand("smartdeploy.clearTemp", async () => {
+        const clearPath = vscode.workspace.getConfiguration("smartdeploy").get<string>("clearPath", "");
+        const pathLabel = clearPath || "the temp directory";
+        const choice = await vscode.window.showWarningMessage(
+            `SmartDeploy: Delete all files under '${pathLabel}' on the server? This cannot be undone.`,
+            "Yes, Delete", "Cancel"
+        );
+        if (choice !== "Yes, Delete") return;
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "SmartDeploy: Clearing temp directory...",
+            cancellable: false,
+        }, async () => {
+            try {
+                await clearTemp();
+                vscode.window.showInformationMessage("SmartDeploy: Temp directory cleared");
+            } catch (err: any) {
+                vscode.window.showErrorMessage(`SmartDeploy: ${err.message}`);
+            }
+        });
+    });
+
+    // Rsync the temp directory to the webapp root.
+    const syncCmd = vscode.commands.registerCommand("smartdeploy.sync", async () => {
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "SmartDeploy: Syncing to webapp...",
+            cancellable: false,
+        }, async () => {
+            try {
+                const output = await syncToWebapp();
+                vscode.window.showInformationMessage("SmartDeploy: Sync complete");
+                debugLog(`sync output: ${output}`);
+            } catch (err: any) {
+                vscode.window.showErrorMessage(`SmartDeploy: ${err.message}`);
+            }
+        });
+    });
+
     const autoUploadOnSave = vscode.workspace.onWillSaveTextDocument(async (event) => {
         const enabled = vscode.workspace.getConfiguration("smartdeploy").get<boolean>("autoUploadOnSave", false);
         if (!enabled) return;
@@ -465,7 +539,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(uploadCmd, uploadActiveCmd, uploadAllOpenCmd, uploadGitChangedCmd, statusCmd, autoUploadOnSave);
+    context.subscriptions.push(uploadCmd, uploadActiveCmd, uploadAllOpenCmd, uploadGitChangedCmd, clearTempCmd, syncCmd, statusCmd, autoUploadOnSave);
 }
 
 export function deactivate() {}

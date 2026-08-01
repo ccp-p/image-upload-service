@@ -34,9 +34,17 @@
       },
      {
        "command": "smartdeploy.checkStatus",
-        "title": "SmartDeploy: Check Connection Status"
+       "title": "SmartDeploy: Check Connection Status"
+     },
+      {
+        "command": "smartdeploy.clearTemp",
+        "title": "SmartDeploy: Clear Temp Directory"
+      },
+      {
+        "command": "smartdeploy.sync",
+        "title": "SmartDeploy: Sync to Webapp"
       }
-    ],
+   ],
     "menus": {
       "editor/context": [
         {
@@ -56,15 +64,23 @@
           "group": "navigation@101"
         }
       ],
-      "editor/title/context": [
-        {
-          "command": "smartdeploy.uploadFile",
-          "when": "resourceScheme == file",
-          "group": "navigation@100"
+     "editor/title/context": [
+       {
+         "command": "smartdeploy.uploadFile",
+         "when": "resourceScheme == file",
+         "group": "navigation@100"
+       },
+       {
+         "command": "smartdeploy.uploadAllOpenFiles",
+         "group": "navigation@101"
         },
         {
-          "command": "smartdeploy.uploadAllOpenFiles",
-          "group": "navigation@101"
+          "command": "smartdeploy.clearTemp",
+          "group": "navigation@102"
+        },
+        {
+          "command": "smartdeploy.sync",
+          "group": "navigation@103"
         }
       ],
      "scm/resourceState/context": [
@@ -109,8 +125,13 @@
         },
        "smartdeploy.debugLog": {
          "type": "boolean",
-          "default": false,
+         "default": false,
          "description": "Log upload requests/responses to %TEMP%/smartdeploy-debug.log"
+        },
+        "smartdeploy.clearPath": {
+          "type": "string",
+          "default": "",
+          "description": "Remote path shown in the clear-temp confirmation dialog"
        }
       }
     }

@@ -47,10 +47,12 @@ type StatusResponse struct {
 // external tools (VSCode extension, scripts, etc.) over localhost.
 // It uses the already-connected SSH session, so no re-OTP is needed.
 type APIServer struct {
-	deployer *Deployer
-	client   RemoteClient
-	logger   *log.Logger
-	server   *http.Server
+	deployer     *Deployer
+	client       RemoteClient
+	logger       *log.Logger
+	server       *http.Server
+	clearCommand string
+	syncCommand  string
 }
 
 func NewAPIServer(deployer *Deployer, client RemoteClient, logger *log.Logger) *APIServer {
@@ -64,12 +66,24 @@ func NewAPIServer(deployer *Deployer, client RemoteClient, logger *log.Logger) *
 	}
 }
 
+// SetClearCommand configures the shell command to clear the temp directory.
+func (a *APIServer) SetClearCommand(cmd string) {
+	a.clearCommand = cmd
+}
+
+// SetSyncCommand configures the shell command to rsync temp to webapp.
+func (a *APIServer) SetSyncCommand(cmd string) {
+	a.syncCommand = cmd
+}
+
 // Start binds to localhost:port and begins serving. Returns the actual
 // listen address (useful when port 0 is requested for auto-assignment).
 func (a *APIServer) Start(port int) (string, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/upload", a.handleUpload)
 	mux.HandleFunc("/status", a.handleStatus)
+	mux.HandleFunc("/clear", a.handleClear)
+	mux.HandleFunc("/sync", a.handleSync)
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
@@ -118,6 +132,54 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		LastUpload: lastUpload,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (a *APIServer) handleClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if a.clearCommand == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no clearCommand configured"})
+		return
+	}
+	if !a.client.IsConnected() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not connected to server"})
+		return
+	}
+	a.logger.Printf("[CLEAR] running: %s", a.clearCommand)
+	output, err := a.client.RunCommand(a.clearCommand)
+	if err != nil {
+		a.logger.Printf("[CLEAR] failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error(), "output": output})
+		return
+	}
+	a.logger.Printf("[CLEAR] done")
+	writeJSON(w, http.StatusOK, map[string]string{"output": output})
+}
+
+func (a *APIServer) handleSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if a.syncCommand == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no syncCommand configured"})
+		return
+	}
+	if !a.client.IsConnected() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not connected to server"})
+		return
+	}
+	a.logger.Printf("[SYNC] running: %s", a.syncCommand)
+	output, err := a.client.RunCommand(a.syncCommand)
+	if err != nil {
+		a.logger.Printf("[SYNC] failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error(), "output": output})
+		return
+	}
+	a.logger.Printf("[SYNC] done")
+	writeJSON(w, http.StatusOK, map[string]string{"output": output})
 }
 
 func (a *APIServer) handleUpload(w http.ResponseWriter, r *http.Request) {

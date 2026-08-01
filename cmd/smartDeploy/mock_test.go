@@ -83,6 +83,9 @@ func (m *mockClient) ListDir(remotePath string) (string, error) {
 	return "total 4\ndrwxr-xr-x 2 test test 4096 Jan 01 00:00 .\ndrwxr-xr-x 3 test test 4096 Jan 01 00:00 ..", nil
 }
 
+func (m *mockClient) RunCommand(cmd string) (string, error) {
+	return "mock output", nil
+}
 func (m *mockClient) getUploads() []mockUpload {
 	m.mu.Lock()
 	defer m.mu.Unlock()
