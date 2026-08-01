@@ -30,3 +30,9 @@ cookies.txt
 /cmd/cloudflared-tunnel/tunnel-state.json
 /cmd/cloudflared-tunnel/cloudflared-watchdog.log
 /cmd/cloudflared-tunnel/cloudflared-watchdog.lock
+# bilisub build artifacts & runtime
+cmd/bilisub/bilisub.exe
+cmd/bilisub/tempCodeRunnerFile.bat
+cmd/bilisub/subtitles/
+subtitles/
+test_sub.json
