@@ -36,3 +36,4 @@ cmd/bilisub/tempCodeRunnerFile.bat
 cmd/bilisub/subtitles/
 subtitles/
 test_sub.json
+cmd/twimon/state.json
