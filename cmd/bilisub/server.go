@@ -167,8 +167,8 @@ func runServer(port int, outDir string) error {
 			},
 			{
 				"role":    "user",
-					"content": "Please summarize these video subtitles:\n\n" + req.Text,
-				},
+				"content": "请分析以下视频字幕，按照系统提示词的要求，用中文生成可视化的 HTML 要点解析。只返回 body 内的 HTML 内容（不要 <!DOCTYPE>、<html>、<head>、<style>，CSS 由渲染器自动注入），使用系统提示词中定义的组件 class 名。字幕内容如下：\n\n" + req.Text,
+			},
 			},
 			"stream": true,
 			"chat_template_kwargs": map[string]bool{
