@@ -23,10 +23,8 @@ import (
 const (
 	svnLogCount = 3
 
-	checkURL           = `https://qqt.cmicrwx.cn/2016tyjf_huido/xhmqqthy/res/wap/xdrNormal.html`
-	checkInterval      = 1 * time.Minute
-	checkTimeout       = 30 * time.Minute
-	maxInitialAttempts = 5 // 初始检测最大重试次数，避免单次请求失败直接判定为"超时未检测到"
+	// CDN 域名前缀，HTML 中以此开头的引用去掉前缀后在 dest 目录中校验
+	cdnDomain = `https://qqt-res.cmicrwx.cn/2016tyjf/xhmqqthy/res/wap`
 
 	pushPlusURL = "https://www.pushplus.plus/send"
 )
@@ -62,12 +60,10 @@ type PushPlusRequest struct {
 }
 
 type CheckResult struct {
-	JSFile      string
-	Hash        string
-	LocalPath   string
 	Found       bool
+	TotalRefs    int
+	MissingFiles []string
 	ElapsedTime time.Duration
-	Attempts    int
 }
 
 // ============================================================
@@ -194,141 +190,141 @@ func getRecentSvnLogs(cfg EnvConfig) ([]LogEntry, error) {
 //  功能三：CDN 更新检测
 // ============================================================
 
-func extractJSFilename(htmlContent string) (filename string, hash string, err error) {
-	re := regexp.MustCompile(`xdrNormal\.([a-fA-F0-9]+)\.js`)
-	matches := re.FindStringSubmatch(htmlContent)
-	if len(matches) < 2 {
-		return "", "", fmt.Errorf("未在页面中找到 xdrNormal.*.js 引用")
+// reHTMLComment 匹配 HTML 注释，提取引用前先移除注释避免误检
+var reHTMLComment = regexp.MustCompile(`(?s)<!--.*?-->`)
+
+// reHTMLRef 提取 HTML 中所有 src 和 href 属性值
+var reHTMLRef = regexp.MustCompile(`(?:src|href)\s*=\s*["']([^"']+)["']`)
+
+// extractHTMLReferences 从 HTML 内容中提取所有 src/href 引用路径（已移除注释）
+func extractHTMLReferences(htmlContent string) []string {
+	clean := reHTMLComment.ReplaceAllString(htmlContent, "")
+	matches := reHTMLRef.FindAllStringSubmatch(clean, -1)
+	var refs []string
+	for _, m := range matches {
+		ref := strings.TrimSpace(m[1])
+		if ref == "" || ref == "#" {
+			continue
+		}
+		// 跳过 javascript:、mailto:、tel: 等非资源引用
+		if strings.HasPrefix(ref, "javascript:") ||
+			strings.HasPrefix(ref, "mailto:") ||
+			strings.HasPrefix(ref, "tel:") ||
+			strings.HasPrefix(ref, "data:") {
+			continue
+		}
+		// 跳过 JS 模板占位符（如 ${var}.png）
+		if strings.Contains(ref, "${") {
+			continue
+		}
+		refs = append(refs, ref)
 	}
-	return matches[0], matches[1], nil
+	return refs
 }
 
-func fetchHTML(url string) (string, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(url)
+// resolveRefToDest 将一个引用解析为 dest 目录中的实际文件路径。
+// 返回 (absPath, shouldCheck)：shouldCheck=false 表示是外部资源，无需校验。
+func resolveRefToDest(ref, htmlDir, destPath, cdnPrefix string) (string, bool) {
+	// 去掉查询参数和锚点
+	ref = strings.SplitN(ref, "?", 2)[0]
+	ref = strings.SplitN(ref, "#", 2)[0]
+	if ref == "" {
+		return "", false
+	}
+
+	var localPath string
+
+	switch {
+	case strings.HasPrefix(ref, cdnPrefix):
+		// CDN 引用：去掉域名前缀得到相对于 dest 根目录的路径
+		relPath := strings.TrimPrefix(ref, cdnPrefix)
+		relPath = strings.TrimPrefix(relPath, "/")
+		localPath = filepath.Join(destPath, filepath.FromSlash(relPath))
+
+	case strings.HasPrefix(ref, "http://"), strings.HasPrefix(ref, "https://"):
+		// 其他域名的绝对 URL，属于外部资源
+		return "", false
+
+	case strings.HasPrefix(ref, "//"):
+		// 协议相对 URL，属于外部资源
+		return "", false
+
+	case strings.HasPrefix(ref, "/"):
+		// 根路径引用：相对于 dest 根目录
+		localPath = filepath.Join(destPath, filepath.FromSlash(ref))
+
+	default:
+		// 相对路径：相对于 HTML 文件所在目录解析
+		relPath := strings.TrimPrefix(ref, "./")
+		localPath = filepath.Join(htmlDir, filepath.FromSlash(relPath))
+	}
+
+	absPath, err := filepath.Abs(localPath)
 	if err != nil {
-		return "", fmt.Errorf("请求页面失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("请求返回状态码 %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("读取响应失败: %w", err)
-	}
-	return string(body), nil
-}
-
-func checkJSFileExists(basePath, jsFilename string) (string, bool) {
-	localPath := filepath.Join(basePath, "scripts", "js", jsFilename)
-	if _, err := os.Stat(localPath); err == nil {
 		return localPath, true
 	}
-	return localPath, false
+	return absPath, true
 }
 
+// checkTargetHTML 是固定校验的目标 HTML 文件名
+const checkTargetHTML = "xdrNormal.html"
+
+// runCheck 校验 dest 根目录下 xdrNormal.html 中所有引用的资源是否本地存在
 func runCheck(cfg EnvConfig) CheckResult {
-	logf("开始检测 CDN 更新（每 %s 轮询，最长 %s）\n", checkInterval, checkTimeout)
-	logf("目标页面: %s\n", checkURL)
-	logf("本地目录: %s\n", filepath.Join(cfg.DestPath, "scripts", "js"))
+	startTime := time.Now()
 
-	// 初始检测带重试机制（最多 maxInitialAttempts 次），
-	// 避免单次网络抖动导致请求失败就直接判定为"超时未检测到"。
-	var (
-		htmlContent string
-		jsFile      string
-		hash        string
-		err         error
-	)
+	htmlFile := filepath.Join(cfg.DestPath, checkTargetHTML)
+	content, err := os.ReadFile(htmlFile)
+	if err != nil {
+		logf("读取 %s 失败: %v\n", checkTargetHTML, err)
+		return CheckResult{
+			Found:        false,
+			MissingFiles: []string{htmlFile},
+			ElapsedTime:  time.Since(startTime),
+		}
+	}
 
-	for i := 1; i <= maxInitialAttempts; i++ {
-		htmlContent, err = fetchHTML(checkURL)
-		if err == nil {
-			jsFile, hash, err = extractJSFilename(htmlContent)
-			if err == nil {
+	logf("开始本地引用校验：%s（dest: %s）\n", checkTargetHTML, cfg.DestPath)
+
+	var missingFiles []string
+	totalRefs := 0
+
+	htmlDir := filepath.Dir(htmlFile)
+	refs := extractHTMLReferences(string(content))
+
+	for _, ref := range refs {
+		absPath, shouldCheck := resolveRefToDest(ref, htmlDir, cfg.DestPath, cdnDomain)
+		if !shouldCheck {
+			continue
+		}
+		totalRefs++
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			missingFiles = append(missingFiles, absPath)
+		}
+	}
+
+	elapsed := time.Since(startTime)
+	found := len(missingFiles) == 0
+
+	if found {
+		logf("✅ 引用校验通过：%s 中 %d 个引用全部存在\n", checkTargetHTML, totalRefs)
+	} else {
+		logf("❌ 引用校验失败：%s 中 %d 个引用，%d 个缺失\n",
+			checkTargetHTML, totalRefs, len(missingFiles))
+		for i, f := range missingFiles {
+			if i >= 20 {
+				logf("  ... 还有 %d 个缺失文件未显示\n", len(missingFiles)-20)
 				break
 			}
-			logf("第 %d 次提取 JS 文件名失败: %v\n", i, err)
-		} else {
-			logf("第 %d 次请求页面失败: %v\n", i, err)
-		}
-		if i < maxInitialAttempts {
-			time.Sleep(time.Duration(i) * 5 * time.Second)
-		}
-	}
-	if err != nil {
-		logf("初始检测连续 %d 次失败: %v\n", maxInitialAttempts, err)
-		return CheckResult{Found: false, Attempts: maxInitialAttempts}
-	}
-
-	logf("目标 JS 文件: %s (hash: %s)\n", jsFile, hash)
-
-	localPath, found := checkJSFileExists(cfg.DestPath, jsFile)
-	if found {
-		logf("文件已存在，CDN 已更新！路径: %s\n", localPath)
-		return CheckResult{
-			JSFile: jsFile, Hash: hash,
-			LocalPath: localPath, Found: true, Attempts: 1,
+			logf("  缺失: %s\n", f)
 		}
 	}
 
-	startTime := time.Now()
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
-	timeoutTimer := time.NewTimer(checkTimeout)
-	defer timeoutTimer.Stop()
-	attempts := 1
-
-	for {
-		select {
-		case <-timeoutTimer.C:
-			elapsed := time.Since(startTime)
-			logf("检测超时！已等待 %s，共 %d 次\n", elapsed.Round(time.Second), attempts)
-			return CheckResult{
-				JSFile: jsFile, Hash: hash,
-				LocalPath: localPath, Found: false,
-				ElapsedTime: elapsed, Attempts: attempts,
-			}
-
-		case <-ticker.C:
-			attempts++
-			elapsed := time.Since(startTime)
-
-			html, err := fetchHTML(checkURL)
-			if err != nil {
-				logf("[第%d次] 请求失败: %v（已等待 %s）\n", attempts, err, elapsed.Round(time.Second))
-				continue
-			}
-
-			currentFile, currentHash, err := extractJSFilename(html)
-			if err != nil {
-				logf("[第%d次] 提取 JS 失败: %v\n", attempts, err)
-				continue
-			}
-
-			if currentHash != hash {
-				logf("[第%d次] hash 变化: %s → %s\n", attempts, hash, currentHash)
-				jsFile = currentFile
-				hash = currentHash
-			}
-
-			localPath, found = checkJSFileExists(cfg.DestPath, jsFile)
-			if found {
-				logf("[第%d次] ✅ CDN 更新成功！%s（耗时 %s）\n",
-					attempts, localPath, elapsed.Round(time.Second))
-				return CheckResult{
-					JSFile: jsFile, Hash: hash,
-					LocalPath: localPath, Found: true,
-					ElapsedTime: elapsed, Attempts: attempts,
-				}
-			}
-
-			logf("[第%d次] 尚未更新（已等待 %s，目标: %s）\n",
-				attempts, elapsed.Round(time.Second), jsFile)
-		}
+	return CheckResult{
+		Found:        found,
+		TotalRefs:    totalRefs,
+		MissingFiles: missingFiles,
+		ElapsedTime:  elapsed,
 	}
 }
 
@@ -431,46 +427,34 @@ func buildCheckNotifyContent(result CheckResult, locationLabel string) (string, 
 	now := nowStr()
 
 	if result.Found {
-		title := fmt.Sprintf("✅ CDN 更新成功 - %s", now)
+		title := fmt.Sprintf("✅ 引用校验通过 - %s", now)
 		var sb strings.Builder
-		sb.WriteString("## CDN 更新检测结果\n\n")
-		sb.WriteString(fmt.Sprintf("- **状态**: ✅ 更新成功\n"))
+		sb.WriteString("## 本地引用校验结果\n\n")
+		sb.WriteString(fmt.Sprintf("- **状态**: ✅ 全部引用存在\n"))
 		sb.WriteString(fmt.Sprintf("- **时间**: %s\n", now))
-		sb.WriteString(fmt.Sprintf("- **JS 文件**: `%s`\n", result.JSFile))
-		sb.WriteString(fmt.Sprintf("- **Hash**: `%s`\n", result.Hash))
-		sb.WriteString(fmt.Sprintf("- **本地路径**: `%s`\n", result.LocalPath))
+		sb.WriteString(fmt.Sprintf("- **引用总数**: %d\n", result.TotalRefs))
 		sb.WriteString(fmt.Sprintf("- **检测位置**: %s\n", locationLabel))
-		sb.WriteString(fmt.Sprintf("- **轮询次数**: %d 次\n", result.Attempts))
-		if result.ElapsedTime > 0 {
-			sb.WriteString(fmt.Sprintf("- **等待耗时**: %s\n", result.ElapsedTime.Round(time.Second)))
-		}
+		sb.WriteString(fmt.Sprintf("- **耗时**: %s\n", result.ElapsedTime.Round(time.Second)))
 		return title, sb.String()
 	}
 
-	// 区分"轮询超时"与"初始请求连续失败"，避免请求失败时误报"超时"
-	var title, statusText string
-	if result.ElapsedTime > 0 {
-		title = fmt.Sprintf("❌ CDN 更新超时 - %s", now)
-		statusText = "❌ 超时未检测到更新"
-	} else {
-		title = fmt.Sprintf("❌ CDN 更新失败 - %s", now)
-		statusText = "❌ 请求失败，未检测到更新"
-	}
+	title := fmt.Sprintf("❌ 引用校验失败 - %s", now)
 	var sb strings.Builder
-	sb.WriteString("## CDN 更新检测结果\n\n")
-	sb.WriteString(fmt.Sprintf("- **状态**: %s\n", statusText))
+	sb.WriteString("## 本地引用校验结果\n\n")
+	sb.WriteString(fmt.Sprintf("- **状态**: ❌ 存在缺失引用\n"))
 	sb.WriteString(fmt.Sprintf("- **时间**: %s\n", now))
-	if result.JSFile != "" {
-		sb.WriteString(fmt.Sprintf("- **目标文件**: `%s`\n", result.JSFile))
-	} else {
-		sb.WriteString("- **目标文件**: 未能获取\n")
-	}
+	sb.WriteString(fmt.Sprintf("- **引用总数**: %d\n", result.TotalRefs))
+	sb.WriteString(fmt.Sprintf("- **缺失数量**: %d\n", len(result.MissingFiles)))
 	sb.WriteString(fmt.Sprintf("- **检测位置**: %s\n", locationLabel))
-	sb.WriteString(fmt.Sprintf("- **轮询次数**: %d 次\n", result.Attempts))
-	if result.ElapsedTime > 0 {
-		sb.WriteString(fmt.Sprintf("- **超时时间**: %s（已等待 %s）\n", checkTimeout, result.ElapsedTime.Round(time.Second)))
+	sb.WriteString(fmt.Sprintf("- **耗时**: %s\n", result.ElapsedTime.Round(time.Second)))
+	sb.WriteString("\n### 缺失文件列表\n\n")
+	for i, f := range result.MissingFiles {
+		if i >= 50 {
+			sb.WriteString(fmt.Sprintf("\n... 还有 %d 个缺失文件未列出\n", len(result.MissingFiles)-50))
+			break
+		}
+		sb.WriteString(fmt.Sprintf("- `%s`\n", f))
 	}
-	sb.WriteString("\n> 请检查 CDN 部署是否正常，或手动确认文件是否已同步。\n")
 	return title, sb.String()
 }
 
@@ -479,9 +463,9 @@ func buildFullNotifyContent(deployOutput string, logs []LogEntry, checkResult Ch
 
 	statusIcon := "✅"
 	if !checkResult.Found {
-		statusIcon = "❌"
+	statusIcon = "❌"
 	}
-	title := fmt.Sprintf("%s CDN 切换 + 更新检测 - %s", statusIcon, now)
+	title := fmt.Sprintf("%s CDN 切换 + 引用校验 - %s", statusIcon, now)
 
 	var sb strings.Builder
 	sb.WriteString("## CDN 切换完整报告\n\n")
@@ -508,25 +492,26 @@ func buildFullNotifyContent(deployOutput string, logs []LogEntry, checkResult Ch
 	sb.WriteString("---\n\n")
 	sb.WriteString("### 3. CDN 更新检测\n\n")
 	if checkResult.Found {
-		sb.WriteString(fmt.Sprintf("- **结果**: ✅ 更新成功\n"))
-		sb.WriteString(fmt.Sprintf("- **文件**: `%s`\n", checkResult.JSFile))
-		sb.WriteString(fmt.Sprintf("- **Hash**: `%s`\n", checkResult.Hash))
-	} else if checkResult.ElapsedTime > 0 {
-		sb.WriteString(fmt.Sprintf("- **结果**: ❌ 超时未检测到\n"))
-		sb.WriteString(fmt.Sprintf("- **目标**: `%s`\n", checkResult.JSFile))
+		sb.WriteString(fmt.Sprintf("- **结果**: ✅ 全部引用存在\n"))
 	} else {
-		sb.WriteString(fmt.Sprintf("- **结果**: ❌ 请求失败，未检测到\n"))
-		if checkResult.JSFile != "" {
-			sb.WriteString(fmt.Sprintf("- **目标**: `%s`\n", checkResult.JSFile))
-		} else {
-			sb.WriteString("- **目标**: 未能获取\n")
-		}
+		sb.WriteString(fmt.Sprintf("- **结果**: ❌ 存在缺失引用\n"))
+		sb.WriteString(fmt.Sprintf("- **缺失数量**: %d\n", len(checkResult.MissingFiles)))
 	}
-	sb.WriteString(fmt.Sprintf("- **轮询**: %d 次", checkResult.Attempts))
+	sb.WriteString(fmt.Sprintf("- **引用总数**: %d\n", checkResult.TotalRefs))
 	if checkResult.ElapsedTime > 0 {
-		sb.WriteString(fmt.Sprintf("（耗时 %s）", checkResult.ElapsedTime.Round(time.Second)))
+		sb.WriteString(fmt.Sprintf("- **校验耗时**: %s\n", checkResult.ElapsedTime.Round(time.Second)))
 	}
-	sb.WriteString("\n")
+	if !checkResult.Found && len(checkResult.MissingFiles) > 0 {
+		sb.WriteString("\n**缺失文件**:\n\n")
+		for i, f := range checkResult.MissingFiles {
+			if i >= 30 {
+				sb.WriteString(fmt.Sprintf("\n... 还有 %d 个未列出\n", len(checkResult.MissingFiles)-30))
+				break
+			}
+			sb.WriteString(fmt.Sprintf("- `%s`\n", f))
+		}
+		sb.WriteString("\n")
+	}
 
 	return title, sb.String()
 }
@@ -587,7 +572,8 @@ func modeCheck() bool {
 	}
 	logf("===== 检测流程结束 =====\n")
 
-	return result.Found
+	// 引用校验仅为通知，始终视为完成
+	return true
 }
 
 func modeFull() bool {
@@ -616,7 +602,7 @@ func modeFull() bool {
 		svnLogs = logs
 	}
 
-	logf("部署完成，开始检测 CDN 更新...\n")
+	logf("部署完成，开始本地引用校验...\n")
 
 	result := runCheck(cfg)
 
@@ -626,7 +612,8 @@ func modeFull() bool {
 	}
 	logf("===== 完整流程结束 =====\n")
 
-	return result.Found
+	// 部署已完成，引用校验仅为通知，不影响部署结果
+	return true
 }
 
 // ============================================================
@@ -694,10 +681,10 @@ func main() {
 
 		done := runFunc()
 		if done {
-			logf("✅ 检测到文件已更新，任务完成，程序自动退出\n")
+			logf("✅ 任务已完成，程序退出\n")
 			return
 		}
-		logf("⏳ 本次未检测到更新，将继续等待下一次定时执行...\n")
+		logf("⏳ 本次未完成，将继续等待下一次定时执行...\n")
 	}
 }
 
