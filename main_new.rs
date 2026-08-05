@@ -153,11 +153,17 @@ fn main() {
         println!("  src (Office): {}", config.deploy.company_source_path);
         println!("  dst (Office): {}", config.deploy.company_dest_path);
         println!("  deploy files ({}):", config.deploy.file_paths.len());
-        for fp in &config.deploy.file_paths {
-            println!("    - {}", fp);
-        }
-        println!("  (dry-run, no files modified)");
-        return;
+       for fp in &config.deploy.file_paths {
+           println!("    - {}", fp);
+       }
+       if !config.extra_hash_resources.is_empty() {
+           println!("  extra hash resources ({}):", config.extra_hash_resources.len());
+           for r in &config.extra_hash_resources {
+               println!("    - {}", r);
+           }
+       }
+       println!("  (dry-run, no files modified)");
+       return;
     }
 
     if deploy_only || deploy_commit {

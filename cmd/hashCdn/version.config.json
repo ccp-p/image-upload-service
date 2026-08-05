@@ -11,10 +11,13 @@
     "xdrsign",
     "xdrsignNew"
   ],
-  "processMainResources": [
-    "xdrNormal"
-  ],
-  "htmlFiles": [],
+ "processMainResources": [
+   "xdrNormal"
+ ],
+ "extraHashResources": [
+   "scripts/common/utils_index.js"
+ ],
+ "htmlFiles": [],
   "excludeDirs": [
     "node_modules",
     ".git",

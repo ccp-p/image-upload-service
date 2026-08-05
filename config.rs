@@ -12,9 +12,10 @@ pub struct Config {
     pub exclude_dirs: Vec<String>,
     pub home_html_file: String,
     pub company_html_file: String,
-    pub include_components: Vec<String>,
-    pub process_main_resources: Vec<String>,
-    pub replace_all_with_cdn: bool,
+   pub include_components: Vec<String>,
+   pub process_main_resources: Vec<String>,
+   pub extra_hash_resources: Vec<String>,
+   pub replace_all_with_cdn: bool,
     pub rollback_after_deploy: bool,
     pub git_commit_after_rollback: bool,
     pub cdn_exclude_files: Vec<String>,
@@ -51,9 +52,10 @@ impl Default for Config {
             ],
             home_html_file: String::new(),
             company_html_file: String::new(),
-            include_components: Vec::new(),
-            process_main_resources: Vec::new(),
-            replace_all_with_cdn: false,
+           include_components: Vec::new(),
+           process_main_resources: Vec::new(),
+           extra_hash_resources: Vec::new(),
+           replace_all_with_cdn: false,
             rollback_after_deploy: false,
             git_commit_after_rollback: false,
             cdn_exclude_files: Vec::new(),
@@ -120,10 +122,13 @@ pub fn load_config(config_path: &str) -> Result<Config, String> {
     if let Some(arr) = json.get_array_str("includeComponents") {
         config.include_components = arr;
     }
-    if let Some(arr) = json.get_array_str("processMainResources") {
-        config.process_main_resources = arr;
-    }
-    if let Some(b) = json.get_bool("replaceAllWithCDN") {
+   if let Some(arr) = json.get_array_str("processMainResources") {
+       config.process_main_resources = arr;
+   }
+   if let Some(arr) = json.get_array_str("extraHashResources") {
+       config.extra_hash_resources = arr;
+   }
+   if let Some(b) = json.get_bool("replaceAllWithCDN") {
         config.replace_all_with_cdn = b;
     }
     if let Some(b) = json.get_bool("rollbackAfterDeploy") {

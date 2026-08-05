@@ -913,13 +913,43 @@ impl VersionManager {
                         let key = rel.strip_prefix("./").unwrap_or(&rel).to_string();
                         resources.get_mut("css").unwrap().entry(key).or_insert(hrel);
                     }
-                    break;
-                }
-            }
-        }
+                   break;
+               }
+           }
 
-        println!();
-        println!("🔍 扫描组件资源...");
+           // Extra hash resources: shared scripts (e.g. utils_index.js) referenced
+           // by the page but outside a "components" path, so collect_resources skips them.
+           if !self.config.extra_hash_resources.is_empty() {
+               println!();
+               println!("📦 处理额外 hash 资源...");
+               for rel_path in &self.config.extra_hash_resources {
+                   let clean_rel = rel_path.replace('\\', "/");
+                   let abs = path_join(&html_dir, &clean_rel);
+                   let actual = self.find_file(&abs);
+                   let target = if actual.is_empty() { abs } else { actual };
+                   if !file_exists(&target) {
+                       eprintln!("  ⚠️ 未找到: {}", clean_rel);
+                       continue;
+                   }
+                   let rel = path_relative(&html_dir, &target).replace('\\', "/");
+                   let key = rel.strip_prefix("./").unwrap_or(&rel).to_string();
+                   if resources.get("js").unwrap().contains_key(&key) {
+                       continue;
+                   }
+                   match self.rename_file_with_hash(&target) {
+                       Ok(info) => {
+                           println!("  ✅ JS: {} -> {}", path_base(&target), path_base(&info.hashed_path));
+                           let hrel = path_relative(&html_dir, &info.hashed_path).replace('\\', "/");
+                           resources.get_mut("js").unwrap().insert(key, hrel);
+                       }
+                       Err(e) => eprintln!("  ⚠️ 处理失败 {}: {}", clean_rel, e),
+                   }
+               }
+           }
+       }
+
+       println!();
+       println!("🔍 扫描组件资源...");
         if let Ok(html_resources) = self.collect_resources_from_html(html_path) {
             let js_count = html_resources.get("js").map(|v| v.len()).unwrap_or(0);
             let css_count = html_resources.get("css").map(|v| v.len()).unwrap_or(0);
@@ -2104,11 +2134,76 @@ mod tests {
             "found double prefix, got: {result}"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+       let _ = std::fs::remove_dir_all(&dir);
+   }
 
-    #[test]
-    fn test_apply_resource_to_tags_already_http_url() {
+   #[test]
+   fn test_e2e_process_html_extra_hash_resources() {
+       // A shared script (e.g. utils_index.js) referenced via a relative
+       // path with a ?query, configured under extraHashResources, must be
+       // hashed and its HTML reference updated to a CDN URL — even though
+       // the path does not contain "components".
+       let dir = std::env::temp_dir().join(format!("e2e_ehr_{}", tmp_id()));
+       let common_dir = dir.join("scripts").join("common");
+       std::fs::create_dir_all(&common_dir).unwrap();
+
+       std::fs::write(common_dir.join("utils_index.js"), "console.log('utils');").unwrap();
+
+       let html = "<!DOCTYPE html>\n\
+           <html>\n<head></head>\n<body>\n\
+           <script type=\"text/javascript\" src=\"./scripts/common/utils_index.js?2505141\"></script>\n\
+           </body>\n</html>";
+       let html_path = dir.join("page.html");
+       std::fs::write(&html_path, html).unwrap();
+
+       let cdn = "https://cdn.example.com";
+       let mut vm = VersionManager::new(
+           Config {
+               hash_length: 8,
+               cdn_domain: cdn.to_string(),
+               process_main_resources: vec!["page".to_string()],
+               extra_hash_resources: vec!["scripts/common/utils_index.js".to_string()],
+               ..Default::default()
+           },
+           false,
+       );
+
+       vm.process_html_file(html_path.to_str().unwrap()).unwrap();
+
+       let result = std::fs::read_to_string(&html_path).unwrap();
+
+       // The old ?query reference must be gone.
+       assert!(
+           !result.contains("utils_index.js?2505141"),
+           "old ?query reference still present: {result}"
+       );
+
+       // Must contain a CDN-prefixed hashed reference.
+       assert!(
+           result.contains("https://cdn.example.com/scripts/common/utils_index.")
+               && result.contains(".js"),
+           "expected CDN-prefixed hashed utils_index URL, got: {result}"
+       );
+
+       // The hashed file must exist on disk.
+       let has_hashed = std::fs::read_dir(&common_dir)
+           .unwrap()
+           .filter_map(|e| e.ok())
+           .any(|e| {
+               let n = e.file_name().to_string_lossy().to_string();
+               n.starts_with("utils_index.") && n.ends_with(".js") && n != "utils_index.js"
+           });
+       assert!(
+           has_hashed,
+           "hashed utils_index.*.js not found in {}",
+           common_dir.display()
+       );
+
+       let _ = std::fs::remove_dir_all(&dir);
+   }
+
+   #[test]
+   fn test_apply_resource_to_tags_already_http_url() {
         // When the resource map key is already an HTTP URL (e.g. from a
         // re-run), apply_resource_to_tags must not double-prefix it.
         let html = "<link rel=\"stylesheet\" href=\"https://cdn.example.com/css/style.aaaabbbb.css\">";

@@ -136,6 +136,7 @@ type Config struct {
 	IncludeComponents []string `json:"includeComponents"` // 只处理指定的组件
 	// 新增：指定哪些HTML文件需要处理主资源
 	ProcessMainResources []string `json:"processMainResources"`
+	ExtraHashResources   []string `json:"extraHashResources"` // 额外需要hash的资源（非components路径的共享脚本，如utils_index.js）
 	ReplaceAllWithCDN    bool     `json:"replaceAllWithCDN"` // 替换所有资源为CDN路径
 	// 新增：部署相关配置
 	RollbackAfterDeploy    bool         `json:"rollbackAfterDeploy"`    // 部署后回滚HTML
@@ -417,6 +418,38 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
 		}
 	} else {
 		fmt.Println("\n🎨 跳过主 CSS 文件")
+	}
+
+	// 2.5 处理额外 hash 资源（非 components 路径的共享脚本，如 utils_index.js）
+	if shouldProcessMain && len(vm.config.ExtraHashResources) > 0 {
+		fmt.Println("\n📦 处理额外 hash 资源...")
+		for _, relPath := range vm.config.ExtraHashResources {
+			cleanRel := strings.ReplaceAll(relPath, "\\", "/")
+			abs := filepath.Join(htmlDir, cleanRel)
+			target := abs
+			if actual := vm.findFile(abs); actual != "" {
+				target = actual
+			}
+			if !fileExists(target) {
+				fmt.Printf("  ⚠️ 未找到: %s\n", cleanRel)
+				continue
+			}
+			rel, _ := filepath.Rel(htmlDir, target)
+			rel = filepath.ToSlash(rel)
+			normalizedKey := strings.TrimPrefix(rel, "./")
+			if _, exists := resources["js"][normalizedKey]; exists {
+				continue
+			}
+			info, err := vm.renameFileWithHash(target)
+			if err != nil {
+				fmt.Printf("  ⚠️ 处理失败 %s: %v\n", cleanRel, err)
+				continue
+			}
+			fmt.Printf("  ✅ JS: %s -> %s\n", filepath.Base(target), filepath.Base(info.HashedPath))
+			hashedRel, _ := filepath.Rel(htmlDir, info.HashedPath)
+			hashedRel = filepath.ToSlash(hashedRel)
+			resources["js"][normalizedKey] = hashedRel
+		}
 	}
 
 	// 3. 收集并处理组件资源
@@ -2674,6 +2707,12 @@ func main() {
 		fmt.Printf("  部署文件列表(%d项):\n", len(config.Deploy.FilePaths))
 		for _, fp := range config.Deploy.FilePaths {
 			fmt.Printf("    - %s\n", fp)
+		}
+		if len(config.ExtraHashResources) > 0 {
+			fmt.Printf("  额外hash资源(%d项):\n", len(config.ExtraHashResources))
+			for _, r := range config.ExtraHashResources {
+				fmt.Printf("    - %s\n", r)
+			}
 		}
 		fmt.Println("  （预览模式，不执行实际操作）")
 		return

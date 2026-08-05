@@ -883,3 +883,125 @@ func TestRevertSrcGitCleansWorkspace(t *testing.T) {
 		t.Errorf("workspace should be clean, got: %s", statusOut)
 	}
 }
+
+// TestProcessHTMLFileExtraHashResources verifies that a shared script (e.g.
+// utils_index.js) referenced via a relative path with a ?query, configured
+// under ExtraHashResources, is hashed and its HTML reference updated to a CDN
+// URL — even though the path does not contain "components".
+func TestProcessHTMLFileExtraHashResources(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create scripts/common/utils_index.js
+	commonDir := filepath.Join(tmpDir, "scripts", "common")
+	if err := os.MkdirAll(commonDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	utilsPath := filepath.Join(commonDir, "utils_index.js")
+	if err := os.WriteFile(utilsPath, []byte("console.log('utils');"), 0644); err != nil {
+		t.Fatalf("write utils_index.js failed: %v", err)
+	}
+
+	htmlContent := `<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+<script type="text/javascript" src="./scripts/common/utils_index.js?2505141"></script>
+</body>
+</html>`
+	htmlPath := filepath.Join(tmpDir, "page.html")
+	if err := os.WriteFile(htmlPath, []byte(htmlContent), 0644); err != nil {
+		t.Fatalf("write html failed: %v", err)
+	}
+
+	cdn := "https://cdn.example.com"
+	vm := NewVersionManager(Config{
+		HashLength:         8,
+		CDNDomain:          cdn,
+		ProcessMainResources: []string{"page"},
+		ExtraHashResources: []string{"scripts/common/utils_index.js"},
+	}, false)
+
+	if err := vm.processHTMLFile(htmlPath); err != nil {
+		t.Fatalf("processHTMLFile failed: %v", err)
+	}
+
+	result, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read html failed: %v", err)
+	}
+	strResult := string(result)
+
+	// The old ?query reference must be gone.
+	if strings.Contains(strResult, "utils_index.js?2505141") {
+		t.Errorf("old ?query reference still present: %s", strResult)
+	}
+
+	// Must contain a CDN-prefixed hashed reference.
+	if !strings.Contains(strResult, "https://cdn.example.com/scripts/common/utils_index.") ||
+		!strings.Contains(strResult, ".js") {
+		t.Errorf("expected CDN-prefixed hashed utils_index URL, got: %s", strResult)
+	}
+
+	// The hashed file must exist on disk.
+	entries, err := os.ReadDir(commonDir)
+	if err != nil {
+		t.Fatalf("read dir failed: %v", err)
+	}
+	hasHashed := false
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, "utils_index.") && strings.HasSuffix(name, ".js") && name != "utils_index.js" {
+			hasHashed = true
+			break
+		}
+	}
+	if !hasHashed {
+		t.Errorf("hashed utils_index.*.js not found in %s", commonDir)
+	}
+}
+
+// TestProcessHTMLFileExtraHashResourcesNoCDN verifies the non-CDN case: the
+// HTML reference is updated to the hashed relative path (no CDN prefix).
+func TestProcessHTMLFileExtraHashResourcesNoCDN(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	commonDir := filepath.Join(tmpDir, "scripts", "common")
+	if err := os.MkdirAll(commonDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	utilsPath := filepath.Join(commonDir, "utils_index.js")
+	if err := os.WriteFile(utilsPath, []byte("console.log('utils');"), 0644); err != nil {
+		t.Fatalf("write utils_index.js failed: %v", err)
+	}
+
+	htmlContent := `<script src="scripts/common/utils_index.js"></script>`
+	htmlPath := filepath.Join(tmpDir, "page.html")
+	if err := os.WriteFile(htmlPath, []byte(htmlContent), 0644); err != nil {
+		t.Fatalf("write html failed: %v", err)
+	}
+
+	// No CDNDomain set — should produce a relative hashed path, not a CDN URL.
+	vm := NewVersionManager(Config{
+		HashLength:         8,
+		ProcessMainResources: []string{"page"},
+		ExtraHashResources: []string{"scripts/common/utils_index.js"},
+	}, false)
+
+	if err := vm.processHTMLFile(htmlPath); err != nil {
+		t.Fatalf("processHTMLFile failed: %v", err)
+	}
+
+	result, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read html failed: %v", err)
+	}
+	strResult := string(result)
+
+	// Must contain a hashed relative reference (no CDN, no ?query).
+	if !strings.Contains(strResult, "scripts/common/utils_index.") || !strings.Contains(strResult, ".js") {
+		t.Errorf("expected hashed relative utils_index URL, got: %s", strResult)
+	}
+	if strings.Contains(strResult, "https://") {
+		t.Errorf("should not contain CDN URL in no-CDN mode, got: %s", strResult)
+	}
+}
