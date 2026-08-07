@@ -37,9 +37,14 @@ $stateFile   = Join-Path $PSScriptRoot 'tunnel-state.json'
             $sent = $false
             for ($i = 1; $i -le 3 -and -not $sent; $i++) {
                 try {
-                    Invoke-RestMethod -Uri $pushPlusUrl -Method Post -ContentType 'application/json; charset=utf-8' -Body $bodyBytes -TimeoutSec 15 | Out-Null
-                    Write-Host "PushPlus notification sent: $url" -ForegroundColor Green
-                    $sent = $true
+                    $resp = Invoke-RestMethod -Uri $pushPlusUrl -Method Post -ContentType 'application/json; charset=utf-8' -Body $bodyBytes -TimeoutSec 15
+                    if ($resp.code -eq 200) {
+                        Write-Host "PushPlus notification sent: $url" -ForegroundColor Green
+                        $sent = $true
+                    } else {
+                        Write-Host "PushPlus attempt $i returned code $($resp.code): $($resp.msg)" -ForegroundColor Yellow
+                        if ($i -lt 3) { Start-Sleep -Seconds ($i * 2) }
+                    }
                 } catch {
                     Write-Host "PushPlus attempt $i failed: $($_.Exception.Message)" -ForegroundColor Yellow
                     if ($i -lt 3) { Start-Sleep -Seconds ($i * 2) }
