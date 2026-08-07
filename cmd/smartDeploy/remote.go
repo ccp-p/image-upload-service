@@ -562,7 +562,7 @@ func (c *sshClient) Upload(localPath, remotePath string) error {
 		return fmt.Errorf("not connected: %w", err)
 	}
 
-	data, err := readStableFile(localPath, 3, 50*time.Millisecond)
+	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return fmt.Errorf("read local file: %w", err)
 	}

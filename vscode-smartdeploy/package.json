@@ -38,7 +38,7 @@
      },
       {
         "command": "smartdeploy.clearTemp",
-        "title": "SmartDeploy: Clear Temp Directory"
+        "title": "SmartDeploy: Clear+Upload+Sync"
       },
       {
         "command": "smartdeploy.sync",

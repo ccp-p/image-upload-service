@@ -479,29 +479,48 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // Clear the temp staging directory on the server. Shows a strong
-    // confirmation with the path being deleted to prevent accidents.
-    const clearTempCmd = vscode.commands.registerCommand("smartdeploy.clearTemp", async () => {
-        const clearPath = vscode.workspace.getConfiguration("smartdeploy").get<string>("clearPath", "");
-        const pathLabel = clearPath || "the temp directory";
-        const choice = await vscode.window.showWarningMessage(
-            `SmartDeploy: Delete all files under '${pathLabel}' on the server? This cannot be undone.`,
-            "Yes, Delete", "Cancel"
-        );
-        if (choice !== "Yes, Delete") return;
-        await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: "SmartDeploy: Clearing temp directory...",
-            cancellable: false,
-        }, async () => {
-            try {
-                await clearTemp();
-                vscode.window.showInformationMessage("SmartDeploy: Temp directory cleared");
-            } catch (err: any) {
-                vscode.window.showErrorMessage(`SmartDeploy: ${err.message}`);
-            }
-        });
-    });
+ // Three-in-one: clear temp -> upload selected files -> sync, with no
+ // confirmation. Replaces the old confirm-then-clear behavior.
+ const clearTempCmd = vscode.commands.registerCommand("smartdeploy.clearTemp", async (...args: any[]) => {
+      await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: "SmartDeploy",
+          cancellable: false,
+      }, async (progress) => {
+          try {
+              // Step 1: Clear temp directory (no confirmation).
+              progress.report({ message: "Clearing temp directory..." });
+              await clearTemp();
+
+              // Step 2: Upload the currently selected file(s).
+              const filePaths = resolveUris(args);
+              if (filePaths.length === 0) {
+                  vscode.window.showWarningMessage("SmartDeploy: Temp cleared, but no file selected to upload");
+                  return;
+              }
+              progress.report({ message: `Uploading ${filePaths.length} file(s)...` });
+              const result = await uploadFiles(filePaths);
+
+              // Step 3: Sync temp to webapp.
+              progress.report({ message: "Syncing to webapp..." });
+              const syncOutput = await syncToWebapp();
+
+              if (result.failed > 0) {
+                  vscode.window.showWarningMessage(
+                      `SmartDeploy: Cleared -> Uploaded ${result.uploaded}, failed ${result.failed} -> Synced`
+                  );
+              } else {
+                  const word = result.uploaded === 1 ? "file" : "files";
+                  vscode.window.showInformationMessage(
+                      `SmartDeploy: Cleared -> Uploaded ${result.uploaded} ${word} -> Synced`
+                  );
+              }
+              debugLog(`sync output: ${syncOutput}`);
+          } catch (err: any) {
+              vscode.window.showErrorMessage(`SmartDeploy: ${err.message}`);
+          }
+      });
+  });
 
     // Rsync the temp directory to the webapp root.
     const syncCmd = vscode.commands.registerCommand("smartdeploy.sync", async () => {
