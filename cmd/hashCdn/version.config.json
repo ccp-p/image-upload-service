@@ -15,7 +15,8 @@
    "xdrNormal"
  ],
  "extraHashResources": [
-   "scripts/common/utils_index.js"
+   "scripts/common/utils_index.js",
+   "scripts/common/loginxdrNew.js"
  ],
  "htmlFiles": [],
   "excludeDirs": [
@@ -42,7 +43,8 @@
       "/scripts/js/xdrNormal.js",
       "/images/gztc1.png",
       "/xdrNormal.html",
-      "/scripts/common/utils_index.js"
+      "/scripts/common/utils_index.js",
+      "/scripts/common/loginxdrNew.js"
     ],
     "gitAuthors": ["chenchengpeng", "ccp"]
   },

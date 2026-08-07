@@ -960,6 +960,104 @@ func TestProcessHTMLFileExtraHashResources(t *testing.T) {
 	}
 }
 
+// TestProcessHTMLFileExtraHashResourcesMultiple verifies that multiple
+// ExtraHashResources (e.g. utils_index.js and loginxdrNew.js, both under
+// scripts/common/) are hashed together and each HTML reference updated to a
+// CDN URL — mirroring the real version.config.json setup where both shared
+// scripts are listed together.
+func TestProcessHTMLFileExtraHashResourcesMultiple(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	commonDir := filepath.Join(tmpDir, "scripts", "common")
+	if err := os.MkdirAll(commonDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	sources := map[string]string{
+		"utils_index.js": "console.log('utils');",
+		"loginxdrNew.js": "console.log('login');",
+	}
+	for name, content := range sources {
+		if err := os.WriteFile(filepath.Join(commonDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("write %s failed: %v", name, err)
+		}
+	}
+
+	// Both scripts referenced via a relative path with a ?query, as in production.
+	htmlContent := `<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+<script type="text/javascript" src="./scripts/common/utils_index.js?2505141"></script>
+<script type="text/javascript" src="./scripts/common/loginxdrNew.js?v=202607104"></script>
+</body>
+</html>`
+	htmlPath := filepath.Join(tmpDir, "page.html")
+	if err := os.WriteFile(htmlPath, []byte(htmlContent), 0644); err != nil {
+		t.Fatalf("write html failed: %v", err)
+	}
+
+	cdn := "https://cdn.example.com"
+	vm := NewVersionManager(Config{
+		HashLength:           8,
+		CDNDomain:            cdn,
+		ProcessMainResources: []string{"page"},
+		ExtraHashResources: []string{
+			"scripts/common/utils_index.js",
+			"scripts/common/loginxdrNew.js",
+		},
+	}, false)
+
+	if err := vm.processHTMLFile(htmlPath); err != nil {
+		t.Fatalf("processHTMLFile failed: %v", err)
+	}
+
+	result, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read html failed: %v", err)
+	}
+	strResult := string(result)
+
+	// Both old ?query references must be gone.
+	if strings.Contains(strResult, "utils_index.js?2505141") {
+		t.Errorf("old utils_index ?query still present: %s", strResult)
+	}
+	if strings.Contains(strResult, "loginxdrNew.js?v=202607104") {
+		t.Errorf("old loginxdrNew ?query still present: %s", strResult)
+	}
+
+	// Both must have CDN-prefixed hashed references.
+	for _, base := range []string{"utils_index", "loginxdrNew"} {
+		prefix := cdn + "/scripts/common/" + base + "."
+		if !strings.Contains(strResult, prefix) || !strings.Contains(strResult, ".js") {
+			t.Errorf("expected CDN-prefixed hashed %s URL, got: %s", base, strResult)
+		}
+	}
+
+	// Both hashed files must exist on disk and be distinct.
+	hashed := map[string]bool{}
+	entries, err := os.ReadDir(commonDir)
+	if err != nil {
+		t.Fatalf("read dir failed: %v", err)
+	}
+	for _, base := range []string{"utils_index", "loginxdrNew"} {
+		found := false
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasPrefix(name, base+".") && strings.HasSuffix(name, ".js") && name != base+".js" {
+				found = true
+				hashed[name] = true
+			}
+		}
+		if !found {
+			t.Errorf("hashed %s.*.js not found in %s", base, commonDir)
+		}
+	}
+	if len(hashed) != 2 {
+		t.Errorf("expected 2 distinct hashed files, got %d (%v)", len(hashed), hashed)
+	}
+}
+
 // TestProcessHTMLFileExtraHashResourcesNoCDN verifies the non-CDN case: the
 // HTML reference is updated to the hashed relative path (no CDN prefix).
 func TestProcessHTMLFileExtraHashResourcesNoCDN(t *testing.T) {
