@@ -2438,19 +2438,13 @@ func (vm *VersionManager) gitCommitAndPushAfterRollback(htmlPath string) error {
 	}
 
 	// 1. 获取最新的git commit hash作为提交信息
-	hash, message, err := vm.getLatestGitCommitForRollback(dir)
+	hash, _, err := vm.getLatestGitCommitForRollback(dir)
 	if err != nil {
 		fmt.Printf("⚠️  获取Git提交信息失败: %v\n", err)
 		// 使用时间戳作为备选提交信息
 		hash = time.Now().Format("20060102150405")
-		message = ""
 	}
-	var commitMsg string
-	if message != "" {
-		commitMsg = fmt.Sprintf("rollback after deploy: %s (%s)", message, hash)
-	} else {
-		commitMsg = fmt.Sprintf("rollback after deploy (ref: %s)", hash)
-	}
+	commitMsg := fmt.Sprintf("切hash（%s)", hash)
 
 	// 2. 执行 git add -A (全量添加)
 	fmt.Printf("  📁 执行 git add -A...\n")
