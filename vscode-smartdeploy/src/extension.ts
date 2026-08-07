@@ -258,9 +258,27 @@ function resolveUris(args: any[]): string[] {
 // runGit executes git in cwd and resolves with stdout. It prefers the path
 // configured for VS Code's built-in git (git.path), falling back to "git" on
 // PATH; on Windows it runs through a shell so git.cmd resolves.
-function runGit(args: string[], cwd: string): Promise<string> {
+// resolveGitPath returns the git executable to invoke. VSCode's "git.path"
+// setting may point at a directory (e.g. "D:\Git\cmd") rather than the
+// executable itself. When the configured value is a directory we append
+// "git" so the shell resolves git.cmd on Windows or git on Unix.
+function resolveGitPath(): string {
     const configured = vscode.workspace.getConfiguration("git").get<string>("path");
-    const git = configured && configured.length > 0 ? configured : "git";
+    if (configured && configured.length > 0) {
+        try {
+            if (fs.statSync(configured).isDirectory()) {
+                return path.join(configured, "git");
+            }
+        } catch {
+            // not statable - assume it is already an executable path
+        }
+        return configured;
+    }
+    return "git";
+}
+
+function runGit(args: string[], cwd: string): Promise<string> {
+    const git = resolveGitPath();
     return new Promise((resolve, reject) => {
         execFile(git, args, {
             cwd,
@@ -432,27 +450,30 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const filePaths: string[] = [];
         const seen = new Set<string>();
-        let foundRepo = false;
-        for (const folder of folders) {
-            const cwd = folder.uri.fsPath;
-            try {
-                const changed = await collectGitChangedFiles(cwd);
-                foundRepo = true;
-                debugLog(`git changed in ${cwd}: ${changed.length} files: ${JSON.stringify(changed)}`);
-                for (const f of changed) {
-                    if (!seen.has(f)) {
-                        seen.add(f);
-                        filePaths.push(f);
-                    }
-                }
-            } catch {
-                // not a git repo, or git unavailable - skip this folder
-            }
-        }
-        if (!foundRepo) {
-            vscode.window.showWarningMessage("SmartDeploy: No git repository found in the workspace");
-            return;
-        }
+       let foundRepo = false;
+        let lastError: any = null;
+       for (const folder of folders) {
+           const cwd = folder.uri.fsPath;
+           try {
+               const changed = await collectGitChangedFiles(cwd);
+               foundRepo = true;
+               debugLog(`git changed in ${cwd}: ${changed.length} files: ${JSON.stringify(changed)}`);
+               for (const f of changed) {
+                   if (!seen.has(f)) {
+                       seen.add(f);
+                       filePaths.push(f);
+                   }
+               }
+            } catch (err: any) {
+                debugLog(`git failed in ${cwd}: ${err.message}`);
+                lastError = err;
+           }
+       }
+       if (!foundRepo) {
+            const hint = lastError ? `: ${lastError.message}` : "";
+            vscode.window.showWarningMessage(`SmartDeploy: No git repository found in the workspace${hint}`);
+           return;
+       }
         if (filePaths.length === 0) {
             vscode.window.showInformationMessage("SmartDeploy: No changed files to upload");
             return;
