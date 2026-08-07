@@ -1,0 +1,73 @@
+# Hook 配置 — hashCdn 项目
+# 这些 Hook 在 AI 执行关键操作前/后自动触发，减少返工。
+
+hooks:
+  # === before-message: 消息前钩子 ===
+  - name: load-dual-version-skill
+    trigger: before-message
+    condition: |
+      消息中涉及修改 Go 或 Rust 代码
+    action: |
+      提醒 AI 加载 skills/project/dual-version-alignment/SKILL.md
+      如果只改了一版，必须检查另一版是否需要同步
+
+  - name: remind-preserve-original
+    trigger: before-message
+    condition: |
+      消息中涉及 hash 处理、文件重命名、资源处理
+    action: |
+      提醒：hash 处理永远生成副本，不删除原始无 hash 文件
+
+  - name: remind-dual-env
+    trigger: before-message
+    condition: |
+      消息中涉及路径配置、新增配置字段
+    action: |
+      提醒：所有路径配置都要成对（home/company），通过 IS_HOME 区分
+
+  # === after-message: 消息后钩子 ===
+  - name: check-version-alignment
+    trigger: after-message
+    condition: |
+      AI 修改了 Go 版或 Rust 版代码
+    action: |
+      检查：是否同步修改了另一版？
+      如果没有，提示 AI 补充另一版的修改
+
+  - name: check-config-consistency
+    trigger: after-message
+    condition: |
+      AI 修改了 version.config.json 的字段结构
+    action: |
+      检查：Go 和 Rust 的 Config 结构体是否都加了对应字段？
+
+  # === after-edit: 编辑后钩子 ===
+  - name: run-go-test
+    trigger: after-edit
+    condition: |
+      修改了 cmd/hashCdn/main.go 或 cmd/hashCdn/main_test.go
+    action: |
+      运行 go test -v 验证
+      如果测试失败，报告失败原因
+
+  - name: run-cargo-test
+    trigger: after-edit
+    condition: |
+      修改了 *.rs 文件
+    action: |
+      运行 cargo test 验证
+      如果测试失败，报告失败原因
+
+  - name: check-regex-alignment
+    trigger: after-edit
+    condition: |
+      修改了 patterns.rs 或 main.go 中的正则
+    action: |
+      检查：另一版的正则是否同步修改？
+      对照 dual-version-alignment/SKILL.md 中的正则对照表
+
+  # === skill-loaded: 技能加载后钩子 ===
+  - name: log-skill-usage
+    trigger: skill-loaded
+    action: |
+      记录哪个技能被加载，用于后续优化
