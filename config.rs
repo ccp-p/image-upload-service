@@ -15,8 +15,9 @@ pub struct Config {
    pub include_components: Vec<String>,
    pub process_main_resources: Vec<String>,
    pub extra_hash_resources: Vec<String>,
-   pub replace_all_with_cdn: bool,
-    pub rollback_after_deploy: bool,
+  pub replace_all_with_cdn: bool,
+   pub obfuscate_js: bool,
+   pub rollback_after_deploy: bool,
     pub git_commit_after_rollback: bool,
     pub cdn_exclude_files: Vec<String>,
     pub deploy: DeployConfig,
@@ -55,8 +56,9 @@ impl Default for Config {
            include_components: Vec::new(),
            process_main_resources: Vec::new(),
            extra_hash_resources: Vec::new(),
-           replace_all_with_cdn: false,
-            rollback_after_deploy: false,
+          replace_all_with_cdn: false,
+          obfuscate_js: false,
+           rollback_after_deploy: false,
             git_commit_after_rollback: false,
             cdn_exclude_files: Vec::new(),
             deploy: DeployConfig::default(),
@@ -128,10 +130,13 @@ pub fn load_config(config_path: &str) -> Result<Config, String> {
    if let Some(arr) = json.get_array_str("extraHashResources") {
        config.extra_hash_resources = arr;
    }
-   if let Some(b) = json.get_bool("replaceAllWithCDN") {
-        config.replace_all_with_cdn = b;
-    }
-    if let Some(b) = json.get_bool("rollbackAfterDeploy") {
+  if let Some(b) = json.get_bool("replaceAllWithCDN") {
+       config.replace_all_with_cdn = b;
+   }
+   if let Some(b) = json.get_bool("obfuscateJS") {
+       config.obfuscate_js = b;
+   }
+   if let Some(b) = json.get_bool("rollbackAfterDeploy") {
         config.rollback_after_deploy = b;
     }
     if let Some(b) = json.get_bool("gitCommitAfterRollback") {

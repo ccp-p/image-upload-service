@@ -138,6 +138,7 @@ type Config struct {
 	ProcessMainResources []string `json:"processMainResources"`
 	ExtraHashResources   []string `json:"extraHashResources"` // 额外需要hash的资源（非components路径的共享脚本，如utils_index.js）
 	ReplaceAllWithCDN    bool     `json:"replaceAllWithCDN"` // 替换所有资源为CDN路径
+	ObfuscateJS          bool     `json:"obfuscateJS"`       // 实验性：对JS文件进行混淆（minify+mangle）
 	// 新增：部署相关配置
 	RollbackAfterDeploy    bool         `json:"rollbackAfterDeploy"`    // 部署后回滚HTML
 	GitCommitAfterRollback bool         `json:"gitCommitAfterRollback"` // 回滚后执行git commit和push
@@ -659,10 +660,31 @@ func (vm *VersionManager) renameFileWithHash(filePath string) (*FileInfo, error)
 		sourcePath = cleanPath
 	}
 
-	// 计算hash（基于源文件）
-	hash, err := vm.calculateFileHash(sourcePath)
-	if err != nil {
-		return nil, err
+	// 对JS文件进行实验性混淆（minify+mangle），hash基于混淆后内容
+	var processedContent []byte // 非 nil 表示内容已被变换（混淆），需直接写入而非 copyFile
+	isJS := strings.HasSuffix(strings.ToLower(cleanFilename), ".js")
+
+	var hash string
+	if vm.config.ObfuscateJS && isJS {
+		raw, readErr := os.ReadFile(sourcePath)
+		if readErr != nil {
+			return nil, readErr
+		}
+		obf, obfErr := obfuscateJS(raw)
+		if obfErr != nil {
+			fmt.Printf("  ⚠️  混淆失败 %s: %v（使用原始内容）\n", cleanFilename, obfErr)
+			processedContent = raw
+		} else {
+			processedContent = obf
+			fmt.Printf("  🔒 混淆: %s (%d -> %d bytes)\n", cleanFilename, len(raw), len(obf))
+		}
+		hash = hashFromBytes(processedContent, vm.config.HashLength)
+	} else {
+		h, err := vm.calculateFileHash(sourcePath)
+		if err != nil {
+			return nil, err
+		}
+		hash = h
 	}
 
 	newFilename := vm.addHashToFilename(cleanFilename, hash)
@@ -694,9 +716,15 @@ func (vm *VersionManager) renameFileWithHash(filePath string) (*FileInfo, error)
 		return info, nil
 	}
 
-	// 复制源文件到新路径
-	if err := copyFile(sourcePath, newPath); err != nil {
-		return nil, fmt.Errorf("复制文件失败: %v", err)
+	// 写入新文件：混淆内容直接写入，否则复制源文件
+	if processedContent != nil {
+		if err := os.WriteFile(newPath, processedContent, 0644); err != nil {
+			return nil, fmt.Errorf("写入混淆文件失败: %v", err)
+		}
+	} else {
+		if err := copyFile(sourcePath, newPath); err != nil {
+			return nil, fmt.Errorf("复制文件失败: %v", err)
+		}
 	}
 
 	vcsGitAdd(newPath, vm.debugMode) // 自动添加到git

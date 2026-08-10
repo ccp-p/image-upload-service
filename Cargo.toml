@@ -9,3 +9,9 @@ path = "main_new.rs"
 
 [dependencies]
 # Pure std-lib: zero external crates for minimal binary size on low-spec devices
+oxc_allocator = "0.143"
+oxc_codegen = "0.143"
+oxc_mangler = "0.143"
+oxc_minifier = "0.143"
+oxc_parser = "0.143"
+oxc_span = "0.143"

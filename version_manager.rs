@@ -8,6 +8,13 @@ use crate::config::Config;
 use crate::md5;
 use crate::patterns;
 
+use oxc_allocator::Allocator;
+use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
+use oxc_mangler::MangleOptions;
+use oxc_minifier::{CompressOptions, Minifier, MinifierOptions};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+
 // ---------------------------------------------------------------------------
 // Structs
 // ---------------------------------------------------------------------------
@@ -48,6 +55,57 @@ pub fn copy_file(src: &str, dst: &str) -> Result<(), String> {
     std::fs::copy(src, dst)
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// obfuscate_js minifies+mangles JS source via oxc toolchain.
+/// Returns obfuscated bytes, or the original on error (non-fatal).
+fn obfuscate_js(content: &[u8]) -> Vec<u8> {
+    // oxc is well-tested (test262 conformance) but keep catch_unwind as safety net.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let source_text = std::str::from_utf8(content).unwrap_or("");
+        let allocator = Allocator::default();
+        let source_type = SourceType::default();
+        let ret = Parser::new(&allocator, source_text, source_type).parse();
+        if !ret.diagnostics.is_empty() {
+            return Err(format!("parse error: {:?}", ret.diagnostics[0]));
+        }
+        let mut program = ret.program;
+        let options = MinifierOptions {
+            mangle: Some(MangleOptions::default()),
+            compress: Some(CompressOptions::smallest()),
+        };
+        let ret = Minifier::new(options).minify(&allocator, &mut program);
+        let codegen_ret = Codegen::new()
+            .with_options(CodegenOptions {
+                minify: true,
+                comments: CommentOptions::disabled(),
+                ..CodegenOptions::default()
+            })
+            .with_scoping(ret.scoping)
+            .build(&program);
+        Ok::<Vec<u8>, String>(codegen_ret.code.into_bytes())
+    }));
+    match result {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(msg)) => {
+            println!("  ⚠️  混淆失败: {}（使用原始内容）", msg);
+            content.to_vec()
+        }
+        Err(_) => {
+            println!("  ⚠️  混淆panic（使用原始内容）");
+            content.to_vec()
+        }
+    }
+}
+
+/// hash_from_bytes computes MD5 from in-memory bytes, mirroring Go's hashFromBytes.
+fn hash_from_bytes(data: &[u8], hash_length: usize) -> String {
+    let full = md5::hex(data);
+    if hash_length > 0 && hash_length < full.len() {
+        full[..hash_length].to_string()
+    } else {
+        full
+    }
 }
 
 /// Runs `git add <basename>` from the file's directory, mirroring Go's
@@ -433,33 +491,56 @@ impl VersionManager {
         let filename = path_base(file_path);
         let clean_filename = self.remove_hash_from_filename(&filename);
 
-        let clean_path = path_join(&dir, &clean_filename);
-        let source_path = if file_exists(&clean_path) {
-            clean_path
+       let clean_path = path_join(&dir, &clean_filename);
+       let source_path = if file_exists(&clean_path) {
+           clean_path
+       } else {
+           file_path.to_string()
+       };
+
+        // Experimental: obfuscate (minify+mangle) JS files before hashing
+        let is_js = clean_filename.to_lowercase().ends_with(".js");
+        let processed_content: Option<Vec<u8>> = if self.config.obfuscate_js && is_js {
+            let raw = std::fs::read(&source_path).map_err(|e| e.to_string())?;
+            let obf = obfuscate_js(&raw);
+            println!(
+                "  🔒 混淆: {} ({} -> {} bytes)",
+                clean_filename,
+                raw.len(),
+                obf.len()
+            );
+            Some(obf)
         } else {
-            file_path.to_string()
+            None
         };
 
-        let hash = self.calculate_file_hash(&source_path)?;
-        let new_filename = self.add_hash_to_filename(&clean_filename, &hash);
-        let new_path = path_join(&dir, &new_filename);
-
-        let info = FileInfo {
-            original_path: source_path.clone(),
-            hashed_path: new_path.clone(),
-            hash: hash.clone(),
-            renamed: true,
+        let hash = match &processed_content {
+            Some(content) => hash_from_bytes(content, self.config.hash_length),
+            None => self.calculate_file_hash(&source_path)?,
         };
+       let new_filename = self.add_hash_to_filename(&clean_filename, &hash);
+       let new_path = path_join(&dir, &new_filename);
 
-        if file_exists(&new_path) {
-            let ext = get_ext(&clean_filename);
-            let bn = get_basename(&clean_filename);
-            let _ = self.find_and_delete_old_hash_files(&dir, &bn, &ext, &hash);
-            return Ok(info);
+       let info = FileInfo {
+           original_path: source_path.clone(),
+           hashed_path: new_path.clone(),
+           hash: hash.clone(),
+           renamed: true,
+       };
+
+       if file_exists(&new_path) {
+           let ext = get_ext(&clean_filename);
+           let bn = get_basename(&clean_filename);
+           let _ = self.find_and_delete_old_hash_files(&dir, &bn, &ext, &hash);
+           return Ok(info);
+       }
+
+        if let Some(content) = &processed_content {
+            std::fs::write(&new_path, content).map_err(|e| e.to_string())?;
+        } else {
+            copy_file(&source_path, &new_path)?;
         }
-
-        copy_file(&source_path, &new_path)?;
-        vcs_git_add(&new_path, self.debug_mode);
+       vcs_git_add(&new_path, self.debug_mode);
         if is_js_or_css(&new_filename) {
             println!("  ✅ 已生成: {}", new_filename);
         }
@@ -2430,5 +2511,67 @@ mod tests {
         let now = format_now();
         assert_eq!(now.len(), 19, "should be 19 chars: {now}");
         assert!(is_date_time_format(&now), "should be valid date-time: {now}");
+    }
+
+    #[test]
+    fn test_obfuscate_js_strips_comments_and_mangles() {
+        let input = b"// This is a comment\nvar greetingMessage = function() {\n    var descriptiveLocalVariable = \"hello world\";\n    console.log(descriptiveLocalVariable);\n};\ngreetingMessage();\n";
+        let output = obfuscate_js(input);
+        let s = String::from_utf8_lossy(&output);
+
+        // Comments must be stripped
+        assert!(!s.contains("This is a comment"), "comment not stripped: {s}");
+        // Local variable should be mangled
+        assert!(!s.contains("descriptiveLocalVariable"), "local var not mangled: {s}");
+        // Output should be smaller
+        assert!(output.len() < input.len(), "output ({}) should be smaller than input ({})", output.len(), input.len());
+    }
+
+    #[test]
+    fn test_hash_from_bytes() {
+        // MD5 of empty string
+        let h = hash_from_bytes(b"", 8);
+        assert_eq!(h, "d41d8cd9");
+        // Full hash when hash_length=0
+        let full = hash_from_bytes(b"", 0);
+        assert_eq!(full, "d41d8cd98f00b204e9800998ecf8427e");
+    }
+
+    #[test]
+    fn test_rename_file_with_hash_obfuscate() {
+        let dir = std::env::temp_dir().join(format!("hashcdn_obf_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let common = dir.join("scripts/common");
+        std::fs::create_dir_all(&common).unwrap();
+
+        let js_content = b"// This is a comment\nvar greetingMessage = function() {\n    var descriptiveLocalVariable = \"hello world\";\n    console.log(descriptiveLocalVariable);\n};\ngreetingMessage();\n";
+        let js_path = common.join("loginxdrNew.js");
+        std::fs::write(&js_path, js_content).unwrap();
+
+        let vm = VersionManager::new(
+            Config {
+                hash_length: 8,
+                obfuscate_js: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        let info = vm.rename_file_with_hash(js_path.to_str().unwrap()).unwrap();
+
+        // Hashed file should exist
+        assert!(std::path::Path::new(&info.hashed_path).exists(), "hashed file not found: {}", info.hashed_path);
+
+        let result = std::fs::read(&info.hashed_path).unwrap();
+        let s = String::from_utf8_lossy(&result);
+
+        // Comments stripped
+        assert!(!s.contains("This is a comment"), "comment not stripped");
+        // Local var mangled
+        assert!(!s.contains("descriptiveLocalVariable"), "local var not mangled");
+        // Smaller than original
+        assert!(result.len() < js_content.len(), "obfuscated JS should be smaller");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1058,6 +1058,96 @@ func TestProcessHTMLFileExtraHashResourcesMultiple(t *testing.T) {
 	}
 }
 
+// TestProcessHTMLFileObfuscateJS verifies that when ObfuscateJS is enabled,
+// JS files are minified (comments removed, whitespace stripped, variables
+// renamed) and the hash reflects the obfuscated content. CSS files are
+// unaffected.
+func TestProcessHTMLFileObfuscateJS(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	commonDir := filepath.Join(tmpDir, "scripts", "common")
+	if err := os.MkdirAll(commonDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	// JS with comments, whitespace, and descriptive variable names
+	jsContent := `// This is a comment
+var greetingMessage = function() {
+    var descriptiveLocalVariable = "hello world";
+    console.log(descriptiveLocalVariable);
+};
+greetingMessage();
+`
+	jsPath := filepath.Join(commonDir, "loginxdrNew.js")
+	if err := os.WriteFile(jsPath, []byte(jsContent), 0644); err != nil {
+		t.Fatalf("write js failed: %v", err)
+	}
+
+	htmlContent := `<script src="./scripts/common/loginxdrNew.js?v=1"></script>`
+	htmlPath := filepath.Join(tmpDir, "page.html")
+	if err := os.WriteFile(htmlPath, []byte(htmlContent), 0644); err != nil {
+		t.Fatalf("write html failed: %v", err)
+	}
+
+	cdn := "https://cdn.example.com"
+	vm := NewVersionManager(Config{
+		HashLength:           8,
+		CDNDomain:            cdn,
+		ProcessMainResources: []string{"page"},
+		ExtraHashResources:   []string{"scripts/common/loginxdrNew.js"},
+		ObfuscateJS:          true,
+	}, false)
+
+	if err := vm.processHTMLFile(htmlPath); err != nil {
+		t.Fatalf("processHTMLFile failed: %v", err)
+	}
+
+	// Find the hashed JS file on disk
+	entries, err := os.ReadDir(commonDir)
+	if err != nil {
+		t.Fatalf("read dir failed: %v", err)
+	}
+	var hashedPath string
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, "loginxdrNew.") && strings.HasSuffix(name, ".js") && name != "loginxdrNew.js" {
+			hashedPath = filepath.Join(commonDir, name)
+			break
+		}
+	}
+	if hashedPath == "" {
+		t.Fatalf("hashed JS file not found in %s", commonDir)
+	}
+
+	result, err := os.ReadFile(hashedPath)
+	if err != nil {
+		t.Fatalf("read hashed js failed: %v", err)
+	}
+	strResult := string(result)
+
+	// Comments must be stripped
+	if strings.Contains(strResult, "This is a comment") {
+		t.Errorf("comment not stripped in obfuscated JS")
+	}
+	// Descriptive variable name should be mangled
+	if strings.Contains(strResult, "descriptiveLocalVariable") {
+		t.Errorf("variable name not mangled in obfuscated JS")
+	}
+	// Output should be smaller than input
+	if len(result) >= len(jsContent) {
+		t.Errorf("obfuscated JS (%d bytes) should be smaller than original (%d bytes)", len(result), len(jsContent))
+	}
+
+	// HTML reference must be updated to CDN-prefixed hashed URL
+	htmlResult, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read html failed: %v", err)
+	}
+	if !strings.Contains(string(htmlResult), cdn+"/scripts/common/loginxdrNew.") {
+		t.Errorf("HTML reference not updated to CDN hashed URL, got: %s", htmlResult)
+	}
+}
+
 // TestProcessHTMLFileExtraHashResourcesNoCDN verifies the non-CDN case: the
 // HTML reference is updated to the hashed relative path (no CDN prefix).
 func TestProcessHTMLFileExtraHashResourcesNoCDN(t *testing.T) {

@@ -48,7 +48,8 @@
     ],
     "gitAuthors": ["chenchengpeng", "ccp"]
   },
-  "replaceAllWithCDN": false,
-  "cdnExcludeFiles": [
+ "replaceAllWithCDN": false,
+ "obfuscateJS": true,
+ "cdnExcludeFiles": [
   ]
 }
