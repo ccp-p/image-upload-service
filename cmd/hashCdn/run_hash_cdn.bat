@@ -27,10 +27,11 @@ if "%IS_HOME%"=="" (
 
 REM 检查配置文件是否存在
 if not exist "version.config.json" (
-    echo [错误] 未找到配置文件 version.config.json
-    echo 请先创建配置文件！
-    pause
-    exit /b 1
+   echo [错误] 未找到配置文件 version.config.json
+   echo 请先创建配置文件！
+    echo 按任意键关闭，5秒后自动关闭...
+    timeout /t 5 >nul
+   exit /b 1
 )
 
 REM 缓存文件路径
@@ -148,4 +149,5 @@ echo.
 echo ========================================
 echo    处理完成
 echo ========================================
-pause
+echo 按任意键关闭，5秒后自动关闭...
+timeout /t 5 >nul

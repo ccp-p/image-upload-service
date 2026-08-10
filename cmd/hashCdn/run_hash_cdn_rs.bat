@@ -28,17 +28,19 @@ if "%IS_HOME%"=="" (
 )
 
 if not exist "%RS_EXE%" (
-    echo [error] Rust binary not found: %RS_EXE%
-    echo [tip]   Run cargo build --release first
-    pause
-    exit /b 1
+   echo [error] Rust binary not found: %RS_EXE%
+   echo [tip]   Run cargo build --release first
+    echo Press any key to close, auto-close in 5s...
+    timeout /t 5 >nul
+   exit /b 1
 )
 
 REM Check config file
 if not exist "version.config.json" (
-    echo [error] config file not found: version.config.json
-    pause
-    exit /b 1
+   echo [error] config file not found: version.config.json
+    echo Press any key to close, auto-close in 5s...
+    timeout /t 5 >nul
+   exit /b 1
 )
 
 REM Cache file for last-used mode
@@ -167,4 +169,5 @@ echo.
 echo ========================================
 echo    Done
 echo ========================================
-pause
+echo Press any key to close, auto-close in 5s...
+timeout /t 5 >nul
