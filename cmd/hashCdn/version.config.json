@@ -49,7 +49,7 @@
     "gitAuthors": ["chenchengpeng", "ccp"]
   },
  "replaceAllWithCDN": false,
- "obfuscateJS": true,
+ "obfuscateJS": false,
  "cdnExcludeFiles": [
   ]
 }
