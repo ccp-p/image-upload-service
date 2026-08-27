@@ -338,6 +338,7 @@ func runCheck(cfg Config, state *MonitorState, client *http.Client) bool {
 	changes := detectChanges(state, user)
 	if len(changes) == 0 {
 		logf("无变化\n")
+		return true
 	} else {
 		logf("检测到 %d 项变更\n", len(changes))
 		title, content := buildNotifyContent(changes, user)
@@ -355,7 +356,7 @@ func runCheck(cfg Config, state *MonitorState, client *http.Client) bool {
 func main() {
 	username := flag.String("user", "1Ylik", "监控的 Twitter/X 用户名（不带 @）")
 	interval := flag.Int("interval", defaultInterval, "检查间隔（分钟）")
-	proxyURL := flag.String("proxy", "", "HTTP 代理地址（留空则使用环境变量 HTTP_PROXY 或默认值）")
+	proxyURL := flag.String("proxy", "", "HTTP 代理地址（none=直连，留空则用环境变量 HTTP_PROXY 或默认 127.0.0.1:7890）")
 	stateFile := flag.String("state", "", "状态文件路径（默认为同目录下 state.json）")
 	once := flag.Bool("once", false, "只检查一次，不进入循环")
 	testNotify := flag.Bool("test", false, "发送测试通知并退出")
@@ -382,19 +383,28 @@ func main() {
 		PushPlusToken: os.Getenv("PUSH_PLUS"),
 		StateFile:     *stateFile,
 	}
-	if cfg.ProxyURL == "" {
-		cfg.ProxyURL = os.Getenv("HTTP_PROXY")
+	if cfg.ProxyURL == "none" {
+		// 显式禁用代理，GitHub Actions 等海外环境直连
+		cfg.ProxyURL = ""
+	} else {
+		if cfg.ProxyURL == "" {
+			cfg.ProxyURL = os.Getenv("HTTP_PROXY")
+		}
+		if cfg.ProxyURL == "" {
+			cfg.ProxyURL = os.Getenv("HTTPS_PROXY")
+		}
+		if cfg.ProxyURL == "" {
+			cfg.ProxyURL = defaultProxy
+		}
 	}
-	if cfg.ProxyURL == "" {
-		cfg.ProxyURL = os.Getenv("HTTPS_PROXY")
-	}
-	if cfg.ProxyURL == "" {
-		cfg.ProxyURL = defaultProxy
+	proxyLabel := cfg.ProxyURL
+	if proxyLabel == "" {
+		proxyLabel = "直连"
 	}
 	logf("Twitter/X 用户监控服务启动\n")
 	logf("  监控用户: @%s\n", cfg.Username)
 	logf("  检查间隔: %d 分钟\n", cfg.Interval)
-	logf("  代理地址: %s\n", cfg.ProxyURL)
+	logf("  代理地址: %s\n", proxyLabel)
 	logf("  状态文件: %s\n", cfg.StateFile)
 	ppStatus := "未配置"
 	if cfg.PushPlusToken != "" {

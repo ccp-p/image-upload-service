@@ -31,6 +31,7 @@ twimon.exe [参数]
   -user string      监控的用户名，不带 @（默认 "1Ylik"）
   -interval int     检查间隔，分钟（默认 10）
   -proxy string     HTTP 代理地址（留空则用环境变量或默认值）
+                    （none=直连，GitHub Actions 等海外环境使用）
   -state string     状态文件路径（默认同目录 state.json）
   -once             只检查一次，不进入循环
   -test             发送测试通知并退出
@@ -58,6 +59,22 @@ twimon.exe -test
 # 自定义代理
 twimon.exe -proxy=http://127.0.0.1:7890
 ```
+
+## GitHub Actions 部署
+
+`.github/workflows/twimon.yml` 已配置每天北京时间 09:00（UTC 01:00）自动检查一次。
+
+1. 仓库 Settings -> Secrets and variables -> Actions，添加 `PUSH_PLUS` secret
+2. 工作流运行后会把 `cmd/twimon/state-gh.json` 提交回仓库，作为下次对比基线
+3. 手动触发：Actions -> twimon -> Run workflow
+
+说明：
+
+- Actions 服务器在海外，直连 fxtwitter 和 PushPlus，不需要代理（`-proxy=none`）
+- 定时任务可能有几分钟到几十分钟的延迟，偶发跳过，第二天会补上
+- GitHub 定时任务按 UTC 调度，改时间改 `cron` 表达式即可
+- 无变化时不产生提交，只有状态变化时才有一次 state 提交
+- 本地运行用 `state.json`，Actions 用 `state-gh.json`，两边状态独立互不干扰
 
 ## 工作原理
 

@@ -1,0 +1,41 @@
+name: twimon
+
+on:
+  schedule:
+    # UTC 01:00 = 北京时间 09:00，每天一次
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: twimon
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run monitor
+        env:
+          PUSH_PLUS: ${{ secrets.PUSH_PLUS }}
+        run: go run ./cmd/twimon -proxy=none -once -state=cmd/twimon/state-gh.json
+
+      - name: Commit state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cmd/twimon/state-gh.json
+          if git diff --cached --quiet; then
+            echo "state unchanged, skip commit"
+          else
+            git commit -m "chore(twimon): update state [skip ci]"
+            git push
+          fi
