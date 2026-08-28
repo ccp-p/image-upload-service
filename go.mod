@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/refraction-networking/utls v1.8.2
+	github.com/tdewolff/minify/v2 v2.24.16
 )
 
 require (
@@ -50,7 +51,6 @@ require (
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
-	github.com/tdewolff/minify/v2 v2.24.16 // indirect
 	github.com/tdewolff/parse/v2 v2.8.15 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	go.opentelemetry.io/otel v1.38.0 // indirect

@@ -137,7 +137,41 @@ func executeDeploy(cfg EnvConfig) (string, error) {
 	logf("开始执行部署命令...\n")
 	logf("  工作目录: %s\n", absDir)
 
-	cmd := newCmd(absDir, "go", "run", "main.go",
+	// Rust 版二进制：<repo>\target\release\hash-cdn.exe，速度比 Go 版快
+	repoRoot := filepath.Dir(filepath.Dir(absDir))
+	exePath := filepath.Join(repoRoot, "target", "release", "hash-cdn.exe")
+
+	needBuild := true
+	if info, e := os.Stat(exePath); e == nil {
+		needBuild = false
+		// .rs 源码或 Cargo.toml 比 exe 新时重新编译
+		entries, _ := os.ReadDir(repoRoot)
+		for _, f := range entries {
+			if !f.IsDir() && (strings.HasSuffix(f.Name(), ".rs") || f.Name() == "Cargo.toml") {
+				if fi, e := f.Info(); e == nil {
+					if fi.ModTime().After(info.ModTime()) {
+						needBuild = true
+						break
+					}
+				}
+			}
+		}
+	}
+	if needBuild {
+		logf("正在编译 hash-cdn.exe (Rust) ...\n")
+		buildCmd := newCmd(repoRoot, "cargo", "build", "--release")
+		var buildOut bytes.Buffer
+		buildCmd.Stdout = &buildOut
+		buildCmd.Stderr = &buildOut
+		if e := buildCmd.Run(); e != nil {
+			return "", fmt.Errorf("编译 hash-cdn (Rust) 失败: %w\n输出: %s", e, buildOut.String())
+		}
+		logf("编译完成\n")
+	} else {
+		logf("hash-cdn.exe (Rust) 已是最新，跳过编译\n")
+	}
+
+	cmd := newCmd(absDir, exePath,
 		"-config=version.config.json", "-mode=9", "-message", "切hash")
 
 	// ✅ 使用 MultiWriter 同时输出到控制台和 buffer
