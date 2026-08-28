@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音评论GIF表情一键下载
 // @namespace    https://docs.scriptcat.org/
-// @version      0.1.0
+// @version      0.1.1
 // @description  在抖音评论表情图片上添加下载按钮，一键保存真实GIF到本地相册
 // @author       You
 // @match        https://*.douyin.com/*
