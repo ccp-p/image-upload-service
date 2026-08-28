@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Lanhu LayerBox Inspector
 // @namespace    https://docs.scriptcat.org/
-// @version      3.0.0
-// @description  v3.0: 扁平设计稿自动重建嵌套树+流式布局，仅越界/叠加装饰元素用absolute
+// @version      3.2.0
+// @description  v3.2: 嵌套树+prompt输出，新增page尺寸/virtual行尺寸/防环/去id噪音
 // @author       You
 // @match        https://lanhuapp.com/web/*
 // @grant        none
@@ -227,14 +227,27 @@
             nodes.push({ layer: visual[k], box: boxes[k], children: [], abs: false, parentIdx: p });
         }
 
+        // 防环：如果目标 parent 的祖先链里有自己，改为挂到 roots
+        function isAncestor(nodeIdx, maybeAncestorIdx) {
+            var cur = nodeIdx;
+            var steps = 0;
+            while (cur >= 0 && steps < nodes.length) {
+                if (cur === maybeAncestorIdx) return true;
+                cur = nodes[cur].parentIdx;
+                steps++;
+            }
+            return false;
+        }
+
         var roots = [];
         for (var m = 0; m < nodes.length; m++) {
             var pi = nodes[m].parentIdx;
-            if (pi >= 0) {
+            if (pi >= 0 && pi !== m && !isAncestor(pi, m)) {
                 nodes[pi].children.push(nodes[m]);
                 // 非完全包含(靠重叠/距离挂载) → 标记 abs
                 if (!contains(nodes[pi].box, nodes[m].box, CONTAIN_TOL)) nodes[m].abs = true;
             } else {
+                nodes[m].parentIdx = -1;
                 roots.push(nodes[m]);
             }
         }
@@ -391,6 +404,8 @@
     function pickNode(treeNode, sliceIds) {
         if (treeNode.virtual) {
             var vo = { n: treeNode.n, layout: treeNode.layout, virtual: true };
+            vo.w = Math.round(treeNode.box.w);
+            vo.h = Math.round(treeNode.box.h);
             if (treeNode.gap != null) vo.gap = treeNode.gap;
             if (treeNode.align) vo.align = treeNode.align;
             if (treeNode.justify) vo.justify = treeNode.justify;
@@ -424,7 +439,6 @@
         }
         if (sliceIds && sliceIds.indexOf(layer.web_id) !== -1) o.slice = true;
         o.n = layer.name;
-        o.id = layer.web_id;
         if (treeNode.layout) {
             o.layout = treeNode.layout;
             if (treeNode.gap != null) o.gap = treeNode.gap;
@@ -447,7 +461,20 @@
         var list = Array.isArray(layersRaw) ? layersRaw : [layersRaw];
         var roots = buildContainmentTree(list, sliceIds || []);
         for (var i = 0; i < roots.length; i++) processNode(roots[i]);
+        var page = null;
+        if (list.length) {
+            var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (var p = 0; p < list.length; p++) {
+                var b = boxOf(list[p]);
+                if (b.x < minX) minX = b.x;
+                if (b.y < minY) minY = b.y;
+                if (b.x + b.w > maxX) maxX = b.x + b.w;
+                if (b.y + b.h > maxY) maxY = b.y + b.h;
+            }
+            page = { w: Math.round(maxX - minX), h: Math.round(maxY - minY) };
+        }
         return {
+            page: page,
             roots: roots.map(function (r) { return pickNode(r, sliceIds || []); }),
             top: inferTopLayout(roots)
         };
@@ -639,6 +666,8 @@
         module.exports = { buildContainmentTree: buildContainmentTree, processNode: processNode, pickNode: pickNode, buildTree: buildTree };
     }
 
-    if (document.body) createUI();
-    else document.addEventListener('DOMContentLoaded', createUI);
+    if (typeof document !== 'undefined') {
+        if (document.body) createUI();
+        else document.addEventListener('DOMContentLoaded', createUI);
+    }
 })();
