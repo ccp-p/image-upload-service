@@ -211,10 +211,6 @@
         function position() {
             var imgRect = img.getBoundingClientRect();
             var hostRect = host.getBoundingClientRect();
-            if (imgRect.width < 20 || imgRect.height < 20) {
-                btn.style.display = 'none';
-                return;
-            }
             btn.style.display = 'flex';
             var right = hostRect.right - imgRect.right + 4;
             var bottom = hostRect.bottom - imgRect.bottom + 4;
@@ -224,6 +220,9 @@
 
         position();
         host.appendChild(btn);
+
+        // 图片异步加载后尺寸变化，重新定位
+        img.addEventListener('load', position);
 
         btn.addEventListener('click', function (e) {
             e.preventDefault();
