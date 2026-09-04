@@ -50,6 +50,11 @@ const (
 	ModeCopyCommitRollbackExcludeCDN = 9
 )
 
+// oldHashKeepAge dest 目录旧 hash 文件的保留阈值：
+// 超过该时长的 hash 文件可能是用户浏览器缓存的 HTML 所引用的版本，部署清理时保留；
+// 24h 内的多轮部署中间产物不会被用户缓存，正常清理
+const oldHashKeepAge = 24 * time.Hour
+
 // isHomeEnv 判断当前是否为家庭环境（集中管理 IS_HOME 检查）
 func isHomeEnv() bool {
 	return os.Getenv("IS_HOME") == "1"
@@ -1698,6 +1703,13 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 
 		if hashPattern.MatchString(file.Name()) {
 			filePath := filepath.Join(destDir, file.Name())
+			// 超过 24h 的旧 hash 可能是用户浏览器缓存的 HTML 引用的版本，保留兜底
+			if info, statErr := file.Info(); statErr == nil && time.Since(info.ModTime()) > oldHashKeepAge {
+				if isJSOrCSS(file.Name()) {
+					fmt.Printf("    🛡️  保留旧hash(浏览器缓存兜底): %s\n", file.Name())
+				}
+				continue
+			}
 			// 先通知SVN删除，再删除本地文件
 			vcsSvnDelete(filePath, dm.debugMode)
 			if err := os.Remove(filePath); err == nil {

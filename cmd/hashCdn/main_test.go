@@ -763,6 +763,48 @@ func TestCleanHashFiles(t *testing.T) {
 	}
 }
 
+func TestCleanHashFilesKeepsOldHashForBrowserCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.MkdirAll(tmpDir, 0755)
+
+	// keep: 当前版本；stale: 超过24h（用户浏览器可能缓存的版本，保留）；
+	// recent: 24h 内多轮部署的中间产物（删除）
+	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("keep"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.eeeeffff.css"), []byte("stale"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("recent"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base"), 0644)
+
+	// 把 stale 文件的 mtime 拨回 25 小时前
+	oldTime := time.Now().Add(-25 * time.Hour)
+	os.Chtimes(filepath.Join(tmpDir, "style.eeeeffff.css"), oldTime, oldTime)
+
+	dm := &DeployManager{
+		config:    DeployConfig{},
+		destPath:  tmpDir,
+		debugMode: false,
+		cache:     loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json")),
+	}
+
+	destPath := filepath.Join(tmpDir, "style.css")
+	deleted := dm.cleanHashFiles(destPath, "style.aaaabbbb.css")
+
+	if deleted != 1 {
+		t.Errorf("expected 1 deleted (recent only), got %d", deleted)
+	}
+	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
+		t.Error("keep file was deleted")
+	}
+	if !fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
+		t.Error("hash file older than 24h should be kept for browser cache fallback")
+	}
+	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
+		t.Error("recent hash file (<24h) should be deleted")
+	}
+	if !fileExists(filepath.Join(tmpDir, "style.css")) {
+		t.Error("base file was deleted")
+	}
+}
+
 func TestCopyFileWithVersions(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()

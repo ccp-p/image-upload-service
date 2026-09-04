@@ -76,6 +76,18 @@ fn mod_time_nanos(metadata: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+fn now_nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
+
+/// Dest 旧 hash 文件的保留阈值（纳秒）：
+/// 超过该时长的 hash 文件可能是用户浏览器缓存的 HTML 所引用的版本，部署清理时保留；
+/// 24h 内的多轮部署中间产物不会被用户缓存，正常清理
+const OLD_HASH_KEEP_AGE_NANOS: i64 = 24 * 60 * 60 * 1_000_000_000;
+
 /// Normalises a path for use as a cache key (forward slashes, strips leading ./).
 fn clean_key(p: &str) -> String {
     let p = p.replace('\\', "/");
@@ -348,6 +360,13 @@ impl DeployManager {
                 }
                 if matches_alnum_hash(&name, &basename, ext_no_dot) {
                     let file_path = path_join(&dest_dir, &name);
+                    // 超过 24h 的旧 hash 可能是用户浏览器缓存的 HTML 引用的版本，保留兜底
+                    let mod_time = std::fs::metadata(&file_path)
+                        .map(|m| mod_time_nanos(&m))
+                        .unwrap_or(0);
+                    if now_nanos() - mod_time > OLD_HASH_KEEP_AGE_NANOS {
+                        continue;
+                    }
                     // Notify SVN first, then remove the local file (mirrors Go).
                     vcs_svn_delete(&file_path, self.debug_mode);
                     if std::fs::remove_file(&file_path).is_ok() {
@@ -1539,6 +1558,57 @@ mod tests {
         ));
         assert!(file_exists(dir.join("style.css").to_str().unwrap()));
         assert!(file_exists(dir.join("other.css").to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_clean_hash_files_keeps_old_hash_for_browser_cache() {
+        let dir = std::env::temp_dir().join(format!("clean_hash_old_{}", tmp_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // keep: 当前版本；stale: 超过24h（用户浏览器可能缓存的版本，保留）；
+        // recent: 24h 内多轮部署的中间产物（删除）
+        std::fs::write(dir.join("style.aaaabbbb.css"), "keep").unwrap();
+        std::fs::write(dir.join("style.eeeeffff.css"), "stale").unwrap();
+        std::fs::write(dir.join("style.ccccdddd.css"), "recent").unwrap();
+        std::fs::write(dir.join("style.css"), "base").unwrap();
+
+        // 把 stale 文件的 mtime 拨回 25 小时前
+        let stale_path = dir.join("style.eeeeffff.css");
+        let old_time = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(25 * 60 * 60);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale_path)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: String::new(),
+            dest_path: dir.to_string_lossy().to_string(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(dir.join(".deploy-cache.json").to_str().unwrap()),
+        };
+
+        let dest_path = dir.join("style.css");
+        let deleted = dm.clean_hash_files(dest_path.to_str().unwrap(), "style.aaaabbbb.css");
+        assert_eq!(deleted, 1, "only the recent (<24h) hash should be deleted");
+        assert!(file_exists(
+            dir.join("style.aaaabbbb.css").to_str().unwrap()
+        ));
+        assert!(
+            file_exists(dir.join("style.eeeeffff.css").to_str().unwrap()),
+            "hash file older than 24h should be kept for browser cache fallback"
+        );
+        assert!(
+            !file_exists(dir.join("style.ccccdddd.css").to_str().unwrap()),
+            "recent hash file (<24h) should be deleted"
+        );
+        assert!(file_exists(dir.join("style.css").to_str().unwrap()));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
