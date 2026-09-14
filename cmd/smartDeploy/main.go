@@ -105,6 +105,12 @@ func main() {
 
 	deployer := NewDeployer(client, mapper, cfg.AutoWatch, logger)
 
+	// After every successful connect, sync git-changed files so the server
+	// is up to date even if edits happened while disconnected.
+	client.SetOnConnected(func() {
+		UploadGitChangedFiles(watchFolder, deployer, logger)
+	})
+
 	// Start local HTTP API for editor integration (VSCode, etc.).
 	// Uses the already-connected SSH session, so no re-OTP needed.
 	var apiServer *APIServer

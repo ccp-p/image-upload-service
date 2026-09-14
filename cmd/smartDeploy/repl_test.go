@@ -409,6 +409,38 @@ func TestREPL_CommandAliases(t *testing.T) {
 
 // --- OTP command tests ---
 
+func TestREPL_OTPDigitsWhenDisconnected(t *testing.T) {
+	mc := newMockClient()
+	mc.connected = false
+	otp := NewOTPStore(nil)
+	mapper := NewPathMapper("/app", "/remote", "")
+	d := NewDeployer(mc, mapper, false, log.New(io.Discard, "", 0))
+	buf := &bytes.Buffer{}
+	r := NewREPL(d, mc, otp, slr("123456\nq\n"), buf)
+	r.Run()
+	if code, _, ok := otp.Latest(); !ok || code != "123456" {
+		t.Errorf("OTP should be stored, got %q (ok=%v)", code, ok)
+	}
+	// Connect runs in a goroutine; wait for the mock to flip state.
+	deadline := time.Now().Add(2 * time.Second)
+	for !mc.IsConnected() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !mc.IsConnected() {
+		t.Error("should connect after typing an OTP while disconnected")
+	}
+	if !strings.Contains(buf.String(), "OTP set: 123456") {
+		t.Errorf("should confirm OTP storage: %q", buf.String())
+	}
+}
+
+func TestREPL_DigitsWhenConnectedStillUnknown(t *testing.T) {
+	_, buf, _, _ := runREPLWithOTP(t, "123456\n", true, NewOTPStore(nil))
+	if !strings.Contains(buf.String(), "Unknown command") {
+		t.Errorf("digits while connected should stay unknown command: %q", buf.String())
+	}
+}
+
 func TestREPL_OTP_SetCode(t *testing.T) {
 	otp := NewOTPStore(nil)
 	_, buf, _, _ := runREPLWithOTP(t, "otp 654321\n", true, otp)

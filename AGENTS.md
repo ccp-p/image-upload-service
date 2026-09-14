@@ -36,6 +36,7 @@
  | time | Fyne GUI 时钟 (测试 Fyne 框架) | Go | 80 | 无 | 无 |
  | cloudflared-tunnel | Cloudflare 隧道 + PushPlus 通知 | PS1 | - | test-watchdog.ps1 | 无 |
  | restartClash | 重启 Clash 代理 | Go/exe | - | 无 | 无 |
+ | fileShare | 简易文件夹服务器 (key 参数防护) | Go | 40 | 无 | 无 |
 
  ## 关键约定
 

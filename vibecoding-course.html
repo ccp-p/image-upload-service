@@ -1,0 +1,1618 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vibe Coding 渐进工程课</title>
+  <style>
+    :root {
+      --bg: #f6f5f0;
+      --paper: #fffdf8;
+      --ink: #20242a;
+      --muted: #68727d;
+      --line: #d8d2c4;
+      --moss: #20734d;
+      --moss-soft: #e5f2ea;
+      --amber: #a25b0b;
+      --amber-soft: #fff1d9;
+      --coral: #b54337;
+      --coral-soft: #fdeae7;
+      --blue: #256b84;
+      --blue-soft: #e4eff4;
+      --plum: #70517e;
+      --plum-soft: #f1e8f3;
+      --shadow: 0 10px 24px rgba(48, 45, 38, 0.08);
+      font-family: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.65;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 32px 24px;
+      background: #222831;
+      color: #f7f5ef;
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+      overflow: auto;
+    }
+
+    .brand {
+      font-size: 25px;
+      line-height: 1.2;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .brand small {
+      display: block;
+      margin-top: 7px;
+      font-size: 13px;
+      font-weight: 400;
+      color: #c3cbd4;
+    }
+
+    .nav {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .nav button {
+      width: 100%;
+      min-height: 42px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: #dbe1e8;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      padding: 9px 11px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .nav button:hover,
+    .nav button.active {
+      background: #39424d;
+      color: white;
+    }
+
+    .nav-index {
+      flex: 0 0 24px;
+      font-size: 12px;
+      text-align: center;
+      border: 1px solid #5f6b78;
+      border-radius: 4px;
+    }
+
+    .progress-card {
+      margin-top: auto;
+      padding: 15px;
+      background: #303943;
+      border-radius: 6px;
+    }
+
+    .progress-track {
+      height: 8px;
+      margin: 10px 0 8px;
+      background: #4d5763;
+      border-radius: 99px;
+      overflow: hidden;
+    }
+
+    #progressBar {
+      width: 0;
+      height: 100%;
+      background: #8fd3ab;
+      transition: width 0.25s ease;
+    }
+
+    .sidebar-actions {
+      display: grid;
+      gap: 8px;
+    }
+
+    .ghost-light {
+      width: 100%;
+      border: 1px solid #657180;
+      color: #e8ecef;
+      background: transparent;
+    }
+
+    main {
+      min-width: 0;
+      padding: 36px clamp(20px, 5vw, 72px) 80px;
+    }
+
+    .page-head {
+      max-width: 1080px;
+      margin-bottom: 30px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(28px, 4vw, 42px);
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .page-head p {
+      max-width: 760px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .panel {
+      display: none;
+      max-width: 1080px;
+    }
+
+    .panel.active {
+      display: block;
+    }
+
+    .lesson-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      margin: 0 0 24px;
+    }
+
+    .lesson-tag {
+      flex: 0 0 auto;
+      min-width: 47px;
+      min-height: 47px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      color: white;
+      font-size: 19px;
+      font-weight: 700;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(24px, 3vw, 34px);
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .lesson-sub {
+      margin: 8px 0 0;
+      color: var(--muted);
+    }
+
+    .step {
+      margin: 34px 0;
+      padding-left: 16px;
+      border-left: 3px solid var(--line);
+    }
+
+    .step h3 {
+      margin: 0 0 10px;
+      font-size: 20px;
+    }
+
+    .step p,
+    .step li {
+      color: #3b4148;
+    }
+
+    .step ul {
+      padding-left: 20px;
+    }
+
+    .tool {
+      margin-top: 14px;
+      padding: 18px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    .tool-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+
+    .translation {
+      border-left: 4px solid var(--moss);
+      background: var(--moss-soft);
+      padding: 15px 17px;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .translation strong {
+      color: #155d3d;
+    }
+
+    .pitfall {
+      border-left: 4px solid var(--coral);
+      background: var(--coral-soft);
+      padding: 15px 17px;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .insight {
+      border-left: 4px solid var(--amber);
+      background: var(--amber-soft);
+      padding: 15px 17px;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .anchor {
+      border-left: 4px solid var(--plum);
+      background: var(--plum-soft);
+      padding: 15px 17px;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .grid-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    label {
+      display: block;
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      border: 1px solid #c7c1b3;
+      background: white;
+      color: var(--ink);
+      border-radius: 6px;
+      padding: 10px;
+      font: inherit;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 110px;
+      line-height: 1.55;
+    }
+
+    textarea.code {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 14px;
+      min-height: 170px;
+    }
+
+    pre {
+      margin: 0;
+      padding: 15px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      background: #f1efe9;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    button {
+      min-height: 37px;
+      padding: 7px 13px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: #2f3640;
+      color: white;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button:hover {
+      filter: brightness(1.1);
+    }
+
+    button.green { background: var(--moss); }
+    button.amber { background: var(--amber); }
+    button.coral { background: var(--coral); }
+    button.blue { background: var(--blue); }
+    button.ghost {
+      background: transparent;
+      color: var(--ink);
+      border-color: #b9b2a3;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+      margin-top: 12px;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .chip {
+      border: 1px solid #a7a294;
+      background: white;
+      color: #343a41;
+      border-radius: 5px;
+      padding: 7px 10px;
+      min-height: 36px;
+    }
+
+    .chip.selected {
+      border-color: var(--moss);
+      background: var(--moss-soft);
+      color: #14513a;
+      font-weight: 600;
+    }
+
+    .meter {
+      height: 12px;
+      border-radius: 99px;
+      background: #e6e2d8;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+
+    .meter span {
+      display: block;
+      height: 100%;
+      width: 100%;
+      background: var(--coral);
+      transition: width 0.2s ease, background 0.2s ease;
+    }
+
+    .status-line {
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .check {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      padding: 9px 0;
+    }
+
+    .check input {
+      width: 17px;
+      height: 17px;
+      flex: 0 0 auto;
+      margin-top: 4px;
+    }
+
+    .check span {
+      min-width: 0;
+    }
+
+    .mini-list {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: #4b5563;
+      font-size: 14px;
+    }
+
+    .quality {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+      margin-top: 12px;
+    }
+
+    .quality div {
+      padding: 9px 10px;
+      border-radius: 6px;
+      background: #eeece5;
+      color: #60656d;
+      font-size: 14px;
+    }
+
+    .quality div.ok {
+      background: var(--moss-soft);
+      color: #175c3d;
+    }
+
+    .test-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      margin-top: 12px;
+    }
+
+    .test-table th,
+    .test-table td {
+      border: 1px solid var(--line);
+      padding: 8px 9px;
+      text-align: left;
+    }
+
+    .test-table th {
+      background: #f1efe9;
+      color: #5f6670;
+    }
+
+    .pass { color: #166b42; font-weight: 700; }
+    .fail { color: #b54337; font-weight: 700; }
+
+    .issue {
+      padding: 12px 14px;
+      border: 1px solid #c9c3b4;
+      border-radius: 6px;
+      background: #fffef9;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .issue strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .issue.found {
+      border-color: var(--coral);
+      background: var(--coral-soft);
+    }
+
+    .issue-detail {
+      display: none;
+      margin-top: 8px;
+      font-size: 14px;
+      color: #5b4340;
+    }
+
+    .issue.found .issue-detail {
+      display: block;
+    }
+
+    .task-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .task {
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f4f2ea;
+    }
+
+    .task.ready {
+      border-color: var(--amber);
+      background: var(--amber-soft);
+    }
+
+    .task.done {
+      border-color: var(--moss);
+      background: var(--moss-soft);
+    }
+
+    .task strong {
+      display: block;
+      margin-bottom: 3px;
+    }
+
+    .task small {
+      display: block;
+      min-height: 22px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .lesson-check {
+      display: grid;
+      gap: 5px;
+      margin-top: 14px;
+    }
+
+    .course-footer {
+      max-width: 1080px;
+      margin-top: 45px;
+      padding-top: 20px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .hidden { display: none !important; }
+
+    @media (max-width: 880px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar {
+        position: static;
+        height: auto;
+      }
+      .progress-card { margin-top: 0; }
+      .grid-2,
+      .grid-3,
+      .quality,
+      .task-grid { grid-template-columns: 1fr; }
+      main { padding: 26px 18px 60px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        Vibe Coding
+        <small>渐进翻译式 · 6 节可动手课</small>
+      </div>
+
+      <nav class="nav" id="courseNav">
+        <button class="active" data-panel="overview"><span class="nav-index">0</span>开场：翻译心法</button>
+        <button data-panel="l1"><span class="nav-index">L1</span>入职手册</button>
+        <button data-panel="l2"><span class="nav-index">L2</span>可执行 Spec</button>
+        <button data-panel="l3"><span class="nav-index">L3</span>测试先行</button>
+        <button data-panel="l4"><span class="nav-index">L4</span>Review 清单</button>
+        <button data-panel="l5"><span class="nav-index">L5</span>任务拆分</button>
+        <button data-panel="l6"><span class="nav-index">L6</span>项目记忆</button>
+      </nav>
+
+      <div class="progress-card">
+        <div>完成度</div>
+        <div class="progress-track"><span id="progressBar"></span></div>
+        <div id="progressText" class="status-line">0 / 18</div>
+      </div>
+
+      <div class="sidebar-actions">
+        <button class="ghost-light" id="exportNotes">导出学习笔记</button>
+        <button class="ghost-light" id="resetProgress">清空进度</button>
+      </div>
+    </aside>
+
+    <main>
+      <header class="page-head">
+        <h1>把 AI 从聊天伙伴，练成工程工具</h1>
+        <p>不用手写每个文件。每课都给你可直接复制的 AI 代跑提示词；你负责提需求、追问、验收和纠偏，练习的是怎么指挥 AI。</p>
+      </header>
+
+      <section id="overview" class="panel active">
+        <div class="lesson-head">
+          <div class="lesson-tag" style="background:var(--blue);">0</div>
+          <div>
+            <h2>先翻译：Vibe Coding 到底是什么</h2>
+            <p class="lesson-sub">英文 vibe 听起来像气氛，但在工程里它不能只靠气氛。</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>需求引入</h3>
+          <p>你今天要解决的问题是：AI 写出来的代码有时像“碰运气”。我们把这运气换成一套可以被检查的流程。</p>
+          <div class="translation">
+            <strong>翻译：</strong>Vibe Coding 代表一种协作方式，你负责给出上下文、约束和验收标准，AI 负责生成实现；如果结果不合格，就修正约束，而不是只换一句咒语。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>最小流程</h3>
+          <p>整套课程只有一个主循环，后面六课只是把它拆开练。你的重点不是亲手写每个文件，而是设计提问、验收输出、迭代约束。</p>
+          <div class="tool">
+            <div class="tool-title">工程循环</div>
+            <div class="grid grid-3">
+              <div><strong>1. 给上下文</strong><p class="status-line">AI 知道项目是什么，不是靠猜。</p></div>
+              <div><strong>2. 写约束</strong><p class="status-line">AI 知道做什么，更要知道不做什么。</p></div>
+              <div><strong>3. 定验收</strong><p class="status-line">AI 知道“对”的定义，不是只求能跑。</p></div>
+              <div><strong>4. 生成实现</strong><p class="status-line">这里才轮到 AI 发挥。</p></div>
+              <div><strong>5. 审查</strong><p class="status-line">检查安全、边界、并发和一致性。</p></div>
+              <div><strong>6. 记忆</strong><p class="status-line">把纠错结果固化，避免下次失忆。</p></div>
+            </div>
+            <div class="insight" style="margin-top:16px;">
+              <strong>AI 代跑心法：</strong>不要把 AI 当成“帮我省掉思考的按钮”。它负责草稿、查资料和批量修改；你负责提出需求、追问不清楚的地方、检查风险、决定接受还是退回。
+            </div>
+            <div class="tool" style="margin-top:16px;">
+              <div class="tool-title">总控代跑提示词</div>
+              <pre id="masterPrompt">你是我的 Vibe Coding 教练。请带我完成 L1 到 L6，不要一次性给我所有内容。
+
+每一课按这个流程走：
+1. 先问我这一课对应的小需求；
+2. 让我确认或补齐上下文；
+3. 你生成草稿文件或提示词；
+4. 让我审查并指出哪些地方是编造或不符合项目；
+5. 你根据反馈修正；
+6. 只在验收通过后才进入下一课。
+
+输出要求：
+1. 每次只处理当前这一课；
+2. 每课都给我一个可复制的提示词或文件草稿；
+3. 每课最后给一个验证步骤；
+4. 如果我还没确认，不要跳到下一课。
+
+课程列表：
+L1 AGENTS.md 入职手册；
+L2 可执行 Spec；
+L3 测试先行；
+L4 Review Checklist；
+L5 任务拆分；
+L6 项目记忆系统。</pre>
+              <div class="actions">
+                <button data-copy="masterPrompt">复制总控提示词</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>学习节奏</h3>
+          <p>每课大约 25 分钟。卡住不是失败，是提示你要把某个约束写得更清楚。</p>
+          <ul>
+            <li>先试错，别直接看答案。</li>
+            <li>每课只做一个真实小任务。</li>
+            <li>AI 生成后自己跑一遍，再把错误交回给它修。</li>
+            <li>到这里有问题吗？把问题写在每课笔记里，不要跳过。</li>
+          </ul>
+          <div class="anchor">
+            <strong>锚点：</strong>AI 不是替你决定“对”的人，它是在你的定义里寻找“怎么做”的人。
+          </div>
+        </div>
+      </section>
+
+      <section id="l1" class="panel">
+        <div class="lesson-head">
+          <div class="lesson-tag" style="background:var(--moss);">L1</div>
+          <div>
+            <h2>给 AI 写一份入职手册</h2>
+            <p class="lesson-sub">目标：把“项目里隐含的常识”变成 AGENTS.md。</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>需求引入</h3>
+          <p>假设你招了一个很强的实习生，但他说：“帮我把收藏功能做了。”你会先给他项目地图，而不是直接让他盲改代码。</p>
+          <div class="translation">
+            <strong>翻译：</strong>AGENTS.md 代表一份项目入职手册，它告诉 AI 技术栈、目录规则、编码约定和绝对不能踩的坑。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>先来试错</h3>
+          <p>下面是最裸的请求。你先猜：AI 会从哪里开始猜？然后逐个点亮上下文，看风险怎么下降。</p>
+          <div class="tool">
+            <div class="tool-title">上下文补给器</div>
+            <div class="chips" id="contextChips">
+              <button class="chip" data-part="overview">项目概述</button>
+              <button class="chip" data-part="stack">技术栈</button>
+              <button class="chip" data-part="dirs">目录结构</button>
+              <button class="chip" data-part="patterns">现有模式</button>
+              <button class="chip" data-part="forbid">禁止事项</button>
+              <button class="chip" data-part="accept">验收标准</button>
+            </div>
+            <div class="meter"><span id="riskMeter"></span></div>
+            <div id="riskText" class="status-line"></div>
+            <pre id="contextPrompt" style="margin-top:14px;">帮我在这个项目里加一个用户收藏功能。</pre>
+            <div class="actions">
+              <button data-copy="contextPrompt">复制裸请求</button>
+              <button class="ghost" id="resetChips">重来</button>
+            </div>
+          </div>
+          <div class="pitfall">
+            <strong>试错提醒：</strong>没有目录结构时，AI 可能把 Go CLI 的 main.go 放错位置；没有测试规则时，它可能给你引入新框架；没有禁止事项时，它可能顺手做一个你不想要的 UI。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>叠加一层：让 AI 帮你起草 AGENTS.md</h3>
+          <p>先不要自己写模板。把下面的提示词交给 AI，让它读取当前仓库并生成草稿。你只需要审核、删掉编造内容、补上禁止事项。</p>
+          <div class="tool">
+            <div class="tool-title">AI 代跑提示词</div>
+            <pre id="agentsPrompt">你是我的项目协作者。请先读取当前仓库，帮我生成一份 AGENTS.md 草稿。
+
+要求：
+1. 只根据仓库里真实存在的文件、依赖、脚本和目录结构来写，不要编造。
+2. 包含：项目概述、技术栈、目录结构、编码规范、绝对不要做的事。
+3. “绝对不要做的事”至少写 5 条，重点覆盖依赖、状态文件、测试、部署和 Windows 兼容。
+4. 如果有不确定的事实，先列出最多 5 个问题等我回答，不要猜。
+5. 最后给我一个 5 行以内的验证清单，告诉我怎么检查草稿是否贴合项目。</pre>
+            <div class="actions">
+              <button data-copy="agentsPrompt">复制代跑提示词</button>
+            </div>
+          </div>
+          <div class="tool">
+            <div class="tool-title">AI 草稿粘贴区</div>
+            <textarea id="agentsDraft" data-persist="l1.agents" spellcheck="false"># AGENTS.md
+
+## 项目概述
+
+## 技术栈
+- 语言：
+- 框架：
+- 数据库：
+- 包管理器：
+- 测试框架：
+- 部署方式：
+
+## 目录结构
+
+## 编码规范
+
+## 绝对不要做的事
+1.
+2.
+3.</textarea>
+            <div class="actions">
+              <button data-copy="agentsDraft">复制草稿</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>验证</h3>
+          <p>用同一个请求在新对话里测两次：一次没有手册，一次有手册。差异就是你今天创造的工程价值。</p>
+          <div class="lesson-check">
+            <label class="check"><input type="checkbox" class="course-check" data-key="l1.trial"><span>我看过一次“没有上下文”的裸输出</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l1.draft"><span>我让 AI 生成草稿，并把禁止事项改到至少 3 条</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l1.compare"><span>我用同一需求对比了有手册和无手册的输出</span></label>
+          </div>
+          <div class="anchor">
+            <strong>锚点：</strong>入职手册的核心不是面面俱到，而是把 AI 最容易猜错的地方提前钉住。
+          </div>
+        </div>
+      </section>
+
+      <section id="l2" class="panel">
+        <div class="lesson-head">
+          <div class="lesson-tag" style="background:var(--amber);">L2</div>
+          <div>
+            <h2>写出 AI 能执行的任务描述</h2>
+            <p class="lesson-sub">目标：把模糊需求翻译成 Spec。</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>需求引入</h3>
+          <p>“帮我写个接口”缺了太多变量：什么路由？什么输入？什么输出？哪些不做？AI 只能编。</p>
+          <div class="translation">
+            <strong>翻译：</strong>Spec 代表一份可执行任务合同，它说明输入、输出、业务规则、明确不做的事和依赖。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>先来试错</h3>
+          <p>你觉得“写一个 API 接口”至少缺几个信息？数完再看：路由、鉴权、分页、字段名、错误码、边界、返回格式、测试标准——常常八个都缺。</p>
+          <div class="insight">
+            <strong>修正理解：</strong>AI 不是读心者。Spec 的目标不是写成法律文书，而是消除会导致返工的歧义。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>动手：让 AI 先问，再生成 Spec</h3>
+          <p>先给它一个粗糙需求，让它反过来问你。等它问清楚了，再让它按模板产出 Spec。</p>
+          <div class="tool">
+            <div class="tool-title">Spec 代跑提示词</div>
+            <pre id="specInterviewPrompt">我想做一个小功能：[用一句话写粗糙需求]。
+
+请先不要生成代码，也不要直接给完整 Spec。
+第一步，像需求评审一样问我最多 5 个关键问题，覆盖：
+1. 谁会使用它，入口在哪里；
+2. 输入参数和边界值；
+3. 成功输出和失败输出；
+4. 权限、数据来源和依赖；
+5. 明确不需要做的事。
+
+等我回答后，再按下面的模板生成 Spec：
+## 任务
+### 输入
+### 输出
+### 业务规则
+### 不需要做的事
+### 依赖
+
+要求：
+1. 业务规则至少 3 条。
+2. “不需要做的事”至少 2 条。
+3. 不要引入未确认的技术方案。
+4. 如果仍有关键歧义，先继续问，不要猜。</pre>
+            <div class="actions">
+              <button data-copy="specInterviewPrompt">复制提问提示词</button>
+            </div>
+          </div>
+          <div class="tool">
+            <div class="tool-title">Spec 审核器</div>
+            <div class="grid grid-2">
+              <div>
+                <label for="specTask">任务标题</label>
+                <input id="specTask" data-persist="l2.task" placeholder="实现上传文件列表接口">
+              </div>
+              <div>
+                <label for="specDeps">依赖</label>
+                <input id="specDeps" data-persist="l2.deps" placeholder="复用 /utils/fs.go；新建 cmd/x/handler.go">
+              </div>
+            </div>
+            <div class="grid" style="margin-top:12px;">
+              <div>
+                <label for="specInput">输入</label>
+                <textarea id="specInput" data-persist="l2.input" spellcheck="false">路由：GET /api/files
+查询参数：page (int, 默认 1), limit (int, 默认 20, 最大 100)
+需要登录：是</textarea>
+              </div>
+              <div>
+                <label for="specOutput">输出</label>
+                <textarea id="specOutput" data-persist="l2.output" spellcheck="false">成功：{ "code": 0, "data": [...], "total": 100 }
+失败：401 未登录；403 无权限；500 内部错误不暴露堆栈</textarea>
+              </div>
+              <div>
+                <label for="specRules">业务规则，每行一条</label>
+                <textarea id="specRules" data-persist="l2.rules" spellcheck="false">只能查看当前用户自己的文件。
+page 从 1 开始。
+按 created_at 降序。</textarea>
+              </div>
+              <div>
+                <label for="specExclusions">不需要做的事</label>
+                <textarea id="specExclusions" data-persist="l2.exclusions" spellcheck="false">不需要搜索功能。
+不需要前端页面。
+不需要缓存。</textarea>
+              </div>
+            </div>
+            <div class="quality" id="specQuality">
+              <div data-quality="task">有标题</div>
+              <div data-quality="input">输入明确</div>
+              <div data-quality="output">输出明确</div>
+              <div data-quality="rules">规则至少 3 条</div>
+              <div data-quality="exclusions">不做的事至少 2 条</div>
+              <div data-quality="deps">依赖说明</div>
+            </div>
+            <label for="specResult" style="margin-top:15px;">生成的 Spec</label>
+            <textarea id="specResult" spellcheck="false" style="min-height:220px;"></textarea>
+            <div class="actions">
+              <button class="green" id="buildSpec">生成 Spec</button>
+              <button data-copy="specResult">复制 Spec</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>迭代逼近</h3>
+          <p>第一轮不用追求完美。真实流程是：生成 → 你发现漏了错误处理 → 补 Spec → 再生成 → 发现边界不对 → 再补。</p>
+          <ul>
+            <li>第一轮：让它跑通主路径。</li>
+            <li>第二轮：补错误码和空值。</li>
+            <li>第三轮：补并发、权限、分页、时间格式。</li>
+          </ul>
+          <div class="lesson-check">
+            <label class="check"><input type="checkbox" class="course-check" data-key="l2.spec"><span>我拿到一份完整 Spec，并确认业务规则和不做的事</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l2.exclusion"><span>AI 没有做 Spec 里禁止的事</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l2.iterate"><span>我记录了一轮返工原因</span></label>
+          </div>
+          <div class="anchor">
+            <strong>锚点：</strong>“不需要做的事”和“需要做的事”同样重要。
+          </div>
+        </div>
+      </section>
+
+      <section id="l3" class="panel">
+        <div class="lesson-head">
+          <div class="lesson-tag" style="background:var(--blue);">L3</div>
+          <div>
+            <h2>先写测试，再让 AI 写代码</h2>
+            <p class="lesson-sub">目标：把“我觉得对”变成机器能验证的定义。</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>需求引入</h3>
+          <p>现在需要一个 <code>isValidEmail(email)</code>。可以让 AI 先生成测试，但你要审核测试是不是覆盖了业务边界，然后再让它写实现。</p>
+          <div class="translation">
+            <strong>翻译：</strong>测试代表一条可自动执行的验收标准，它告诉你定义里的“对”到底是什么。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>试错实验室</h3>
+          <p>下面的默认正则看起来很聪明，但会让某个非法邮箱通过。先点运行，再看失败行。</p>
+          <div class="tool">
+            <label for="validatorCode">可编辑实现</label>
+            <textarea id="validatorCode" class="code" spellcheck="false">function isValidEmail(email) {
+  return /.+@.+\..+/.test(email);
+}</textarea>
+            <div class="actions">
+              <button class="blue" id="runTests">运行测试</button>
+              <button class="ghost" id="resetValidator">恢复默认</button>
+              <button id="copyFailures">复制失败用例给 AI</button>
+            </div>
+            <table class="test-table">
+              <thead>
+                <tr><th>输入</th><th>期望</th><th>实际</th><th>结果</th></tr>
+              </thead>
+              <tbody id="testRows"></tbody>
+            </table>
+            <pre id="testResult" style="margin-top:12px;">点击“运行测试”。</pre>
+          </div>
+          <div class="insight">
+            <strong>修正理解：</strong>默认正则让 <code>test @gmail.com</code> 通过，因为 <code>.</code> 允许空格。更稳的一版是 <code>/^[^\s@]+@[^\s@]+\.[^\s@]+$/</code>，但最终规则必须由你的业务决定。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>两步代跑：先生成测试，再写实现</h3>
+          <p>不要只说“写个邮箱验证”。让它先产出测试，再实现。这样可以避免它一边写规则一边挑好过的用例。</p>
+          <div class="tool">
+            <div class="tool-title">第一步：生成测试</div>
+            <pre id="testFirstPrompt">我要实现一个 isValidEmail(email) 函数。
+
+请先生成 5-8 个测试用例，不要写实现。
+用例必须覆盖：
+1. 标准邮箱；
+2. 带 + 号的邮箱；
+3. 没有 @；
+4. @ 前为空；
+5. 有空格；
+6. 你认为有争议的边界，比如 a@b.c。
+
+输出格式：
+输入 / 期望值 / 为什么。
+不要引入测试框架，不要修改项目文件。</pre>
+            <div class="actions">
+              <button data-copy="testFirstPrompt">复制测试生成提示词</button>
+            </div>
+          </div>
+          <div class="tool">
+            <div class="tool-title">第二步：按测试实现</div>
+            <pre id="tddPrompt">我已经写好了测试用例：
+1. test@gmail.com 期望 true
+2. test+tag@gmail.com 期望 true
+3. testgmail.com 期望 false
+4. @gmail.com 期望 false
+5. test@ 期望 false
+6. test @gmail.com 期望 false
+7. a@b.c 期望 true
+
+请只实现 isValidEmail(email)，不要引入第三方依赖，
+不要修改测试，让全部用例通过。</pre>
+          <div class="actions">
+            <button data-copy="tddPrompt">复制提示词</button>
+          </div>
+          <div class="lesson-check">
+            <label class="check"><input type="checkbox" class="course-check" data-key="l3.writeTests"><span>我让 AI 生成 5-8 个用例，并审核过边界</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l3.fail"><span>我让实现先失败一次，看清问题</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l3.pass"><span>我把失败信息交给 AI，直到全部测试转绿</span></label>
+          </div>
+          <div class="anchor">
+            <strong>锚点：</strong>你定义“什么是对的”，AI 负责“怎么做到”。
+          </div>
+        </div>
+      </section>
+
+      <section id="l4" class="panel">
+        <div class="lesson-head">
+          <div class="lesson-tag" style="background:var(--coral);">L4</div>
+          <div>
+            <h2>建立你的 Review Checklist</h2>
+            <p class="lesson-sub">目标：从“看起来能跑”升级到“敢上线”。</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>需求引入</h3>
+          <p>AI 写出一个“创建订单”接口后，可以让它先按清单自查；你要抽查高风险项，而不是逐行手写注释。</p>
+          <div class="translation">
+            <strong>翻译：</strong>Review Checklist 代表一份上线前风险地图，它防止你每次只凭直觉扫一眼。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>审查闯关</h3>
+          <p>下面六张卡都是 AI 常见翻车点。先自己猜问题，再点开。</p>
+          <div class="tool">
+            <div class="grid grid-3" id="reviewIssues">
+              <div class="issue">
+                <strong>输入校验</strong><code>price = req.body.price</code>
+                <div class="issue-detail">价格可能是负数、字符串、NaN 或极大值。必须先校验类型和范围。</div>
+              </div>
+              <div class="issue">
+                <strong>权限</strong><code>updateUser(params.userId)</code>
+                <div class="issue-detail">不能只信 URL 参数。应从登录态取当前用户，再检查角色。</div>
+              </div>
+              <div class="issue">
+                <strong>并发</strong><code>stock--</code>
+                <div class="issue-detail">同一秒两次下单可能超卖。要用原子更新、锁或唯一约束。</div>
+              </div>
+              <div class="issue">
+                <strong>事务</strong><code>saveInventory(); saveOrder();</code>
+                <div class="issue-detail">第二步失败时，第一步已经生效。两者要放进同一个事务。</div>
+              </div>
+              <div class="issue">
+                <strong>敏感字段</strong><code>return user</code>
+                <div class="issue-detail">返回整个用户对象可能带出 passwordHash、token 或内部字段。</div>
+              </div>
+              <div class="issue">
+                <strong>错误暴露</strong><code>catch(err){ res.send(err.stack) }</code>
+                <div class="issue-detail">堆栈可能暴露路径、SQL 和依赖版本。对外要换成安全错误码。</div>
+              </div>
+            </div>
+            <div class="status-line" id="reviewProgress" style="margin-top:12px;">已发现 0 / 6 个风险点。</div>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>AI 代跑 Review</h3>
+          <p>让 AI 先自查，再由你抽查。它不能替代你决定业务风险。</p>
+          <div class="tool">
+            <textarea id="reviewPrompt" data-persist="l4.prompt" spellcheck="false">请按照以下清单审查刚才的代码，不要直接改代码，先列出问题：
+1. 输入校验：空值、类型、范围、越界。
+2. 权限：是否只信前端参数，是否校验当前用户。
+3. 并发：重复提交、竞态、库存扣减。
+4. 事务：多步写库是否原子。
+5. 安全：敏感字段、错误信息、注入、路径穿越。
+6. 一致性：命名、目录、错误码、依赖是否符合项目约定。</textarea>
+            <div class="actions">
+              <button data-copy="reviewPrompt">复制 Review 提示词</button>
+            </div>
+          </div>
+          <div class="lesson-check">
+            <label class="check"><input type="checkbox" class="course-check" data-key="l4.cards"><span>我让 AI 按 6 类风险自查过一次</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l4.checklist"><span>我把审查结果整理成项目清单</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l4.fix"><span>我让 AI 根据问题清单修复过一次</span></label>
+          </div>
+          <div class="anchor">
+            <strong>锚点：</strong>“能跑”只是起点，并发、权限和事务才是上线分水岭。
+          </div>
+        </div>
+      </section>
+
+      <section id="l5" class="panel">
+        <div class="lesson-head">
+          <div class="lesson-tag" style="background:var(--plum);">L5</div>
+          <div>
+            <h2>把大象装进冰箱：任务拆分</h2>
+            <p class="lesson-sub">目标：一次只给 AI 一个可验证的 PR。</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>需求引入</h3>
+          <p>“实现一个完整文章系统”不是任务，是项目。可以让 AI 拆任务，但拆分结果必须由你确认依赖顺序和验收标准。</p>
+          <div class="translation">
+            <strong>翻译：</strong>任务拆分代表把大目标切成有依赖顺序的小交付，每个小交付都能单独测试和 Review。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>让 AI 拆，你来验收</h3>
+          <p>先把大需求交给 AI 拆分。确认没有循环依赖、每个 PR 都能独立测试后，再进入模拟器。</p>
+          <div class="tool">
+            <div class="tool-title">拆分代跑提示词</div>
+            <pre id="splitPrompt">我有一个中等复杂度需求：实现一个文章发布系统，包括富文本编辑、草稿自动保存、定时发布、标签分类、文章审核流程、SEO 元数据生成。
+
+请先不要写代码，帮我做任务拆分。
+
+输出：
+1. 按依赖顺序列出子任务；
+2. 每个子任务给一个独立 PR 名；
+3. 标明前置依赖；
+4. 每项写清楚输入、输出、业务规则和至少一条测试；
+5. 每项写“不需要做的事”；
+6. 标出哪些任务可以并行。
+
+约束：
+1. 每个 PR 控制在一次可以审查的规模；
+2. 不允许循环依赖；
+3. 每一步都要能独立验证；
+4. 不要一次给我所有代码。</pre>
+            <div class="actions">
+              <button data-copy="splitPrompt">复制拆分提示词</button>
+            </div>
+          </div>
+          <div class="tool">
+            <div class="tool-title">依赖解锁模拟器</div>
+            <div class="task-grid" id="taskGrid"></div>
+            <div class="status-line" id="taskStatus" style="margin-top:12px;"></div>
+            <div class="actions">
+              <button class="ghost" id="resetTasks">重置拆分</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>一个 PR 的执行合同</h3>
+          <p>每个 PR 都走一遍 L2-L4，不要把八个功能混在同一个 prompt 里。</p>
+          <pre id="prPrompt">任务：实现文章-标签关联
+前置：标签 CRUD 已完成；文章基础 CRUD 已完成。
+
+输入：
+- POST /api/articles/:id/tags
+- body: { "tagIds": [1,2] }
+
+输出：
+- 成功：{ "code": 0, "data": { "articleId": 1, "tagIds": [1,2] } }
+- 失败：404 文章不存在；400 标签不存在或重复。
+
+业务规则：
+1. 只允许文章作者修改关联。
+2. tagIds 去重后最多 10 个。
+3. 关联操作放在事务里。
+
+不需要做：
+- 不做标签管理页面。
+- 不做文章搜索。
+
+验收：
+- 先写测试，再实现；测试必须覆盖空数组、重复标签、无权限、文章不存在。</pre>
+          <div class="actions">
+            <button data-copy="prPrompt">复制 PR 提示词</button>
+          </div>
+          <div class="lesson-check">
+            <label class="check"><input type="checkbox" class="course-check" data-key="l5.split"><span>我让 AI 拆出至少 3 个子功能，并确认合理</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l5.deps"><span>我检查过依赖顺序，没有循环依赖</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l5.first"><span>我完成并验收了第一个小 PR</span></label>
+          </div>
+          <div class="anchor">
+            <strong>锚点：</strong>一次改一件事，一次验一件事。
+          </div>
+        </div>
+      </section>
+
+      <section id="l6" class="panel">
+        <div class="lesson-head">
+          <div class="lesson-tag" style="background:var(--muted);">L6</div>
+          <div>
+            <h2>项目记忆系统</h2>
+            <p class="lesson-sub">目标：让纠错结果活到下一个新对话。</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>需求引入</h3>
+          <p>你上周说过“不要用 moment.js”，这周新对话里 AI 又用了。问题不是它笨，是项目没有记忆。这一步也可以让 AI 从对话和代码里提炼记忆。</p>
+          <div class="translation">
+            <strong>翻译：</strong>项目记忆代表一组持久文件，包括规则、常见模式和错误日志，让 AI 每次进入项目都带着同样的约束。
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>三个文件，一个闭环</h3>
+          <div class="tool">
+            <div class="grid grid-3">
+              <div><strong>AGENTS.md</strong><p class="status-line">放项目事实、目录和硬约束。</p></div>
+              <div><strong>docs/PATTERNS.md</strong><p class="status-line">放“新建接口/页面”的标准流程。</p></div>
+              <div><strong>docs/ERRORS.md</strong><p class="status-line">放踩过的坑、正确做法和修复方案。</p></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>让 AI 帮你提炼记忆</h3>
+          <p>把“AI 又错了”翻译成可复用规则。可以让 AI 读最近的对话或 diff，提炼坑和正确做法，最后由你确认放哪里。</p>
+          <div class="tool">
+            <div class="tool-title">记忆提炼提示词</div>
+            <pre id="memoryPrompt">请读取我提供的最近对话、代码 diff 或错误记录，帮我提炼项目记忆。
+
+输出格式：
+## 日期：[日期]
+- 坑的标题：
+- 问题：AI 做错了什么；
+- 正确：项目里应该怎么做；
+- 放入：AGENTS.md / docs/PATTERNS.md / REVIEW_CHECKLIST.md；
+- 验证：下次怎么检查它是否生效。
+
+要求：
+1. 不要泛泛地说“注意安全”，必须给可执行规则；
+2. 每条记录都写成下次 AI 能遵守的约束；
+3. 如果某条更适合放 Review Checklist，请说明原因；
+4. 不要编造我没提供的事实。</pre>
+            <div class="actions">
+              <button data-copy="memoryPrompt">复制记忆提炼提示词</button>
+            </div>
+          </div>
+          <div class="tool">
+            <div class="tool-title">坑记录转换器</div>
+            <div class="grid grid-3">
+              <div>
+                <label for="memoryDate">日期</label>
+                <input id="memoryDate" type="date">
+              </div>
+              <div>
+                <label for="memoryPlace">放哪里</label>
+                <select id="memoryPlace">
+                  <option>AGENTS.md</option>
+                  <option>docs/PATTERNS.md</option>
+                  <option>REVIEW_CHECKLIST.md</option>
+                </select>
+              </div>
+              <div>
+                <label for="memoryTitle">坑的标题</label>
+                <input id="memoryTitle" placeholder="分页从 1 开始">
+              </div>
+            </div>
+            <div class="grid grid-2" style="margin-top:12px;">
+              <div>
+                <label for="memoryProblem">错误做法</label>
+                <textarea id="memoryProblem" placeholder="AI 使用 offset = page * limit。"></textarea>
+              </div>
+              <div>
+                <label for="memoryCorrect">正确做法</label>
+                <textarea id="memoryCorrect" placeholder="使用 offset = (page - 1) * limit。"></textarea>
+              </div>
+            </div>
+            <div class="actions">
+              <button class="green" id="addMemory">加入记忆</button>
+              <button class="ghost" id="clearMemory">清空记录</button>
+            </div>
+            <label for="memoryResult" style="margin-top:15px;">生成 docs/ERRORS.md 片段</label>
+            <textarea id="memoryResult" spellcheck="false" style="min-height:180px;"></textarea>
+            <div class="actions">
+              <button data-copy="memoryResult">复制记忆片段</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>最终验证</h3>
+          <p>开一个全新对话，让 AI 做以前犯过错的同一件事。如果它不再犯，记忆系统开始工作了。</p>
+          <div class="lesson-check">
+            <label class="check"><input type="checkbox" class="course-check" data-key="l6.files"><span>我让 AI 帮我整理了至少 2 个记忆文件</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l6.errors"><span>我确认了 5 个真实坑和正确做法</span></label>
+            <label class="check"><input type="checkbox" class="course-check" data-key="l6.test"><span>我在新对话里验证过一次</span></label>
+          </div>
+          <div class="anchor">
+            <strong>锚点：</strong>每次纠错都应该问一句：这要不要变成规则、模式或检查表？
+          </div>
+        </div>
+      </section>
+
+      <div class="course-footer">
+        <span>本地保存，不联网提交。</span>
+        <span>从 L1 开始，不要跳课。</span>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const STORAGE_KEY = "vibecoding-course-v1";
+    let state = {};
+
+    try {
+      state = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    } catch (e) {
+      state = {};
+    }
+
+    function saveState() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    document.querySelectorAll("[data-persist]").forEach((el) => {
+      const key = el.dataset.persist;
+      if (state[key] !== undefined) el.value = state[key];
+      el.addEventListener("input", () => {
+        state[key] = el.value;
+        saveState();
+      });
+    });
+
+    document.querySelectorAll(".course-check").forEach((el) => {
+      el.checked = Boolean(state[el.dataset.key]);
+      el.addEventListener("change", () => {
+        state[el.dataset.key] = el.checked;
+        saveState();
+        updateProgress();
+      });
+    });
+
+    function updateProgress() {
+      const checks = [...document.querySelectorAll(".course-check")];
+      const done = checks.filter((el) => el.checked).length;
+      document.getElementById("progressBar").style.width = `${(done / checks.length) * 100}%`;
+      document.getElementById("progressText").textContent = `${done} / ${checks.length}`;
+    }
+
+    document.getElementById("courseNav").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-panel]");
+      if (!button) return;
+      document.querySelectorAll("#courseNav button").forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      document.querySelectorAll(".panel").forEach((panel) => panel.classList.remove("active"));
+      document.getElementById(button.dataset.panel).classList.add("active");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+
+    document.querySelectorAll("[data-copy]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const target = document.getElementById(button.dataset.copy);
+        if (!target) return;
+        const text = "value" in target ? target.value : target.textContent;
+        try {
+          await navigator.clipboard.writeText(text.trim());
+          const old = button.textContent;
+          button.textContent = "已复制";
+          setTimeout(() => button.textContent = old, 1200);
+        } catch (e) {
+          alert("复制失败，请手动选择文本。");
+        }
+      });
+    });
+
+    document.getElementById("resetProgress").addEventListener("click", () => {
+      if (!confirm("确定清空勾选进度吗？笔记会保留。")) return;
+      document.querySelectorAll(".course-check").forEach((el) => {
+        el.checked = false;
+        state[el.dataset.key] = false;
+      });
+      saveState();
+      updateProgress();
+    });
+
+    document.getElementById("exportNotes").addEventListener("click", () => {
+      const lines = ["# Vibe Coding 学习笔记", ""];
+      document.querySelectorAll("[data-persist]").forEach((el) => {
+        lines.push(`## ${el.dataset.persist}`);
+        lines.push(el.value || "（空）");
+        lines.push("");
+      });
+      lines.push("## 完成项");
+      document.querySelectorAll(".course-check:checked").forEach((el) => {
+        lines.push(`- ${el.dataset.key}`);
+      });
+      const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "vibecoding-course-notes.txt";
+      link.click();
+      URL.revokeObjectURL(link.href);
+    });
+
+    const contextBase = "帮我在这个项目里加一个用户收藏功能。";
+    const contextParts = {
+      overview: "项目概述：这是一个面向个人使用的静态资源处理工具，不是通用 Web 产品。",
+      stack: "技术栈：Go 标准库优先；Windows 优先；测试用 go test。",
+      dirs: "目录结构：CLI 工具放在 cmd/<工具名>/，入口文件是 main.go。",
+      patterns: "现有模式：沿用现有命令行参数和错误输出方式。",
+      forbid: "禁止事项：不要引入第三方依赖；不要修改 state.json；不要顺手改无关文件。",
+      accept: "验收标准：先列出将修改的文件，再实现，并给出可执行验证命令。"
+    };
+    const selectedParts = new Set();
+
+    function updateContextPrompt() {
+      const additions = [...selectedParts].map((part) => contextParts[part]);
+      const prompt = additions.length ? `${contextBase}\n\n${additions.join("\n")}` : contextBase;
+      document.getElementById("contextPrompt").textContent = prompt;
+      const risk = 6 - selectedParts.size;
+      const meter = document.getElementById("riskMeter");
+      meter.style.width = `${(risk / 6) * 100}%`;
+      meter.style.background = risk >= 4 ? "var(--coral)" : risk >= 2 ? "var(--amber)" : "var(--moss)";
+      const labels = ["约束基本清晰，可以让 AI 动手了。", "还差 1 类上下文。", "还缺一半，先补齐。", "AI 会开始猜。", "风险很高。", "完全裸奔。"];
+      document.getElementById("riskText").textContent = labels[risk];
+      document.querySelectorAll("#contextChips .chip").forEach((chip) => {
+        chip.classList.toggle("selected", selectedParts.has(chip.dataset.part));
+      });
+    }
+
+    document.getElementById("contextChips").addEventListener("click", (event) => {
+      const chip = event.target.closest(".chip");
+      if (!chip) return;
+      const part = chip.dataset.part;
+      if (selectedParts.has(part)) selectedParts.delete(part);
+      else selectedParts.add(part);
+      updateContextPrompt();
+    });
+
+    document.getElementById("resetChips").addEventListener("click", () => {
+      selectedParts.clear();
+      updateContextPrompt();
+    });
+
+    updateContextPrompt();
+
+    const specIds = ["specTask", "specInput", "specOutput", "specRules", "specExclusions", "specDeps"];
+
+    function buildSpec() {
+      const get = (id) => document.getElementById(id).value.trim();
+      const rules = get("specRules").split("\n").filter(Boolean).map((line, index) => `${index + 1}. ${line}`).join("\n");
+      const exclusions = get("specExclusions").split("\n").filter(Boolean).map((line, index) => `${index + 1}. ${line}`).join("\n");
+      const result = `## 任务：${get("specTask") || "请填写动词 + 名词"}\n\n### 输入\n${get("specInput")}\n\n### 输出\n${get("specOutput")}\n\n### 业务规则\n${rules || "1. 待补充"}\n\n### 不需要做的事\n${exclusions || "1. 待补充"}\n\n### 依赖\n${get("specDeps")}`;
+      document.getElementById("specResult").value = result;
+      const lines = (value) => value.split("\n").filter((line) => line.trim()).length;
+      const checks = {
+        task: Boolean(get("specTask")),
+        input: Boolean(get("specInput")),
+        output: Boolean(get("specOutput")),
+        rules: lines(get("specRules")) >= 3,
+        exclusions: lines(get("specExclusions")) >= 2,
+        deps: Boolean(get("specDeps"))
+      };
+      document.querySelectorAll("#specQuality div").forEach((el) => {
+        el.classList.toggle("ok", checks[el.dataset.quality]);
+      });
+    }
+
+    specIds.forEach((id) => document.getElementById(id).addEventListener("input", buildSpec));
+    document.getElementById("buildSpec").addEventListener("click", buildSpec);
+    buildSpec();
+
+    const emailCases = [
+      ["test@gmail.com", true],
+      ["test+tag@gmail.com", true],
+      ["testgmail.com", false],
+      ["@gmail.com", false],
+      ["test@", false],
+      ["test @gmail.com", false],
+      ["a@b.c", true]
+    ];
+    const defaultValidator = `function isValidEmail(email) {\n  return /.+@.+\\..+/.test(email);\n}`;
+    let lastFailures = [];
+
+    function runEmailTests() {
+      const code = document.getElementById("validatorCode").value;
+      const tbody = document.getElementById("testRows");
+      tbody.innerHTML = "";
+      lastFailures = [];
+      let fn;
+      try {
+        fn = new Function('"use strict";\n' + code + "\nreturn isValidEmail;")();
+      } catch (error) {
+        document.getElementById("testResult").textContent = `代码解析失败：${error.message}`;
+        return;
+      }
+      if (typeof fn !== "function") {
+        document.getElementById("testResult").textContent = "没有找到函数 isValidEmail。";
+        return;
+      }
+      let passCount = 0;
+      emailCases.forEach(([input, expected]) => {
+        let actual;
+        let error = "";
+        try {
+          actual = fn(input);
+        } catch (e) {
+          error = e.message;
+        }
+        const pass = actual === expected;
+        if (pass) passCount++;
+        else lastFailures.push(`输入 ${JSON.stringify(input)} 期望 ${expected}，实际 ${actual}${error ? `，错误：${error}` : ""}`);
+        const row = document.createElement("tr");
+        row.innerHTML = `<td><code>${String(input).replace(/</g, "&lt;")}</code></td><td>${expected}</td><td>${actual === undefined ? "undefined" : String(actual)}</td><td class="${pass ? "pass" : "fail"}">${pass ? "PASS" : "FAIL"}</td>`;
+        tbody.appendChild(row);
+      });
+      const result = document.getElementById("testResult");
+      if (passCount === emailCases.length) {
+        result.textContent = `全部通过：${passCount} / ${emailCases.length}`;
+      } else {
+        result.textContent = `失败 ${emailCases.length - passCount} 个用例。先补约束，再让 AI 修复。`;
+      }
+    }
+
+    document.getElementById("runTests").addEventListener("click", runEmailTests);
+    document.getElementById("resetValidator").addEventListener("click", () => {
+      document.getElementById("validatorCode").value = defaultValidator;
+      runEmailTests();
+    });
+    document.getElementById("copyFailures").addEventListener("click", async () => {
+      const text = lastFailures.length ? `以下测试失败，请只修改 isValidEmail 实现，不要修改测试：\n${lastFailures.join("\n")}` : "当前没有失败用例。";
+      await navigator.clipboard.writeText(text);
+      alert("失败用例已复制。");
+    });
+    runEmailTests();
+
+    document.querySelectorAll("#reviewIssues .issue").forEach((card) => {
+      card.addEventListener("click", () => {
+        card.classList.add("found");
+        const found = document.querySelectorAll("#reviewIssues .issue.found").length;
+        document.getElementById("reviewProgress").textContent = `已发现 ${found} / 6 个风险点。`;
+      });
+    });
+
+    const tasks = [
+      { id: "t1", title: "PR1 标签 CRUD", deps: [] },
+      { id: "t2", title: "PR2 文章基础 CRUD", deps: [] },
+      { id: "t3", title: "PR3 草稿自动保存", deps: ["t2"] },
+      { id: "t4", title: "PR4 文章-标签关联", deps: ["t1", "t2"] },
+      { id: "t5", title: "PR5 审核状态机", deps: ["t2"] },
+      { id: "t6", title: "PR6 定时发布", deps: ["t5"] },
+      { id: "t7", title: "PR7 SEO 元数据", deps: ["t2"] },
+      { id: "t8", title: "PR8 列表查询", deps: ["t4"] }
+    ];
+    const doneTasks = new Set();
+
+    function renderTasks() {
+      const grid = document.getElementById("taskGrid");
+      grid.innerHTML = "";
+      tasks.forEach((task) => {
+        const ready = task.deps.every((dep) => doneTasks.has(dep));
+        const done = doneTasks.has(task.id);
+        const card = document.createElement("div");
+        card.className = `task ${done ? "done" : ready ? "ready" : ""}`;
+        card.innerHTML = `<strong>${task.title}</strong><small>${done ? "已完成" : ready ? "可以开始" : `等待：${task.deps.map((id) => tasks.find((t) => t.id === id).title).join("、")}`}</small>`;
+        const button = document.createElement("button");
+        button.textContent = done ? "撤销" : "完成";
+        button.className = done ? "ghost" : "green";
+        button.addEventListener("click", () => {
+          if (done) doneTasks.delete(task.id);
+          else doneTasks.add(task.id);
+          renderTasks();
+        });
+        card.appendChild(button);
+        grid.appendChild(card);
+      });
+      const readyCount = tasks.filter((task) => !doneTasks.has(task.id) && task.deps.every((dep) => doneTasks.has(dep))).length;
+      document.getElementById("taskStatus").textContent = `已完成 ${doneTasks.size} / ${tasks.length}；当前可开始 ${readyCount} 个。`;
+    }
+
+    document.getElementById("resetTasks").addEventListener("click", () => {
+      doneTasks.clear();
+      renderTasks();
+    });
+    renderTasks();
+
+    const memoryItems = state.memoryItems || [];
+
+    function saveMemory() {
+      state.memoryItems = memoryItems;
+      saveState();
+    }
+
+    function renderMemory() {
+      const output = memoryItems.map((item, index) => {
+        return `## ${index + 1}. ${item.title}\n- 日期：${item.date}\n- 问题：${item.problem}\n- 正确：${item.correct}\n- 放入：${item.place}\n- 状态：已转化为规则`;
+      }).join("\n\n");
+      document.getElementById("memoryResult").value = output || "# AI 常犯错误记录\n\n还没有记录。先记录第一条真实坑。";
+    }
+
+    document.getElementById("addMemory").addEventListener("click", () => {
+      const title = document.getElementById("memoryTitle").value.trim();
+      const problem = document.getElementById("memoryProblem").value.trim();
+      const correct = document.getElementById("memoryCorrect").value.trim();
+      if (!title || !problem || !correct) {
+        alert("标题、错误做法、正确做法都要填写。");
+        return;
+      }
+      memoryItems.push({
+        title,
+        problem,
+        correct,
+        date: document.getElementById("memoryDate").value || new Date().toISOString().slice(0, 10),
+        place: document.getElementById("memoryPlace").value
+      });
+      saveMemory();
+      renderMemory();
+      document.getElementById("memoryTitle").value = "";
+      document.getElementById("memoryProblem").value = "";
+      document.getElementById("memoryCorrect").value = "";
+    });
+
+    document.getElementById("clearMemory").addEventListener("click", () => {
+      memoryItems.length = 0;
+      saveMemory();
+      renderMemory();
+    });
+
+    renderMemory();
+    updateProgress();
+  </script>
+</body>
+</html>

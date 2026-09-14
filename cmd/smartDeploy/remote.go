@@ -50,6 +50,9 @@ type sshClient struct {
 
 	// Auto-reconnect
 	autoReconnect bool
+	// onConnected, when set, runs asynchronously after each successful
+	// connect (first connect, REPL reconnect, auto-reconnect alike).
+	onConnected func()
 
 	// Logging
 	logger *log.Logger
@@ -279,7 +282,30 @@ func (c *sshClient) connectInternal() error {
 	c.mu.Unlock()
 
 	c.postConnect()
+	c.notifyConnected()
 	return nil
+}
+
+// SetOnConnected registers fn to run after a successful connection. If the
+// client is already connected when this is called, fn runs immediately
+// (asynchronously) so late registration after a fast first connect is safe.
+func (c *sshClient) SetOnConnected(fn func()) {
+	c.mu.Lock()
+	c.onConnected = fn
+	already := c.connected && c.client != nil
+	c.mu.Unlock()
+	if fn != nil && already {
+		go fn()
+	}
+}
+
+func (c *sshClient) notifyConnected() {
+	c.mu.Lock()
+	fn := c.onConnected
+	c.mu.Unlock()
+	if fn != nil {
+		go fn()
+	}
 }
 
 func (c *sshClient) keepalive() {

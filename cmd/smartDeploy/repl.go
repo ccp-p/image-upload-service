@@ -202,6 +202,27 @@ func (r *REPL) handle(line string) (quit bool) {
 		r.printf("Bye.\n")
 		return true
 	default:
+		// When disconnected, treat numeric input as an OTP code. The
+		// user's intent after a failed auto-connect is to reconnect,
+		// not to run a command: store the code and start a connection.
+		if r.otpStore != nil && !r.client.IsConnected() {
+			if code, ok := extractOTP(line); ok {
+				r.otpStore.Set(code)
+				if r.client.IsReconnecting() {
+					r.printf("OTP set: %s (reconnect in progress, will use it)\n", code)
+				} else {
+					r.printf("OTP set: %s - connecting...\n", code)
+					go func() {
+						if err := r.client.Connect(); err != nil {
+							r.printf("[ERR] connect: %v\n", err)
+						} else {
+							r.printf("Connected.\n")
+						}
+					}()
+				}
+				return false
+			}
+		}
 		r.printf("Unknown command: %s (type 'h' for help)\n", cmd)
 	}
 	return false
@@ -226,6 +247,9 @@ func (r *REPL) printHelp() {
   otp [code]         Set or show current OTP code
   h, help            Show this help
   q, quit            Exit
+
+When disconnected, typing an OTP code directly (e.g. 123456) stores it
+and connects immediately.
 `)
 }
 

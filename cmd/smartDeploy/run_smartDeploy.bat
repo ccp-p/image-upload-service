@@ -25,13 +25,24 @@ if %errorlevel% equ 0 (
     timeout /t 1 /nobreak >nul
 )
 
-rem --- Always rebuild to pick up code changes ---
-echo [INFO] Building smartDeploy.exe...
-go build -o smartDeploy.exe .
-if %errorlevel% neq 0 (
-    echo [ERROR] Build failed.
-    pause
-    exit /b 1
+rem --- Rebuild only when a .go file is newer than smartDeploy.exe ---
+set NEED_BUILD=1
+if exist "smartDeploy.exe" (
+    set NEED_BUILD=0
+    for /f %%i in ('powershell -NoProfile -Command "(Get-ChildItem -Filter *.go | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime -le (Get-Item smartDeploy.exe).LastWriteTime"') do (
+        if /i not "%%i"=="True" set NEED_BUILD=1
+    )
+)
+if %NEED_BUILD% equ 1 (
+    echo [INFO] Source changed - rebuilding smartDeploy.exe...
+    go build -o smartDeploy.exe .
+    if errorlevel 1 (
+        echo [ERROR] Build failed.
+        pause
+        exit /b 1
+    )
+) else (
+    echo [INFO] smartDeploy.exe is up to date - skipping build.
 )
 
 rem --- Launch ---
