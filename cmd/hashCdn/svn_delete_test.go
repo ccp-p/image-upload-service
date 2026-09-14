@@ -30,9 +30,9 @@ func TestVcsSvnDelete_VarIsSwappable(t *testing.T) {
 	}
 }
 
-// TestFindAndDeleteOldHashFiles_NotifiesSvnDelete verifies that deleting old
-// hash files notifies SVN once per old file, and never for the current hash
-// file or unrelated files.
+// TestFindAndDeleteOldHashFiles_NotifiesSvnDelete verifies that old hash
+// files are retained for browser-cache fallback: nothing is deleted and SVN
+// is never notified.
 func TestFindAndDeleteOldHashFiles_NotifiesSvnDelete(t *testing.T) {
 	tmpDir := t.TempDir()
 	vm := NewVersionManager(Config{HashLength: 8}, false)
@@ -51,17 +51,13 @@ func TestFindAndDeleteOldHashFiles_NotifiesSvnDelete(t *testing.T) {
 		t.Fatalf("findAndDeleteOldHashFiles failed: %v", err)
 	}
 
-	if len(rec.paths) != 2 {
-		t.Fatalf("expected 2 svn delete notifications, got %d: %v", len(rec.paths), rec.paths)
+	if len(rec.paths) != 0 {
+		t.Fatalf("expected 0 svn delete notifications, got %d: %v", len(rec.paths), rec.paths)
 	}
-	for _, p := range rec.paths {
-		switch filepath.Base(p) {
-		case "style.aaaabbbb.css", "other.css":
-			t.Errorf("svn delete should not be called for %s", filepath.Base(p))
+	for _, f := range []string{"style.ccccdddd.css", "style.eeeeffff.css"} {
+		if !fileExists(filepath.Join(tmpDir, f)) {
+			t.Errorf("%s should be kept for browser cache fallback", f)
 		}
-	}
-	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) || fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
-		t.Error("old hash files were not removed from disk")
 	}
 	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
 		t.Error("current hash file was deleted")
@@ -69,7 +65,8 @@ func TestFindAndDeleteOldHashFiles_NotifiesSvnDelete(t *testing.T) {
 }
 
 // TestCleanHashFiles_NotifiesSvnDelete verifies that cleaning old hash files
-// from the dest dir notifies SVN for the removed file only.
+// from the dest dir notifies SVN for the removed file only, while released
+// versions stay.
 func TestCleanHashFiles_NotifiesSvnDelete(t *testing.T) {
 	tmpDir := t.TempDir()
 	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("keep"), 0644)

@@ -50,11 +50,6 @@ const (
 	ModeCopyCommitRollbackExcludeCDN = 9
 )
 
-// oldHashKeepAge dest 目录旧 hash 文件的保留阈值：
-// 超过该时长的 hash 文件可能是用户浏览器缓存的 HTML 所引用的版本，部署清理时保留；
-// 24h 内的多轮部署中间产物不会被用户缓存，正常清理
-const oldHashKeepAge = 24 * time.Hour
-
 // isHomeEnv 判断当前是否为家庭环境（集中管理 IS_HOME 检查）
 func isHomeEnv() bool {
 	return os.Getenv("IS_HOME") == "1"
@@ -263,6 +258,8 @@ func (vm *VersionManager) addHashToFilename(filename, hash string) string {
 }
 
 // findAndDeleteOldHashFiles 查找并删除旧的hash文件
+// findAndDeleteOldHashFiles 扫描同 basename 的旧 hash 文件，全部保留作为
+// 浏览器缓存兜底。旧 hash 引用可能仍存在于线上 HTML 中，删除会导致 404。
 func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentHash string) error {
 	if isJSOrCSS(basename + ext) {
 		vm.logf("  🔍 查找旧hash文件: %s%s (当前hash: %s)\n", basename, ext, currentHash)
@@ -276,7 +273,6 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
 		return err
 	}
 
-	var deletedCount int
 	for _, file := range files {
 		if file.IsDir() {
 			continue
@@ -284,23 +280,10 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
 		filename := file.Name()
 		hashMatches := re.FindStringSubmatch(filename)
 		if len(hashMatches) >= 2 && hashMatches[1] != currentHash {
-			oldFilePath := filepath.Join(dir, filename)
-			vcsSvnDelete(oldFilePath, vm.debugMode)
-			if err := os.Remove(oldFilePath); err != nil {
-				if isJSOrCSS(filename) {
-					fmt.Printf("    ⚠️  删除失败: %s\n", filename)
-				}
-			} else {
-				if isJSOrCSS(filename) {
-					fmt.Printf("    🗑️  已删除: %s\n", filename)
-				}
-				deletedCount++
+			if isJSOrCSS(filename) {
+				fmt.Printf("    🛡️  保留旧hash(浏览器缓存兜底): %s\n", filename)
 			}
 		}
-	}
-
-	if deletedCount > 0 {
-		vm.logf("  ✅ 共删除 %d 个旧文件\n", deletedCount)
 	}
 
 	return nil
@@ -1443,12 +1426,12 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 
 // DeployManager 部署管理器
 type DeployManager struct {
-	config          DeployConfig
-	sourcePath      string
-	destPath        string
-	debugMode       bool
-	folderOpened    bool
-	cache           *DeployCache // 持久化文件hash缓存
+	config       DeployConfig
+	sourcePath   string
+	destPath     string
+	debugMode    bool
+	folderOpened bool
+	cache        *DeployCache // 持久化文件hash缓存
 }
 
 // NewDeployManager 创建部署管理器
@@ -1498,25 +1481,37 @@ type FileCacheEntry struct {
 }
 
 // DeployCache 部署文件hash缓存（持久化到磁盘，避免每次重复计算MD5）
-type DeployCache struct {
-	Files     map[string]FileCacheEntry `json:"files"`
-	cachePath string
-	mu        sync.RWMutex
-	dirty     bool
+type DeployCacheFile struct {
+	Files          map[string]FileCacheEntry `json:"files"`
+	SessionTime    int64                     `json:"sessionTime,omitempty"`
+	ReleasedHashes map[string]bool           `json:"releasedHashes,omitempty"`
 }
+
+type DeployCache struct {
+	Files          map[string]FileCacheEntry
+	SessionTime    int64
+	ReleasedHashes map[string]bool
+	cachePath      string
+	mu             sync.RWMutex
+	dirty          bool
+}
+
+// deploySessionGap 超过该间隔的两次部署视为新会话：重新从 dest HTML
+// 采集上一版生产 hash；会话内多次部署沿用会话开始时的名单。
+const deploySessionGap = 6 * time.Hour
 
 // loadDeployCache 从磁盘加载缓存，文件不存在或解析失败时返回空缓存
 func loadDeployCache(cachePath string) *DeployCache {
-	dc := &DeployCache{
-		Files:     make(map[string]FileCacheEntry),
-		cachePath: cachePath,
-	}
+	dc := &DeployCache{Files: make(map[string]FileCacheEntry), cachePath: cachePath}
 	if data, err := os.ReadFile(cachePath); err == nil {
-		if err := json.Unmarshal(data, &dc.Files); err != nil {
+		var wrapper DeployCacheFile
+		if err := json.Unmarshal(data, &wrapper); err == nil && wrapper.Files != nil {
+			dc.Files = wrapper.Files
+			dc.SessionTime = wrapper.SessionTime
+			dc.ReleasedHashes = wrapper.ReleasedHashes
+		} else if err := json.Unmarshal(data, &dc.Files); err != nil {
+			// 兼容旧版直接序列化 Files 的扁平格式
 			fmt.Printf("⚠️  部署缓存解析失败，将重建缓存: %v\n", err)
-			dc.Files = make(map[string]FileCacheEntry)
-		}
-		if dc.Files == nil {
 			dc.Files = make(map[string]FileCacheEntry)
 		}
 	}
@@ -1530,7 +1525,11 @@ func (dc *DeployCache) Save() error {
 	if !dc.dirty {
 		return nil
 	}
-	data, err := json.MarshalIndent(dc.Files, "", "  ")
+	data, err := json.MarshalIndent(DeployCacheFile{
+		Files:          dc.Files,
+		SessionTime:    dc.SessionTime,
+		ReleasedHashes: dc.ReleasedHashes,
+	}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1674,7 +1673,45 @@ func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
 	return versions
 }
 
-// cleanHashFiles 清理旧的hash文件
+// collectReleasedHashes 扫描 dest 目录下的 HTML，提取当前已上线引用的
+// hash 资源文件名。这些是上一版生产版本，部署时必须保留兜底。
+// 会话判断基于部署时记录的系统时间：距上次部署超过 deploySessionGap
+// 视为新会话才重新采集；会话内（含跨天凌晨）沿用会话开始时的名单，
+// 避免把当晚多次部署的中间版本误认成生产版本。
+func (dm *DeployManager) collectReleasedHashes() {
+	now := time.Now().UnixNano()
+	if dm.cache.SessionTime != 0 &&
+		now-dm.cache.SessionTime < int64(deploySessionGap) &&
+		dm.cache.ReleasedHashes != nil {
+		return
+	}
+
+	hashes := make(map[string]bool)
+	hashPattern := getRegex(`[A-Za-z0-9_-]+\.[a-f0-9]{4,64}\.[A-Za-z0-9]+`)
+
+	filepath.Walk(dm.destPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".html") {
+			return nil
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		for _, m := range hashPattern.FindAllString(string(content), -1) {
+			hashes[filepath.Base(m)] = true
+		}
+		return nil
+	})
+
+	dm.cache.ReleasedHashes = hashes
+	dm.cache.SessionTime = now
+	dm.cache.dirty = true
+	if err := dm.cache.Save(); err != nil && dm.debugMode {
+		fmt.Printf("  ⚠️  保存会话生产版本名单失败: %v\n", err)
+	}
+}
+
+// cleanHashFiles 清理旧的hash文件，只保留最新版本和已上线生产版本
 func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 	destDir := filepath.Dir(destPath)
 	destFileName := filepath.Base(destPath)
@@ -1694,23 +1731,16 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 
 	deletedCount := 0
 	for _, file := range files {
-		if file.Name() == destFileName || file.Name() == keepFileName {
+		if file.Name() == destFileName || file.Name() == keepFileName || dm.cache.ReleasedHashes[file.Name()] {
 			if dm.debugMode && isJSOrCSS(file.Name()) {
-				fmt.Printf("    🛡️  保留: %s\n", file.Name())
+				fmt.Printf("    🛡️  保留(最新/已上线生产版本): %s\n", file.Name())
 			}
 			continue
 		}
 
 		if hashPattern.MatchString(file.Name()) {
 			filePath := filepath.Join(destDir, file.Name())
-			// 超过 24h 的旧 hash 可能是用户浏览器缓存的 HTML 引用的版本，保留兜底
-			if info, statErr := file.Info(); statErr == nil && time.Since(info.ModTime()) > oldHashKeepAge {
-				if isJSOrCSS(file.Name()) {
-					fmt.Printf("    🛡️  保留旧hash(浏览器缓存兜底): %s\n", file.Name())
-				}
-				continue
-			}
-			// 先通知SVN删除，再删除本地文件
+			// 非最新且非已上线版本的旧 hash（含当晚多次部署的中间产物）直接清理
 			vcsSvnDelete(filePath, dm.debugMode)
 			if err := os.Remove(filePath); err == nil {
 				deletedCount++
@@ -2209,6 +2239,9 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 			fmt.Printf("⚠️  SVN更新失败: %v，继续部署...\n", err)
 		}
 	}
+
+	// 部署前先记录 dest HTML 引用的已上线 hash，供清理时保留
+	dm.collectReleasedHashes()
 
 	fmt.Println("📦 开始复制文件...")
 

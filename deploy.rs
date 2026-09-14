@@ -76,18 +76,6 @@ fn mod_time_nanos(metadata: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-fn now_nanos() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as i64)
-        .unwrap_or(0)
-}
-
-/// Dest 旧 hash 文件的保留阈值（纳秒）：
-/// 超过该时长的 hash 文件可能是用户浏览器缓存的 HTML 所引用的版本，部署清理时保留；
-/// 24h 内的多轮部署中间产物不会被用户缓存，正常清理
-const OLD_HASH_KEEP_AGE_NANOS: i64 = 24 * 60 * 60 * 1_000_000_000;
-
 /// Normalises a path for use as a cache key (forward slashes, strips leading ./).
 fn clean_key(p: &str) -> String {
     let p = p.replace('\\', "/");
@@ -108,9 +96,15 @@ pub struct FileCacheEntry {
 
 pub struct DeployCache {
     pub files: HashMap<String, FileCacheEntry>,
+    pub session_time: i64,
+    pub released_hashes: std::collections::HashSet<String>,
     cache_path: String,
     dirty: bool,
 }
+
+/// 超过该间隔的两次部署视为新会话：重新从 dest HTML 采集上一版生产 hash；
+/// 会话内多次部署（含跨天凌晨）沿用会话开始时的名单。
+const DEPLOY_SESSION_GAP_NANOS: i64 = 6 * 60 * 60 * 1_000_000_000;
 
 /// Loads the deploy cache from disk. Returns an empty cache if the file is
 /// missing or unparseable. modTime is read as an exact i64 (Integer variant)
@@ -119,6 +113,8 @@ pub struct DeployCache {
 pub fn load_deploy_cache(cache_path: &str) -> DeployCache {
     let mut cache = DeployCache {
         files: HashMap::new(),
+        session_time: 0,
+        released_hashes: std::collections::HashSet::new(),
         cache_path: cache_path.to_string(),
         dirty: false,
     };
@@ -135,6 +131,22 @@ pub fn load_deploy_cache(cache_path: &str) -> DeployCache {
 
     if let JsonValue::Object(entries) = &json {
         for (key, val) in entries {
+            if key == "__sessionTime" {
+                if let JsonValue::Integer(t) = val {
+                    cache.session_time = *t;
+                }
+                continue;
+            }
+            if key == "__releasedHashes" {
+                if let JsonValue::Array(list) = val {
+                    for item in list {
+                        if let JsonValue::String(s) = item {
+                            cache.released_hashes.insert(s.clone());
+                        }
+                    }
+                }
+                continue;
+            }
            let hash = val.get_str("hash").unwrap_or("").to_string();
            let size = val.get_num("size").map(|n| n as i64).unwrap_or(0);
             // modTime: prefer exact integer (Go numeric form), fall back to
@@ -160,8 +172,22 @@ pub fn load_deploy_cache(cache_path: &str) -> DeployCache {
 /// Serialises the cache to pretty JSON. modTime is stored as a JSON integer
 /// (not a string) so that Go's `encoding/json` can unmarshal it into int64,
 /// and i64 precision is preserved exactly via the Integer variant.
-fn serialize_cache(files: &HashMap<String, FileCacheEntry>) -> String {
+fn serialize_cache(
+    files: &HashMap<String, FileCacheEntry>,
+    session_time: i64,
+    released_hashes: &std::collections::HashSet<String>,
+) -> String {
     let mut entries: Vec<(String, JsonValue)> = Vec::new();
+    entries.push(("__sessionTime".to_string(), JsonValue::Integer(session_time)));
+    entries.push((
+        "__releasedHashes".to_string(),
+        JsonValue::Array(
+            released_hashes
+                .iter()
+                .map(|s| JsonValue::String(s.clone()))
+                .collect(),
+        ),
+    ));
     for (k, v) in files {
         let entry = JsonValue::Object(vec![
             ("hash".to_string(), JsonValue::String(v.hash.clone())),
@@ -178,7 +204,7 @@ impl DeployCache {
         if !self.dirty {
             return Ok(());
         }
-        let data = serialize_cache(&self.files);
+        let data = serialize_cache(&self.files, self.session_time, &self.released_hashes);
         std::fs::write(&self.cache_path, data.as_bytes()).map_err(|e| e.to_string())?;
         self.dirty = false;
         Ok(())
@@ -334,9 +360,65 @@ impl DeployManager {
         versions
     }
 
-    /// Removes old hashed files in the dest dir, keeping the base and the
-    /// specified keep file. Returns the number of files deleted.
-    pub fn clean_hash_files(&self, dest_path: &str, keep_file_name: &str) -> usize {
+    /// Collects hashed asset filenames referenced by HTML files under dest
+    /// root. These are the currently released production versions and must
+    /// be kept during cleanup. Within a deploy session (gap < 6h, including
+    /// across midnight) the list captured at session start is reused so
+    /// same-night intermediate versions are never treated as released.
+    fn collect_released_hashes(&mut self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        if self.cache.session_time != 0
+            && now - self.cache.session_time < DEPLOY_SESSION_GAP_NANOS
+            && !self.cache.released_hashes.is_empty()
+        {
+            return;
+        }
+
+        let mut names = std::collections::HashSet::new();
+        self.walk_html_for_hashes(&self.dest_path.clone(), &mut names);
+        self.cache.released_hashes = names;
+        self.cache.session_time = now;
+        self.cache.dirty = true;
+        let _ = self.cache.save();
+    }
+
+    fn walk_html_for_hashes(
+        &self,
+        dir: &str,
+        names: &mut std::collections::HashSet<String>,
+    ) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    self.walk_html_for_hashes(path.to_string_lossy().as_ref(), names);
+                } else if path.extension().map(|e| e == "html").unwrap_or(false) {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        for token in content.split(|c: char| {
+                            !(c.is_ascii_alphanumeric()
+                                || c == '_'
+                                || c == '-'
+                                || c == '.'
+                                || c == '/')
+                        }) {
+                            let filename = token.rsplit('/').next().unwrap_or("");
+                            if crate::patterns::parse_hashed_filename(filename).is_some() {
+                                names.insert(filename.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Removes old hashed files in the dest dir, keeping the newest version
+    /// and the currently released production versions. Returns the number of
+    /// files deleted.
+    pub fn clean_hash_files(&mut self, dest_path: &str, keep_file_name: &str) -> usize {
         let dest_dir = path_dir(dest_path);
         let dest_file_name = path_base(dest_path);
         let ext = get_ext(&dest_file_name);
@@ -351,23 +433,18 @@ impl DeployManager {
             return 0;
         }
 
+        self.collect_released_hashes();
+        let released = &self.cache.released_hashes;
         let mut deleted = 0;
         if let Ok(entries) = std::fs::read_dir(&dest_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name == dest_file_name || name == keep_file_name {
+                if name == dest_file_name || name == keep_file_name || released.contains(&name) {
                     continue;
                 }
                 if matches_alnum_hash(&name, &basename, ext_no_dot) {
                     let file_path = path_join(&dest_dir, &name);
-                    // 超过 24h 的旧 hash 可能是用户浏览器缓存的 HTML 引用的版本，保留兜底
-                    let mod_time = std::fs::metadata(&file_path)
-                        .map(|m| mod_time_nanos(&m))
-                        .unwrap_or(0);
-                    if now_nanos() - mod_time > OLD_HASH_KEEP_AGE_NANOS {
-                        continue;
-                    }
-                    // Notify SVN first, then remove the local file (mirrors Go).
+                    // 非最新且非已上线版本的旧 hash（含当晚多次部署的中间产物）直接清理
                     vcs_svn_delete(&file_path, self.debug_mode);
                     if std::fs::remove_file(&file_path).is_ok() {
                         deleted += 1;
@@ -1538,7 +1615,7 @@ mod tests {
         std::fs::write(dir.join("style.css"), "base").unwrap();
         std::fs::write(dir.join("other.css"), "unrelated").unwrap();
 
-        let dm = DeployManager {
+        let mut dm = DeployManager {
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dir.to_string_lossy().to_string(),
@@ -1549,15 +1626,77 @@ mod tests {
 
         let dest_path = dir.join("style.css");
         let deleted = dm.clean_hash_files(dest_path.to_str().unwrap(), "style.aaaabbbb.css");
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted, 1, "non-released old hash should be deleted");
         assert!(file_exists(
             dir.join("style.aaaabbbb.css").to_str().unwrap()
         ));
         assert!(!file_exists(
             dir.join("style.ccccdddd.css").to_str().unwrap()
-        ));
+        ), "old hash file should be cleaned");
         assert!(file_exists(dir.join("style.css").to_str().unwrap()));
         assert!(file_exists(dir.join("other.css").to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_clean_hash_files_keeps_released_hash_from_html() {
+        let dir = std::env::temp_dir().join(format!("clean_hash_rel_{}", tmp_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("style.aaaabbbb.css"), "keep").unwrap();
+        std::fs::write(dir.join("style.ccccdddd.css"), "released").unwrap();
+        std::fs::write(dir.join("style.eeeeffff.css"), "intermediate").unwrap();
+        std::fs::write(dir.join("style.css"), "base").unwrap();
+        std::fs::write(dir.join("page.html"), r#"<link href="css/style.ccccdddd.css">"#)
+            .unwrap();
+
+        let mut dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: String::new(),
+            dest_path: dir.to_string_lossy().to_string(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(dir.join(".deploy-cache.json").to_str().unwrap()),
+        };
+
+        let deleted = dm.clean_hash_files(dir.join("style.css").to_str().unwrap(), "style.aaaabbbb.css");
+        assert_eq!(deleted, 1, "intermediate hash only should be deleted");
+        assert!(file_exists(dir.join("style.ccccdddd.css").to_str().unwrap()));
+        assert!(!file_exists(dir.join("style.eeeeffff.css").to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_collect_released_hashes_uses_session_list_within_gap() {
+        let dir = std::env::temp_dir().join(format!("clean_hash_sess_{}", tmp_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("page.html"), r#"<link href="css/style.ccccdddd.css">"#)
+            .unwrap();
+
+        let mut dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: String::new(),
+            dest_path: dir.to_string_lossy().to_string(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(dir.join(".deploy-cache.json").to_str().unwrap()),
+        };
+
+        dm.collect_released_hashes();
+        assert!(dm.cache.released_hashes.contains("style.ccccdddd.css"));
+
+        // 当晚第二次部署前 dest HTML 已指向新的中间版本，
+        // 会话内必须沿用第一次采集的生产名单
+        std::fs::write(dir.join("page.html"), r#"<link href="css/style.eeeeffff.css">"#)
+            .unwrap();
+        dm.collect_released_hashes();
+        assert!(
+            !dm.cache.released_hashes.contains("style.eeeeffff.css"),
+            "within a session, intermediate hash must not become released"
+        );
+        assert!(dm.cache.released_hashes.contains("style.ccccdddd.css"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1567,8 +1706,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("clean_hash_old_{}", tmp_id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // keep: 当前版本；stale: 超过24h（用户浏览器可能缓存的版本，保留）；
-        // recent: 24h 内多轮部署的中间产物（删除）
+        // keep: 当前版本；stale/recent: 无 released HTML 引用时都清理
         std::fs::write(dir.join("style.aaaabbbb.css"), "keep").unwrap();
         std::fs::write(dir.join("style.eeeeffff.css"), "stale").unwrap();
         std::fs::write(dir.join("style.ccccdddd.css"), "recent").unwrap();
@@ -1585,7 +1723,7 @@ mod tests {
             .set_modified(old_time)
             .unwrap();
 
-        let dm = DeployManager {
+        let mut dm = DeployManager {
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dir.to_string_lossy().to_string(),
@@ -1596,17 +1734,17 @@ mod tests {
 
         let dest_path = dir.join("style.css");
         let deleted = dm.clean_hash_files(dest_path.to_str().unwrap(), "style.aaaabbbb.css");
-        assert_eq!(deleted, 1, "only the recent (<24h) hash should be deleted");
+        assert_eq!(deleted, 2, "intermediate hashes are cleaned without released refs");
         assert!(file_exists(
             dir.join("style.aaaabbbb.css").to_str().unwrap()
         ));
         assert!(
-            file_exists(dir.join("style.eeeeffff.css").to_str().unwrap()),
-            "hash file older than 24h should be kept for browser cache fallback"
+            !file_exists(dir.join("style.eeeeffff.css").to_str().unwrap()),
+            "stale hash file should be cleaned without released refs"
         );
         assert!(
             !file_exists(dir.join("style.ccccdddd.css").to_str().unwrap()),
-            "recent hash file (<24h) should be deleted"
+            "intermediate hash file should be cleaned"
         );
         assert!(file_exists(dir.join("style.css").to_str().unwrap()));
 
@@ -1770,7 +1908,7 @@ mod tests {
             file_exists(dst_nested.join("gift-carousel2.114b07c2.png").to_str().unwrap()),
             "nested hashed image must be deployed"
         );
-        // Old hash file cleaned from dest.
+        // Old hash file cleaned from dest (not referenced by any released HTML).
         assert!(
             !file_exists(dst_nested.join("gift-carousel2.deadbeef.png").to_str().unwrap()),
             "old hash file must be cleaned from dest (production incident)"
@@ -1810,7 +1948,7 @@ mod tests {
         std::fs::write(comp_dir.join("index.aaaabbbb.css"), "body{}").unwrap();
         std::fs::write(comp_dir.join("app.ccccdddd.js"), "1").unwrap();
 
-        let dm = DeployManager {
+        let mut dm = DeployManager {
             config: DeployConfig {
                 cdn_path_prefix: cdn_domain.to_string(),
                 ..Default::default()

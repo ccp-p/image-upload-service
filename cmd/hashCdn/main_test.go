@@ -536,12 +536,12 @@ func TestFindAndDeleteOldHashFiles(t *testing.T) {
 	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
 		t.Error("current hash file was deleted")
 	}
-	// Old hash files should be deleted
-	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
-		t.Error("old hash file was not deleted")
+	// Old hash files are kept as browser-cache fallback
+	if !fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
+		t.Error("old hash file should be kept")
 	}
-	if fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
-		t.Error("older hash file was not deleted")
+	if !fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
+		t.Error("older hash file should be kept")
 	}
 	// Unrelated file should survive
 	if !fileExists(filepath.Join(tmpDir, "other.css")) {
@@ -753,7 +753,7 @@ func TestCleanHashFiles(t *testing.T) {
 		t.Error("keep file was deleted")
 	}
 	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
-		t.Error("old hash file was not deleted")
+		t.Error("old hash file should be cleaned when not released")
 	}
 	if !fileExists(filepath.Join(tmpDir, "style.css")) {
 		t.Error("base file was deleted")
@@ -788,20 +788,80 @@ func TestCleanHashFilesKeepsOldHashForBrowserCache(t *testing.T) {
 	destPath := filepath.Join(tmpDir, "style.css")
 	deleted := dm.cleanHashFiles(destPath, "style.aaaabbbb.css")
 
-	if deleted != 1 {
-		t.Errorf("expected 1 deleted (recent only), got %d", deleted)
+	if deleted != 2 {
+		t.Errorf("expected 2 deleted (intermediates cleaned), got %d", deleted)
 	}
 	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
 		t.Error("keep file was deleted")
 	}
-	if !fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
-		t.Error("hash file older than 24h should be kept for browser cache fallback")
+	if fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
+		t.Error("stale hash file older than 24h should be cleaned")
 	}
 	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
-		t.Error("recent hash file (<24h) should be deleted")
+		t.Error("intermediate hash file (<24h) should be cleaned")
 	}
 	if !fileExists(filepath.Join(tmpDir, "style.css")) {
 		t.Error("base file was deleted")
+	}
+}
+
+func TestCleanHashFilesKeepsReleasedHashFromHTML(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("keep"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("released"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.eeeeffff.css"), []byte("intermediate"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "page.html"),
+		[]byte(`<link href="css/style.ccccdddd.css">`), 0644)
+
+	dm := &DeployManager{
+		config:    DeployConfig{},
+		destPath:  tmpDir,
+		debugMode: false,
+		cache:     loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json")),
+	}
+	dm.collectReleasedHashes()
+
+	deleted := dm.cleanHashFiles(filepath.Join(tmpDir, "style.css"), "style.aaaabbbb.css")
+	if deleted != 1 {
+		t.Errorf("expected 1 deleted (intermediate only), got %d", deleted)
+	}
+	if !fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
+		t.Error("released hash referenced by dest HTML must be kept")
+	}
+	if fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
+		t.Error("intermediate hash not referenced by HTML should be cleaned")
+	}
+}
+
+func TestCollectReleasedHashesUsesSessionListWithinGap(t *testing.T) {
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, ".deploy-cache.json")
+	os.WriteFile(filepath.Join(tmpDir, "page.html"),
+		[]byte(`<link href="css/style.ccccdddd.css">`), 0644)
+
+	dm := &DeployManager{
+		config:    DeployConfig{},
+		destPath:  tmpDir,
+		debugMode: false,
+		cache:     loadDeployCache(cachePath),
+	}
+
+	dm.collectReleasedHashes()
+	if !dm.cache.ReleasedHashes["style.ccccdddd.css"] {
+		t.Fatal("session start should capture released hash from dest HTML")
+	}
+
+	// 当晚第二次部署前 dest HTML 已指向新的中间版本，
+	// 会话内必须沿用第一次采集的生产名单
+	os.WriteFile(filepath.Join(tmpDir, "page.html"),
+		[]byte(`<link href="css/style.eeeeffff.css">`), 0644)
+	dm.collectReleasedHashes()
+	if dm.cache.ReleasedHashes["style.eeeeffff.css"] {
+		t.Error("within a session, intermediate hash must not become released")
+	}
+	if !dm.cache.ReleasedHashes["style.ccccdddd.css"] {
+		t.Error("released hash captured at session start must be kept")
 	}
 }
 
