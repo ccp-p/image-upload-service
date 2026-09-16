@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // svnDeleteRecorder records every path passed to vcsSvnDelete so tests can
@@ -30,9 +31,9 @@ func TestVcsSvnDelete_VarIsSwappable(t *testing.T) {
 	}
 }
 
-// TestFindAndDeleteOldHashFiles_NotifiesSvnDelete verifies that old hash
-// files are retained for browser-cache fallback: nothing is deleted and SVN
-// is never notified.
+// TestFindAndDeleteOldHashFiles_RemovesSrcOldHash verifies src cleanup keeps
+// only the current hash and does not notify SVN; dest cache protection owns
+// old-version retention.
 func TestFindAndDeleteOldHashFiles_NotifiesSvnDelete(t *testing.T) {
 	tmpDir := t.TempDir()
 	vm := NewVersionManager(Config{HashLength: 8}, false)
@@ -55,8 +56,8 @@ func TestFindAndDeleteOldHashFiles_NotifiesSvnDelete(t *testing.T) {
 		t.Fatalf("expected 0 svn delete notifications, got %d: %v", len(rec.paths), rec.paths)
 	}
 	for _, f := range []string{"style.ccccdddd.css", "style.eeeeffff.css"} {
-		if !fileExists(filepath.Join(tmpDir, f)) {
-			t.Errorf("%s should be kept for browser cache fallback", f)
+		if fileExists(filepath.Join(tmpDir, f)) {
+			t.Errorf("%s should be cleaned from src", f)
 		}
 	}
 	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
@@ -75,11 +76,14 @@ func TestCleanHashFiles_NotifiesSvnDelete(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "other.css"), []byte("unrelated"), 0644)
 
 	dm := &DeployManager{
-		config:    DeployConfig{},
-		destPath:  tmpDir,
-		debugMode: false,
-		cache:     loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json")),
+		config:      DeployConfig{},
+		destPath:    tmpDir,
+		debugMode:   false,
+		cache:       loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json")),
+		currentLive: map[string]bool{"style.eeeeffff.css": true},
 	}
+	dm.cache.SessionTime = time.Now().UnixNano()
+	dm.cache.ReleasedHashes = map[string]bool{}
 
 	rec := &svnDeleteRecorder{}
 	orig := vcsSvnDelete

@@ -45,6 +45,10 @@
       "/scripts/common/loginxdrNew.js"
     ],
     "gitAuthors": ["chenchengpeng", "ccp"]
+    ,
+    "prodHtmlUrls": [
+      "https://qqt.cmicrwx.cn/2016tyjf/xhmqqthy/res/wap/xdrNormal.html"
+    ]
   },
  "replaceAllWithCDN": false,
  "obfuscateJS": false,

@@ -32,9 +32,9 @@ func TestHashFilenameFunctions(t *testing.T) {
 	vm := NewVersionManager(Config{HashLength: 8}, false)
 
 	tests := []struct {
-		original    string
-		hash        string
-		hashedName  string
+		original   string
+		hash       string
+		hashedName string
 	}{
 		{"style.css", "abcdef12", "style.abcdef12.css"},
 		{"app.min.js", "12345678", "app.min.12345678.js"},
@@ -58,7 +58,7 @@ func TestHashFilenameFunctions(t *testing.T) {
 
 func TestCalculateFileHash(t *testing.T) {
 	content := "test content for hashing"
-	
+
 	// Create a stable md5 manually to compare
 	hasher := md5.New()
 	hasher.Write([]byte(content))
@@ -94,7 +94,7 @@ func TestCalculateFileHash(t *testing.T) {
 	if gotHashFull != expectedHash {
 		t.Errorf("calculateFileHash with full length = %q; want %q", gotHashFull, expectedHash)
 	}
-	
+
 	// Test getFileHash function
 	gotHashDirect, err := getFileHash(tmpFile.Name())
 	if err != nil {
@@ -142,7 +142,7 @@ func TestShouldExcludeFromCDN(t *testing.T) {
 	}{
 		{"css/global.css", true},
 		{"js/jquery.js", true},
-		{"global.css?v=123", true},  // URL parm test
+		{"global.css?v=123", true}, // URL parm test
 		{"css/main.css", false},
 		{"js/app.js", false},
 	}
@@ -536,12 +536,11 @@ func TestFindAndDeleteOldHashFiles(t *testing.T) {
 	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
 		t.Error("current hash file was deleted")
 	}
-	// Old hash files are kept as browser-cache fallback
-	if !fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
-		t.Error("old hash file should be kept")
+	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
+		t.Error("old hash file should be cleaned from src")
 	}
-	if !fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
-		t.Error("older hash file should be kept")
+	if fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
+		t.Error("older hash file should be cleaned from src")
 	}
 	// Unrelated file should survive
 	if !fileExists(filepath.Join(tmpDir, "other.css")) {
@@ -726,142 +725,148 @@ func TestValidateCDNResources(t *testing.T) {
 	}
 }
 
+// withStubLive 替换现网抓取实现，测试结束自动还原。
+func withStubLive(t *testing.T, body string, fail bool) {
+	orig := liveProdFetch
+	liveProdFetch = func(string) ([]byte, error) {
+		if fail {
+			return nil, fmt.Errorf("network down")
+		}
+		return []byte(body), nil
+	}
+	t.Cleanup(func() { liveProdFetch = orig })
+}
+
+// newCleanTestManager 构造部署管理器；sessionAgo<0 表示缓存为空（无会话）。
+func newCleanTestManager(tmpDir string, sessionAgo time.Duration, base string) *DeployManager {
+	cache := loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json"))
+	if sessionAgo >= 0 {
+		cache.SessionTime = time.Now().Add(-sessionAgo).UnixNano()
+		cache.ReleasedHashes = map[string]bool{}
+		if base != "" {
+			cache.ReleasedHashes[base] = true
+		}
+	}
+	return &DeployManager{
+		config:    DeployConfig{ProdHTMLURLs: []string{"https://prod.example.com/xdrNormal.html"}},
+		destPath:  tmpDir,
+		debugMode: false,
+		cache:     cache,
+	}
+}
+
 func TestCleanHashFiles(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.MkdirAll(tmpDir, 0755)
-
-	// Create files: keep, old hash, unrelated
-	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("keep"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("old"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("new"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("prod"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ddddeeee.css"), []byte("base"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.11112222.css"), []byte("junk"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base-file"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "other.css"), []byte("unrelated"), 0644)
 
-	dm := &DeployManager{
-		config:    DeployConfig{},
-		destPath:  tmpDir,
-		debugMode: false,
-		cache:     loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json")),
-	}
-
-	destPath := filepath.Join(tmpDir, "style.css")
-	deleted := dm.cleanHashFiles(destPath, "style.aaaabbbb.css")
-
-	if deleted != 1 {
-		t.Errorf("expected 1 deleted, got %d", deleted)
-	}
-	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
-		t.Error("keep file was deleted")
-	}
-	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
-		t.Error("old hash file should be cleaned when not released")
-	}
-	if !fileExists(filepath.Join(tmpDir, "style.css")) {
-		t.Error("base file was deleted")
-	}
-	if !fileExists(filepath.Join(tmpDir, "other.css")) {
-		t.Error("unrelated file was deleted")
-	}
-}
-
-func TestCleanHashFilesKeepsOldHashForBrowserCache(t *testing.T) {
-	tmpDir := t.TempDir()
-	os.MkdirAll(tmpDir, 0755)
-
-	// keep: 当前版本；stale: 超过24h（用户浏览器可能缓存的版本，保留）；
-	// recent: 24h 内多轮部署的中间产物（删除）
-	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("keep"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "style.eeeeffff.css"), []byte("stale"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("recent"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base"), 0644)
-
-	// 把 stale 文件的 mtime 拨回 25 小时前
-	oldTime := time.Now().Add(-25 * time.Hour)
-	os.Chtimes(filepath.Join(tmpDir, "style.eeeeffff.css"), oldTime, oldTime)
-
-	dm := &DeployManager{
-		config:    DeployConfig{},
-		destPath:  tmpDir,
-		debugMode: false,
-		cache:     loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json")),
-	}
-
-	destPath := filepath.Join(tmpDir, "style.css")
-	deleted := dm.cleanHashFiles(destPath, "style.aaaabbbb.css")
-
-	if deleted != 2 {
-		t.Errorf("expected 2 deleted (intermediates cleaned), got %d", deleted)
-	}
-	if !fileExists(filepath.Join(tmpDir, "style.aaaabbbb.css")) {
-		t.Error("keep file was deleted")
-	}
-	if fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
-		t.Error("stale hash file older than 24h should be cleaned")
-	}
-	if fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
-		t.Error("intermediate hash file (<24h) should be cleaned")
-	}
-	if !fileExists(filepath.Join(tmpDir, "style.css")) {
-		t.Error("base file was deleted")
-	}
-}
-
-func TestCleanHashFilesKeepsReleasedHashFromHTML(t *testing.T) {
-	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("keep"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("released"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "style.eeeeffff.css"), []byte("intermediate"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "page.html"),
-		[]byte(`<link href="css/style.ccccdddd.css">`), 0644)
-
-	dm := &DeployManager{
-		config:    DeployConfig{},
-		destPath:  tmpDir,
-		debugMode: false,
-		cache:     loadDeployCache(filepath.Join(tmpDir, ".deploy-cache.json")),
-	}
-	dm.collectReleasedHashes()
+	withStubLive(t, `<link href="css/style.ccccdddd.css">`, false)
+	dm := newCleanTestManager(tmpDir, 1*time.Hour, "style.ddddeeee.css")
+	dm.prepareDeploySession()
 
 	deleted := dm.cleanHashFiles(filepath.Join(tmpDir, "style.css"), "style.aaaabbbb.css")
 	if deleted != 1 {
-		t.Errorf("expected 1 deleted (intermediate only), got %d", deleted)
+		t.Errorf("expected 1 deleted (junk only), got %d", deleted)
 	}
-	if !fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
-		t.Error("released hash referenced by dest HTML must be kept")
+	for _, f := range []string{
+		"style.aaaabbbb.css", "style.ccccdddd.css", "style.ddddeeee.css", "style.css", "other.css",
+	} {
+		if !fileExists(filepath.Join(tmpDir, f)) {
+			t.Errorf("%s should be kept", f)
+		}
 	}
-	if fileExists(filepath.Join(tmpDir, "style.eeeeffff.css")) {
-		t.Error("intermediate hash not referenced by HTML should be cleaned")
+	if fileExists(filepath.Join(tmpDir, "style.11112222.css")) {
+		t.Error("junk intermediate hash should be cleaned")
 	}
 }
 
-func TestCollectReleasedHashesUsesSessionListWithinGap(t *testing.T) {
+func TestCleanHashFilesBaseExpires(t *testing.T) {
 	tmpDir := t.TempDir()
-	cachePath := filepath.Join(tmpDir, ".deploy-cache.json")
-	os.WriteFile(filepath.Join(tmpDir, "page.html"),
-		[]byte(`<link href="css/style.ccccdddd.css">`), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("new"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("prod"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ddddeeee.css"), []byte("expired-base"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base-file"), 0644)
 
-	dm := &DeployManager{
-		config:    DeployConfig{},
-		destPath:  tmpDir,
-		debugMode: false,
-		cache:     loadDeployCache(cachePath),
+	withStubLive(t, `<link href="css/style.ccccdddd.css">`, false)
+	dm := newCleanTestManager(tmpDir, 13*time.Hour, "style.ddddeeee.css")
+	dm.prepareDeploySession()
+
+	deleted := dm.cleanHashFiles(filepath.Join(tmpDir, "style.css"), "style.aaaabbbb.css")
+	if deleted != 1 {
+		t.Errorf("expected 1 deleted (expired base), got %d", deleted)
 	}
+	if fileExists(filepath.Join(tmpDir, "style.ddddeeee.css")) {
+		t.Error("expired base hash should be cleaned")
+	}
+	if !fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
+		t.Error("current prod hash should be kept")
+	}
+}
 
-	dm.collectReleasedHashes()
+func TestCleanHashFilesSkipsOnFetchFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("new"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("old"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base-file"), 0644)
+
+	withStubLive(t, "", true)
+	dm := newCleanTestManager(tmpDir, 1*time.Hour, "style.ddddeeee.css")
+	dm.prepareDeploySession()
+
+	deleted := dm.cleanHashFiles(filepath.Join(tmpDir, "style.css"), "style.aaaabbbb.css")
+	if deleted != 0 {
+		t.Errorf("expected 0 deleted when prod fetch fails, got %d", deleted)
+	}
+	if !fileExists(filepath.Join(tmpDir, "style.ccccdddd.css")) {
+		t.Error("cleanup must be skipped when prod fetch fails")
+	}
+}
+
+func TestFirstRunRecordsSnapshotWithoutCleanup(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("new"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("prod"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "style.css"), []byte("base-file"), 0644)
+
+	withStubLive(t, `<link href="css/style.ccccdddd.css">`, false)
+	dm := newCleanTestManager(tmpDir, -1, "")
+	dm.prepareDeploySession()
+
 	if !dm.cache.ReleasedHashes["style.ccccdddd.css"] {
-		t.Fatal("session start should capture released hash from dest HTML")
+		t.Fatal("first run should record prod snapshot")
 	}
+	if dm.cache.SessionTime == 0 {
+		t.Fatal("first run should record session time")
+	}
+	deleted := dm.cleanHashFiles(filepath.Join(tmpDir, "style.css"), "style.aaaabbbb.css")
+	if deleted != 0 {
+		t.Errorf("expected 0 deleted on first run, got %d", deleted)
+	}
+}
 
-	// 当晚第二次部署前 dest HTML 已指向新的中间版本，
-	// 会话内必须沿用第一次采集的生产名单
-	os.WriteFile(filepath.Join(tmpDir, "page.html"),
-		[]byte(`<link href="css/style.eeeeffff.css">`), 0644)
-	dm.collectReleasedHashes()
+func TestSessionBaseStableWithinSession(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	withStubLive(t, `<link href="css/style.ccccdddd.css">`, false)
+	dm := newCleanTestManager(tmpDir, 1*time.Hour, "style.ddddeeee.css")
+	dm.prepareDeploySession()
+
+	// 会话内现网发生变化（如运维中午发布），基线不得被覆盖
+	withStubLive(t, `<link href="css/style.eeeeffff.css">`, false)
+	dm.prepareDeploySession()
+
+	if !dm.cache.ReleasedHashes["style.ddddeeee.css"] {
+		t.Error("session base captured at session start must be kept")
+	}
 	if dm.cache.ReleasedHashes["style.eeeeffff.css"] {
-		t.Error("within a session, intermediate hash must not become released")
+		t.Error("mid-session prod change must not replace session base")
 	}
-	if !dm.cache.ReleasedHashes["style.ccccdddd.css"] {
-		t.Error("released hash captured at session start must be kept")
+	if !dm.currentLive["style.eeeeffff.css"] {
+		t.Error("current live snapshot should follow the live page")
 	}
 }
 
@@ -1017,10 +1022,10 @@ func TestProcessHTMLFileExtraHashResources(t *testing.T) {
 
 	cdn := "https://cdn.example.com"
 	vm := NewVersionManager(Config{
-		HashLength:         8,
-		CDNDomain:          cdn,
+		HashLength:           8,
+		CDNDomain:            cdn,
 		ProcessMainResources: []string{"page"},
-		ExtraHashResources: []string{"scripts/common/utils_index.js"},
+		ExtraHashResources:   []string{"scripts/common/utils_index.js"},
 	}, false)
 
 	if err := vm.processHTMLFile(htmlPath); err != nil {
@@ -1272,9 +1277,9 @@ func TestProcessHTMLFileExtraHashResourcesNoCDN(t *testing.T) {
 
 	// No CDNDomain set — should produce a relative hashed path, not a CDN URL.
 	vm := NewVersionManager(Config{
-		HashLength:         8,
+		HashLength:           8,
 		ProcessMainResources: []string{"page"},
-		ExtraHashResources: []string{"scripts/common/utils_index.js"},
+		ExtraHashResources:   []string{"scripts/common/utils_index.js"},
 	}, false)
 
 	if err := vm.processHTMLFile(htmlPath); err != nil {

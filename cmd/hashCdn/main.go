@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -137,8 +138,8 @@ type Config struct {
 	// 新增：指定哪些HTML文件需要处理主资源
 	ProcessMainResources []string `json:"processMainResources"`
 	ExtraHashResources   []string `json:"extraHashResources"` // 额外需要hash的资源（非components路径的共享脚本，如utils_index.js）
-	ReplaceAllWithCDN    bool     `json:"replaceAllWithCDN"` // 替换所有资源为CDN路径
-	ObfuscateJS          bool     `json:"obfuscateJS"`       // 实验性：对JS文件进行混淆（minify+mangle）
+	ReplaceAllWithCDN    bool     `json:"replaceAllWithCDN"`  // 替换所有资源为CDN路径
+	ObfuscateJS          bool     `json:"obfuscateJS"`        // 实验性：对JS文件进行混淆（minify+mangle）
 	// 新增：部署相关配置
 	RollbackAfterDeploy    bool         `json:"rollbackAfterDeploy"`    // 部署后回滚HTML
 	GitCommitAfterRollback bool         `json:"gitCommitAfterRollback"` // 回滚后执行git commit和push
@@ -158,7 +159,9 @@ type DeployConfig struct {
 	FilePaths         []string `json:"filePaths"`
 	GitAuthors        []string `json:"gitAuthors"`
 	CDNPathPrefix     string   `json:"cdnPathPrefix"` // 新增：CDN URL中需要裁掉的前缀映射，例如 /2016tyjf/xhmqqthy/res/wap/
-	ForcePreScript    bool     `json:"-"`             // 运行时覆盖：是否强制执行前置脚本
+	// 现网生产环境 HTML 地址：每次部署实时抓取，其引用的 hash 版本必须保留
+	ProdHTMLURLs      []string `json:"prodHtmlUrls"`
+	ForcePreScript    bool     `json:"-"`                 // 运行时覆盖：是否强制执行前置脚本
 	HomeNodeScript    string   `json:"homeNodeScript"`    // 家里电脑的Node.js部署脚本路径
 	CompanyNodeScript string   `json:"companyNodeScript"` // 公司电脑的Node.js部署脚本路径
 }
@@ -257,9 +260,8 @@ func (vm *VersionManager) addHashToFilename(filename, hash string) string {
 	return fmt.Sprintf("%s.%s%s", cleanBasename, hash, ext)
 }
 
-// findAndDeleteOldHashFiles 查找并删除旧的hash文件
-// findAndDeleteOldHashFiles 扫描同 basename 的旧 hash 文件，全部保留作为
-// 浏览器缓存兜底。旧 hash 引用可能仍存在于线上 HTML 中，删除会导致 404。
+// findAndDeleteOldHashFiles 清理 src 中同 basename 的旧 hash 文件。
+// src 只服务构建，不服务线上缓存；旧版本保护由 dest 的现网/基线名单负责。
 func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentHash string) error {
 	if isJSOrCSS(basename + ext) {
 		vm.logf("  🔍 查找旧hash文件: %s%s (当前hash: %s)\n", basename, ext, currentHash)
@@ -280,8 +282,15 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
 		filename := file.Name()
 		hashMatches := re.FindStringSubmatch(filename)
 		if len(hashMatches) >= 2 && hashMatches[1] != currentHash {
+			oldPath := filepath.Join(dir, filename)
+			if err := os.Remove(oldPath); err != nil {
+				if vm.debugMode {
+					fmt.Printf("    ⚠️  清理src旧hash失败: %s: %v\n", filename, err)
+				}
+				continue
+			}
 			if isJSOrCSS(filename) {
-				fmt.Printf("    🛡️  保留旧hash(浏览器缓存兜底): %s\n", filename)
+				fmt.Printf("    🧹 已清理src旧hash: %s\n", filename)
 			}
 		}
 	}
@@ -1161,12 +1170,12 @@ func (vm *VersionManager) processComponentCSS(cssPath string) (*FileInfo, error)
 			finalCssFilename := vm.addHashToFilename(cleanFilename, newHash)
 			finalCssPath := filepath.Join(cssDir, finalCssFilename)
 
-		if finalCssPath != hashedCssPath {
-			if err := os.Rename(hashedCssPath, finalCssPath); err != nil {
-				os.Remove(hashedCssPath)
-				return nil, fmt.Errorf("重命名CSS哈希文件失败: %v", err)
-			}
-			hashedCssPath = finalCssPath
+			if finalCssPath != hashedCssPath {
+				if err := os.Rename(hashedCssPath, finalCssPath); err != nil {
+					os.Remove(hashedCssPath)
+					return nil, fmt.Errorf("重命名CSS哈希文件失败: %v", err)
+				}
+				hashedCssPath = finalCssPath
 				hashedCssFilename = finalCssFilename
 				originalHash = newHash
 			}
@@ -1395,7 +1404,6 @@ func (vm *VersionManager) updateHTMLContent(htmlPath string, resources map[strin
 		}
 	}
 
-
 	if updated {
 		if err := os.WriteFile(htmlPath, []byte(contentStr), 0644); err != nil {
 			return err
@@ -1431,7 +1439,9 @@ type DeployManager struct {
 	destPath     string
 	debugMode    bool
 	folderOpened bool
-	cache        *DeployCache // 持久化文件hash缓存
+	cache        *DeployCache    // 持久化文件hash缓存
+	currentLive  map[string]bool // 本次抓取的现网引用名单
+	skipCleanup  bool            // 现网抓取失败/首次记录时跳过清理
 }
 
 // NewDeployManager 创建部署管理器
@@ -1496,9 +1506,13 @@ type DeployCache struct {
 	dirty          bool
 }
 
-// deploySessionGap 超过该间隔的两次部署视为新会话：重新从 dest HTML
-// 采集上一版生产 hash；会话内多次部署沿用会话开始时的名单。
+// deploySessionGap 超过该间隔的两次部署视为新会话：重新抓现网快照作为
+// 会话基线；会话内多次部署沿用会话开始时的基线。
 const deploySessionGap = 6 * time.Hour
+
+// prodProtectWindow 会话基线（会话开始时的现网版本）的保护时长：
+// 覆盖“发布后老用户浏览器仍缓存旧 HTML”的窗口期。
+const prodProtectWindow = 12 * time.Hour
 
 // loadDeployCache 从磁盘加载缓存，文件不存在或解析失败时返回空缓存
 func loadDeployCache(cachePath string) *DeployCache {
@@ -1673,45 +1687,84 @@ func (dm *DeployManager) findAllFileVersions(configPath string) []FileVersion {
 	return versions
 }
 
-// collectReleasedHashes 扫描 dest 目录下的 HTML，提取当前已上线引用的
-// hash 资源文件名。这些是上一版生产版本，部署时必须保留兜底。
-// 会话判断基于部署时记录的系统时间：距上次部署超过 deploySessionGap
-// 视为新会话才重新采集；会话内（含跨天凌晨）沿用会话开始时的名单，
-// 避免把当晚多次部署的中间版本误认成生产版本。
-func (dm *DeployManager) collectReleasedHashes() {
-	now := time.Now().UnixNano()
-	if dm.cache.SessionTime != 0 &&
-		now-dm.cache.SessionTime < int64(deploySessionGap) &&
-		dm.cache.ReleasedHashes != nil {
-		return
+// liveProdFetch 抓取现网 HTML 内容（测试时可替换）。
+var liveProdFetch = func(url string) ([]byte, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
 
+// fetchLiveHashes 抓取现网页面并解析其引用的 hash 资源文件名。
+// 至少一个 URL 抓取成功才算 ok；未配置或全部失败返回 ok=false。
+func (dm *DeployManager) fetchLiveHashes() (map[string]bool, bool) {
+	if len(dm.config.ProdHTMLURLs) == 0 {
+		return nil, false
+	}
+	fmt.Println("🌐 正在抓取现网快照...")
 	hashes := make(map[string]bool)
 	hashPattern := getRegex(`[A-Za-z0-9_-]+\.[a-f0-9]{4,64}\.[A-Za-z0-9]+`)
-
-	filepath.Walk(dm.destPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".html") {
-			return nil
+	ok := false
+	for _, url := range dm.config.ProdHTMLURLs {
+		fmt.Printf("  📄 %s\n", url)
+		started := time.Now()
+		body, err := liveProdFetch(url)
+		if err != nil {
+			fmt.Printf("⚠️  抓取现网页面失败 %s: %v\n", url, err)
+			continue
 		}
-		content, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return nil
-		}
-		for _, m := range hashPattern.FindAllString(string(content), -1) {
+		ok = true
+		for _, m := range hashPattern.FindAllString(string(body), -1) {
 			hashes[filepath.Base(m)] = true
 		}
-		return nil
-	})
+		fmt.Printf("  ✅ 抓取完成 %v，解析到 %d 个hash\n", time.Since(started), len(hashes))
+	}
+	if ok {
+		return hashes, true
+	}
+	return nil, false
+}
 
-	dm.cache.ReleasedHashes = hashes
-	dm.cache.SessionTime = now
-	dm.cache.dirty = true
-	if err := dm.cache.Save(); err != nil && dm.debugMode {
-		fmt.Printf("  ⚠️  保存会话生产版本名单失败: %v\n", err)
+// prepareDeploySession 部署前的现网快照准备：
+//   - 每次部署实时抓现网，其引用的版本本次必须保留（currentLive）
+//   - 距上次部署超过 deploySessionGap 视为新会话，把当时的现网快照存为
+//     会话基线（保护 prodProtectWindow），覆盖“12点上线后老用户缓存”场景
+//   - 会话内现网的后续变化不改变基线，也不作为清理依据
+//   - 抓取失败或首次记录快照时跳过本次清理，宁可多留不可误删
+func (dm *DeployManager) prepareDeploySession() {
+	live, ok := dm.fetchLiveHashes()
+	now := time.Now().UnixNano()
+	if !ok {
+		dm.skipCleanup = true
+		fmt.Println("⚠️  无法获取现网版本，本次部署跳过旧hash清理")
+		return
+	}
+	dm.currentLive = live
+
+	if dm.cache.SessionTime == 0 || now-dm.cache.SessionTime >= int64(deploySessionGap) {
+		firstRun := dm.cache.SessionTime == 0
+		dm.cache.ReleasedHashes = live
+		dm.cache.SessionTime = now
+		dm.cache.dirty = true
+		if err := dm.cache.Save(); err != nil && dm.debugMode {
+			fmt.Printf("  ⚠️  保存现网快照失败: %v\n", err)
+		}
+		if firstRun {
+			dm.skipCleanup = true
+			fmt.Println("ℹ️  首次记录现网快照，本次部署不清理旧hash")
+		}
 	}
 }
 
-// cleanHashFiles 清理旧的hash文件，只保留最新版本和已上线生产版本
+// cleanHashFiles 清理旧 hash：保留本次新版本、当前现网版、
+// 以及 12 小时保护期内的会话基线版本；其余（灰度中间产物、
+// 超过保护期的旧现网版）删除。
 func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 	destDir := filepath.Dir(destPath)
 	destFileName := filepath.Base(destPath)
@@ -1729,18 +1782,31 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 
 	hashPattern := getRegex(fmt.Sprintf(`^%s\.[a-zA-Z0-9]+%s$`, regexp.QuoteMeta(basename), regexp.QuoteMeta(ext)))
 
+	if dm.skipCleanup {
+		if dm.debugMode {
+			fmt.Println("    ⏭️  skipCleanup 生效，本次不清理")
+		}
+		return 0
+	}
+
+	now := time.Now().UnixNano()
+	baseActive := dm.cache.SessionTime != 0 &&
+		now-dm.cache.SessionTime < int64(prodProtectWindow)
+
 	deletedCount := 0
 	for _, file := range files {
-		if file.Name() == destFileName || file.Name() == keepFileName || dm.cache.ReleasedHashes[file.Name()] {
+		isBase := baseActive && dm.cache.ReleasedHashes[file.Name()]
+		if file.Name() == destFileName || file.Name() == keepFileName ||
+			dm.currentLive[file.Name()] || isBase {
 			if dm.debugMode && isJSOrCSS(file.Name()) {
-				fmt.Printf("    🛡️  保留(最新/已上线生产版本): %s\n", file.Name())
+				fmt.Printf("    🛡️  保留(最新/当前现网/基线): %s\n", file.Name())
 			}
 			continue
 		}
 
 		if hashPattern.MatchString(file.Name()) {
 			filePath := filepath.Join(destDir, file.Name())
-			// 非最新且非已上线版本的旧 hash（含当晚多次部署的中间产物）直接清理
+			// 不在保护名单内的旧 hash（灰度中间产物、过期现网版）直接清理
 			vcsSvnDelete(filePath, dm.debugMode)
 			if err := os.Remove(filePath); err == nil {
 				deletedCount++
@@ -2214,7 +2280,6 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 	// 文件hash缓存
 	fmt.Printf("💾 已加载文件缓存: %d 个条目\n\n", len(dm.cache.Files))
 
-
 	// 是否执行前置脚本
 	if dm.config.ForcePreScript {
 		scriptPath := filepath.Join(dm.sourcePath, filepath.FromSlash("scripts/bussiness/cdn.js"))
@@ -2240,8 +2305,8 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 		}
 	}
 
-	// 部署前先记录 dest HTML 引用的已上线 hash，供清理时保留
-	dm.collectReleasedHashes()
+	// 部署前抓现网快照，确定本次保留名单
+	dm.prepareDeploySession()
 
 	fmt.Println("📦 开始复制文件...")
 
@@ -2280,12 +2345,9 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 		fmt.Printf("⚠️  缓存保存失败: %v\n", err)
 	}
 
-
 	// 打印汇总
 	fmt.Printf("\n%s\n", strings.Repeat("=", 50))
 	fmt.Printf("📊 复制完成: 复制 %d, 跳过 %d, 失败 %d\n", totalCopied, totalSkipped, totalFailed)
-
-
 
 	// 验证 CDN 资源存在性
 	if htmlPath != "" && cdnDomain != "" {
@@ -2335,8 +2397,6 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 
 	return nil
 }
-
-
 
 // validateCDNResources 校验 HTML 中的 CDN 资源是否在 destPath 中存在
 func (dm *DeployManager) validateCDNResources(htmlPath string, cdnDomain string) error {
@@ -2771,6 +2831,10 @@ func main() {
 		fmt.Printf("  目标路径(Home): %s\n", config.Deploy.HomeDestPath)
 		fmt.Printf("  源路径(Office): %s\n", config.Deploy.CompanySourcePath)
 		fmt.Printf("  目标路径(Office): %s\n", config.Deploy.CompanyDestPath)
+		fmt.Printf("  现网快照URLs(%d项):\n", len(config.Deploy.ProdHTMLURLs))
+		for _, url := range config.Deploy.ProdHTMLURLs {
+			fmt.Printf("    - %s\n", url)
+		}
 		fmt.Printf("  部署文件列表(%d项):\n", len(config.Deploy.FilePaths))
 		for _, fp := range config.Deploy.FilePaths {
 			fmt.Printf("    - %s\n", fp)

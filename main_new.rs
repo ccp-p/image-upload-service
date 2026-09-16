@@ -150,9 +150,13 @@ fn main() {
         );
         println!("  src (Home):   {}", config.deploy.home_source_path);
         println!("  dst (Home):   {}", config.deploy.home_dest_path);
-        println!("  src (Office): {}", config.deploy.company_source_path);
-        println!("  dst (Office): {}", config.deploy.company_dest_path);
-        println!("  deploy files ({}):", config.deploy.file_paths.len());
+       println!("  src (Office): {}", config.deploy.company_source_path);
+       println!("  dst (Office): {}", config.deploy.company_dest_path);
+       println!("  prod snapshot urls ({}):", config.deploy.prod_html_urls.len());
+       for url in &config.deploy.prod_html_urls {
+           println!("    - {}", url);
+       }
+       println!("  deploy files ({}):", config.deploy.file_paths.len());
        for fp in &config.deploy.file_paths {
            println!("    - {}", fp);
        }

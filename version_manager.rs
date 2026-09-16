@@ -474,8 +474,15 @@ impl VersionManager {
             let filename = entry.file_name().to_string_lossy().to_string();
             if let Some(hash) = patterns::matches_hex_hash(&filename, basename, ext) {
                 if hash != current_hash {
+                    let old_path = path_join(dir, &filename);
+                    if let Err(e) = std::fs::remove_file(&old_path) {
+                        if self.debug_mode {
+                            println!("    ⚠️  清理src旧hash失败: {}: {}", filename, e);
+                        }
+                        continue;
+                    }
                     if is_js_or_css(&filename) {
-                        println!("    🛡️  保留旧hash(浏览器缓存兜底): {}", filename);
+                        println!("    🧹 已清理src旧hash: {}", filename);
                     }
                 }
             }
@@ -1730,12 +1737,14 @@ mod tests {
         assert!(file_exists(
             dir.join("style.aaaabbbb.css").to_str().unwrap()
         ));
-        assert!(file_exists(
-            dir.join("style.ccccdddd.css").to_str().unwrap()
-        ), "old hash file should be kept for browser cache fallback");
-        assert!(file_exists(
-            dir.join("style.eeeeffff.css").to_str().unwrap()
-        ), "older hash file should be kept for browser cache fallback");
+        assert!(
+            !file_exists(dir.join("style.ccccdddd.css").to_str().unwrap()),
+            "old hash file should be cleaned from src"
+        );
+        assert!(
+            !file_exists(dir.join("style.eeeeffff.css").to_str().unwrap()),
+            "older hash file should be cleaned from src"
+        );
         assert!(file_exists(dir.join("other.css").to_str().unwrap()));
 
         let _ = std::fs::remove_dir_all(&dir);

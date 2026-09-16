@@ -106,6 +106,10 @@ pub struct DeployCache {
 /// 会话内多次部署（含跨天凌晨）沿用会话开始时的名单。
 const DEPLOY_SESSION_GAP_NANOS: i64 = 6 * 60 * 60 * 1_000_000_000;
 
+/// 会话基线（会话开始时的现网版本）的保护时长：覆盖发布后老用户
+/// 浏览器仍缓存旧 HTML 的窗口期。
+const PROD_PROTECT_WINDOW_NANOS: i64 = 12 * 60 * 60 * 1_000_000_000;
+
 /// Loads the deploy cache from disk. Returns an empty cache if the file is
 /// missing or unparseable. modTime is read as an exact i64 (Integer variant)
 /// so nanosecond precision is preserved; the legacy string form written by
@@ -172,6 +176,20 @@ pub fn load_deploy_cache(cache_path: &str) -> DeployCache {
 /// Serialises the cache to pretty JSON. modTime is stored as a JSON integer
 /// (not a string) so that Go's `encoding/json` can unmarshal it into int64,
 /// and i64 precision is preserved exactly via the Integer variant.
+/// Extracts hashed asset filenames (e.g. app.1a2b3c4d.js) from HTML text.
+fn parse_hashed_names_from_html(content: &str) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for token in content.split(|c: char| {
+        !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
+    }) {
+        let filename = token.rsplit('/').next().unwrap_or("");
+        if crate::patterns::parse_hashed_filename(filename).is_some() {
+            names.insert(filename.to_string());
+        }
+    }
+    names
+}
+
 fn serialize_cache(
     files: &HashMap<String, FileCacheEntry>,
     session_time: i64,
@@ -360,65 +378,84 @@ impl DeployManager {
         versions
     }
 
-    /// Collects hashed asset filenames referenced by HTML files under dest
-    /// root. These are the currently released production versions and must
-    /// be kept during cleanup. Within a deploy session (gap < 6h, including
-    /// across midnight) the list captured at session start is reused so
-    /// same-night intermediate versions are never treated as released.
-    fn collect_released_hashes(&mut self) {
+    /// Fetches the live prod pages and extracts hashed asset filenames.
+    /// Returns None when no URLs are configured or every fetch fails.
+    fn fetch_live_hashes(&self) -> Option<std::collections::HashSet<String>> {
+        if self.config.prod_html_urls.is_empty() {
+            return None;
+        }
+        println!("🌐 正在抓取现网快照...");
+        let mut names = std::collections::HashSet::new();
+        let mut ok = false;
+        for url in &self.config.prod_html_urls {
+            println!("  📄 {}", url);
+            let started = std::time::Instant::now();
+            let output = std::process::Command::new("curl")
+                .args(["-s", "--max-time", "10", url])
+                .output();
+            match output {
+                Ok(out) if out.status.success() && !out.stdout.is_empty() => {
+                    ok = true;
+                    names.extend(parse_hashed_names_from_html(
+                        &String::from_utf8_lossy(&out.stdout),
+                    ));
+                    println!(
+                        "  ✅ 抓取完成 {}，解析到 {} 个hash",
+                        started.elapsed().as_secs_f32(),
+                        names.len()
+                    );
+                }
+                Ok(out) => {
+                    println!("⚠️  抓取现网页面失败 {}: {:?}", url, out.status);
+                }
+                Err(e) => {
+                    println!("⚠️  抓取现网页面失败 {}: {}", url, e);
+                }
+            }
+        }
+        if ok {
+            Some(names)
+        } else {
+            None
+        }
+    }
+
+    /// Starts a new deploy session when needed: the live snapshot captured
+    /// at session start becomes the protected baseline. Returns true only
+    /// for the very first run (no previous session), where cleanup must be
+    /// skipped so the snapshot can be established safely.
+    fn prepare_session(&mut self, live: &std::collections::HashSet<String>) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
-        if self.cache.session_time != 0
-            && now - self.cache.session_time < DEPLOY_SESSION_GAP_NANOS
-            && !self.cache.released_hashes.is_empty()
-        {
-            return;
+        if self.cache.session_time == 0 {
+            self.cache.released_hashes = live.clone();
+            self.cache.session_time = now;
+            self.cache.dirty = true;
+            let _ = self.cache.save();
+            return true;
         }
-
-        let mut names = std::collections::HashSet::new();
-        self.walk_html_for_hashes(&self.dest_path.clone(), &mut names);
-        self.cache.released_hashes = names;
-        self.cache.session_time = now;
-        self.cache.dirty = true;
-        let _ = self.cache.save();
+        if now - self.cache.session_time >= DEPLOY_SESSION_GAP_NANOS {
+            self.cache.released_hashes = live.clone();
+            self.cache.session_time = now;
+            self.cache.dirty = true;
+            let _ = self.cache.save();
+        }
+        false
     }
 
-    fn walk_html_for_hashes(
-        &self,
-        dir: &str,
-        names: &mut std::collections::HashSet<String>,
-    ) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    self.walk_html_for_hashes(path.to_string_lossy().as_ref(), names);
-                } else if path.extension().map(|e| e == "html").unwrap_or(false) {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        for token in content.split(|c: char| {
-                            !(c.is_ascii_alphanumeric()
-                                || c == '_'
-                                || c == '-'
-                                || c == '.'
-                                || c == '/')
-                        }) {
-                            let filename = token.rsplit('/').next().unwrap_or("");
-                            if crate::patterns::parse_hashed_filename(filename).is_some() {
-                                names.insert(filename.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Removes old hashed files in the dest dir, keeping the newest version
-    /// and the currently released production versions. Returns the number of
-    /// files deleted.
-    pub fn clean_hash_files(&mut self, dest_path: &str, keep_file_name: &str) -> usize {
+    /// Removes old hashed files in the dest dir, keeping the newest version,
+    /// the current live prod versions, and the session baseline within its
+    /// 12h protection window. `live` = Some means the caller already fetched
+    /// the live snapshot (used by tests); None fetches it now and skips
+    /// cleanup entirely when the fetch fails.
+    pub fn clean_hash_files(
+        &mut self,
+        dest_path: &str,
+        keep_file_name: &str,
+        live: Option<&std::collections::HashSet<String>>,
+    ) -> usize {
         let dest_dir = path_dir(dest_path);
         let dest_file_name = path_base(dest_path);
         let ext = get_ext(&dest_file_name);
@@ -433,13 +470,39 @@ impl DeployManager {
             return 0;
         }
 
-        self.collect_released_hashes();
-        let released = &self.cache.released_hashes;
+        let live_set = match live {
+            Some(set) => set.clone(),
+            None => match self.fetch_live_hashes() {
+                Some(set) => set,
+                None => {
+                    println!("⚠️  无法获取现网版本，本次部署跳过旧hash清理");
+                    return 0;
+                }
+            },
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        if self.cache.session_time == 0 {
+            self.prepare_session(&live_set);
+            return 0;
+        }
+        if now - self.cache.session_time >= DEPLOY_SESSION_GAP_NANOS {
+            self.cache.released_hashes = live_set.clone();
+            self.cache.session_time = now;
+            self.cache.dirty = true;
+            let _ = self.cache.save();
+        }
+        let base_active =
+            now - self.cache.session_time < PROD_PROTECT_WINDOW_NANOS;
         let mut deleted = 0;
         if let Ok(entries) = std::fs::read_dir(&dest_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name == dest_file_name || name == keep_file_name || released.contains(&name) {
+                let is_base = base_active && self.cache.released_hashes.contains(&name);
+                if name == dest_file_name || name == keep_file_name || live_set.contains(&name) || is_base {
                     continue;
                 }
                 if matches_alnum_hash(&name, &basename, ext_no_dot) {
@@ -462,6 +525,7 @@ impl DeployManager {
         &mut self,
         source_path: &str,
         dest_path: &str,
+        live: Option<&std::collections::HashSet<String>>,
     ) -> Result<(usize, usize), String> {
         let versions = self.find_all_file_versions(source_path);
         if versions.is_empty() {
@@ -492,7 +556,7 @@ impl DeployManager {
 
         // Clean old hash files in dest, keeping the latest hash name
         if let Some(lv) = &latest_hash_version {
-            self.clean_hash_files(dest_path, &lv.name);
+            self.clean_hash_files(dest_path, &lv.name, live);
         }
 
         let mut copied = 0;
@@ -556,6 +620,7 @@ impl DeployManager {
     pub fn handle_wildcard_path(
         &mut self,
         wildcard_path: &str,
+        live: Option<&std::collections::HashSet<String>>,
     ) -> Result<(usize, usize, usize), String> {
         let dir_rel = wildcard_path.trim_end_matches("/*");
         let src_dir = path_join(&self.source_path, dir_rel);
@@ -578,7 +643,7 @@ impl DeployManager {
             // path_join strips it consistently for both source and dest.
             let rel_to_source = format!("{}/{}", dir_rel, rel_sub);
             let dest = path_join(&self.dest_path, &rel_to_source);
-            match self.copy_file_with_versions(&rel_to_source, &dest) {
+            match self.copy_file_with_versions(&rel_to_source, &dest, live) {
                 Ok((c, s)) => {
                     copied += c;
                     skipped += s;
@@ -687,6 +752,15 @@ impl DeployManager {
         println!();
         println!("📦 开始复制文件...");
 
+        let live = self.fetch_live_hashes();
+        if let Some(set) = &live {
+            if self.prepare_session(set) {
+                println!("ℹ️  首次记录现网快照，本次部署不清理旧hash");
+            }
+        } else {
+            println!("⚠️  无法获取现网版本，本次部署跳过旧hash清理");
+        }
+
         // Update SVN repo first (mirrors Go's updateSvnRepo).
         if is_svn_repo(&self.dest_path) {
             if let Err(e) = self.update_svn_repo() {
@@ -701,7 +775,7 @@ impl DeployManager {
 
         for file_path in &file_paths {
             if file_path.ends_with("/*") {
-                match self.handle_wildcard_path(file_path) {
+                match self.handle_wildcard_path(file_path, live.as_ref()) {
                     Ok((c, s, f)) => {
                         total_copied += c;
                         total_skipped += s;
@@ -714,7 +788,7 @@ impl DeployManager {
                 }
             } else {
                 let dest = path_join(&self.dest_path, file_path);
-                match self.copy_file_with_versions(file_path, &dest) {
+                match self.copy_file_with_versions(file_path, &dest, live.as_ref()) {
                     Ok((c, s)) => {
                         total_copied += c;
                         total_skipped += s;
@@ -1459,7 +1533,10 @@ mod tests {
 
     fn tmp_id() -> u64 {
         static C: AtomicU64 = AtomicU64::new(0);
-        C.fetch_add(1, Ordering::SeqCst)
+        let seq = C.fetch_add(1, Ordering::SeqCst);
+        // Process-scoped IDs prevent stale temp dirs from a previous failed
+        // test run being reused by the next execution.
+        (std::process::id() as u64) * 1_000_000 + seq
     }
 
     #[test]
@@ -1623,9 +1700,16 @@ mod tests {
             folder_opened: false,
             cache: load_deploy_cache(dir.join(".deploy-cache.json").to_str().unwrap()),
         };
+        dm.cache.session_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        dm.cache.released_hashes = std::collections::HashSet::new();
 
         let dest_path = dir.join("style.css");
-        let deleted = dm.clean_hash_files(dest_path.to_str().unwrap(), "style.aaaabbbb.css");
+        let live: std::collections::HashSet<String> =
+            ["style.eeeeffff.css".to_string()].into_iter().collect();
+        let deleted = dm.clean_hash_files(dest_path.to_str().unwrap(), "style.aaaabbbb.css", Some(&live));
         assert_eq!(deleted, 1, "non-released old hash should be deleted");
         assert!(file_exists(
             dir.join("style.aaaabbbb.css").to_str().unwrap()
@@ -1640,7 +1724,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clean_hash_files_keeps_released_hash_from_html() {
+    fn test_clean_hash_files_keeps_live_prod_hash() {
         let dir = std::env::temp_dir().join(format!("clean_hash_rel_{}", tmp_id()));
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1648,9 +1732,6 @@ mod tests {
         std::fs::write(dir.join("style.ccccdddd.css"), "released").unwrap();
         std::fs::write(dir.join("style.eeeeffff.css"), "intermediate").unwrap();
         std::fs::write(dir.join("style.css"), "base").unwrap();
-        std::fs::write(dir.join("page.html"), r#"<link href="css/style.ccccdddd.css">"#)
-            .unwrap();
-
         let mut dm = DeployManager {
             config: DeployConfig::default(),
             source_path: String::new(),
@@ -1659,8 +1740,19 @@ mod tests {
             folder_opened: false,
             cache: load_deploy_cache(dir.join(".deploy-cache.json").to_str().unwrap()),
         };
+        dm.cache.session_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        dm.cache.released_hashes = std::collections::HashSet::new();
 
-        let deleted = dm.clean_hash_files(dir.join("style.css").to_str().unwrap(), "style.aaaabbbb.css");
+        let live: std::collections::HashSet<String> =
+            ["style.ccccdddd.css".to_string()].into_iter().collect();
+        let deleted = dm.clean_hash_files(
+            dir.join("style.css").to_str().unwrap(),
+            "style.aaaabbbb.css",
+            Some(&live),
+        );
         assert_eq!(deleted, 1, "intermediate hash only should be deleted");
         assert!(file_exists(dir.join("style.ccccdddd.css").to_str().unwrap()));
         assert!(!file_exists(dir.join("style.eeeeffff.css").to_str().unwrap()));
@@ -1669,11 +1761,9 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_released_hashes_uses_session_list_within_gap() {
+    fn test_prepare_session_keeps_base_within_session() {
         let dir = std::env::temp_dir().join(format!("clean_hash_sess_{}", tmp_id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("page.html"), r#"<link href="css/style.ccccdddd.css">"#)
-            .unwrap();
 
         let mut dm = DeployManager {
             config: DeployConfig::default(),
@@ -1684,17 +1774,18 @@ mod tests {
             cache: load_deploy_cache(dir.join(".deploy-cache.json").to_str().unwrap()),
         };
 
-        dm.collect_released_hashes();
+        let first: std::collections::HashSet<String> =
+            ["style.ccccdddd.css".to_string()].into_iter().collect();
+        assert!(dm.prepare_session(&first), "first run should start a session");
         assert!(dm.cache.released_hashes.contains("style.ccccdddd.css"));
 
-        // 当晚第二次部署前 dest HTML 已指向新的中间版本，
-        // 会话内必须沿用第一次采集的生产名单
-        std::fs::write(dir.join("page.html"), r#"<link href="css/style.eeeeffff.css">"#)
-            .unwrap();
-        dm.collect_released_hashes();
+        // 会话内现网发生变化，基线不得被覆盖
+        let second: std::collections::HashSet<String> =
+            ["style.eeeeffff.css".to_string()].into_iter().collect();
+        assert!(!dm.prepare_session(&second));
         assert!(
             !dm.cache.released_hashes.contains("style.eeeeffff.css"),
-            "within a session, intermediate hash must not become released"
+            "within a session, prod change must not replace session base"
         );
         assert!(dm.cache.released_hashes.contains("style.ccccdddd.css"));
 
@@ -1731,9 +1822,15 @@ mod tests {
             folder_opened: false,
             cache: load_deploy_cache(dir.join(".deploy-cache.json").to_str().unwrap()),
         };
+        dm.cache.session_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        dm.cache.released_hashes = std::collections::HashSet::new();
 
         let dest_path = dir.join("style.css");
-        let deleted = dm.clean_hash_files(dest_path.to_str().unwrap(), "style.aaaabbbb.css");
+        let live: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let deleted = dm.clean_hash_files(dest_path.to_str().unwrap(), "style.aaaabbbb.css", Some(&live));
         assert_eq!(deleted, 2, "intermediate hashes are cleaned without released refs");
         assert!(file_exists(
             dir.join("style.aaaabbbb.css").to_str().unwrap()
@@ -1772,7 +1869,7 @@ mod tests {
         };
 
         let (copied, _skipped) = dm
-            .copy_file_with_versions("app.js", dst_dir.join("app.js").to_str().unwrap())
+            .copy_file_with_versions("app.js", dst_dir.join("app.js").to_str().unwrap(), None)
             .unwrap();
         assert!(copied > 0, "expected at least 1 file copied");
 
@@ -1817,7 +1914,7 @@ mod tests {
         };
 
         let (copied, _skipped, failed) = dm
-            .handle_wildcard_path("/images/xdrNormal/202505/*")
+            .handle_wildcard_path("/images/xdrNormal/202505/*", None)
             .expect("wildcard deploy should succeed");
 
         assert_eq!(failed, 0, "no file should fail to copy");
@@ -1893,7 +1990,7 @@ mod tests {
         };
 
         let (copied, _skipped, failed) = dm
-            .handle_wildcard_path("/images/xdrNormal/202505/*")
+            .handle_wildcard_path("/images/xdrNormal/202505/*", None)
             .expect("wildcard deploy should succeed");
 
         assert_eq!(failed, 0, "no file should fail to copy");
@@ -1908,10 +2005,11 @@ mod tests {
             file_exists(dst_nested.join("gift-carousel2.114b07c2.png").to_str().unwrap()),
             "nested hashed image must be deployed"
         );
-        // Old hash file cleaned from dest (not referenced by any released HTML).
+        // Without a configured live-prod URL the deployer must fail safe:
+        // keep the old hash instead of risking a browser-cache 404.
         assert!(
-            !file_exists(dst_nested.join("gift-carousel2.deadbeef.png").to_str().unwrap()),
-            "old hash file must be cleaned from dest (production incident)"
+            file_exists(dst_nested.join("gift-carousel2.deadbeef.png").to_str().unwrap()),
+            "cleanup must be skipped when the live prod source is unavailable"
         );
 
         let _ = std::fs::remove_dir_all(&src_root);

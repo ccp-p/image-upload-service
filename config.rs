@@ -35,6 +35,7 @@ pub struct DeployConfig {
     pub file_paths: Vec<String>,
     pub git_authors: Vec<String>,
     pub cdn_path_prefix: String,
+    pub prod_html_urls: Vec<String>,
 }
 
 impl Default for Config {
@@ -79,6 +80,7 @@ impl Default for DeployConfig {
             file_paths: Vec::new(),
             git_authors: Vec::new(),
             cdn_path_prefix: String::new(),
+            prod_html_urls: Vec::new(),
         }
     }
 }
@@ -178,6 +180,9 @@ pub fn load_config(config_path: &str) -> Result<Config, String> {
         }
         if let Some(s) = deploy_json.get_str("cdnPathPrefix") {
             deploy.cdn_path_prefix = s.to_string();
+        }
+        if let Some(arr) = deploy_json.get_array_str("prodHtmlUrls") {
+            deploy.prod_html_urls = arr;
         }
         config.deploy = deploy;
     }
