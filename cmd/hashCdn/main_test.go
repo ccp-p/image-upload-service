@@ -1300,3 +1300,127 @@ func TestProcessHTMLFileExtraHashResourcesNoCDN(t *testing.T) {
 		t.Errorf("should not contain CDN URL in no-CDN mode, got: %s", strResult)
 	}
 }
+
+func TestBuildProtectedHashes(t *testing.T) {
+	// 模拟 dest：根目录一个 html，css/ 子目录一个带 hash 的 css（内容里引用 hash 图片）
+	dest := t.TempDir()
+	cssDir := filepath.Join(dest, "css")
+	os.MkdirAll(cssDir, 0755)
+	os.WriteFile(filepath.Join(cssDir, "xdrNormal.42fed2bf.css"),
+		[]byte("body{background:url(../images/xdrNormal/202505/riding-model-bg.e5853009.png)}"), 0644)
+	htmlPath := filepath.Join(dest, "xdrNormal.html")
+	os.WriteFile(htmlPath, []byte("<html></html>"), 0644)
+
+	origRevs := svnHTMLHistoryRevisions
+	origCat := svnCatRevision
+	t.Cleanup(func() { svnHTMLHistoryRevisions = origRevs; svnCatRevision = origCat })
+
+	svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]int64, error) {
+		if maxRevs != htmlProtectMaxRevisions {
+			t.Errorf("expected maxRevs %d, got %d", htmlProtectMaxRevisions, maxRevs)
+		}
+		return []int64{8640, 8631}, nil
+	}
+	rev8640 := `<link href="https://cdn.example.com/wap/css/xdrNormal.ff09cd59.css">` +
+		`<script src="https://cdn.example.com/wap/components/xdrsignNew/index.04f3b196.js">` +
+		`<img src="https://cdn.example.com/wap/images/xdrNormal/202505/riding-model-bg.7f70ce92.png">`
+	rev8631 := `<link href="css/xdrNormal.42fed2bf.css">` +
+		`<script src="scripts/js/xdrNormal.1807d798.js">`
+	svnCatRevision = func(wcPath string, rev int64) ([]byte, error) {
+		base := filepath.Base(wcPath)
+		if base == "xdrNormal.html" {
+			switch rev {
+			case 8640:
+				return []byte(rev8640), nil
+			case 8631:
+				return []byte(rev8631), nil
+			}
+		}
+		// 历史 CSS（本地不存在时从 SVN 读取）
+		if base == "xdrNormal.ff09cd59.css" && rev == 8640 {
+			return []byte("body{margin:0}"), nil
+		}
+		return nil, fmt.Errorf("unexpected %s@%d", base, rev)
+	}
+
+	dm := &DeployManager{
+		config:    DeployConfig{CDNPathPrefix: "https://cdn.example.com/wap"},
+		destPath:  dest,
+		debugMode: false,
+		cache:     loadDeployCache(filepath.Join(dest, ".deploy-cache.json")),
+	}
+
+	protected, ok := dm.buildProtectedHashes()
+	if !ok {
+		t.Fatal("buildProtectedHashes should succeed")
+	}
+	// 最新一版引用
+	for _, name := range []string{"xdrNormal.ff09cd59.css", "index.04f3b196.js", "riding-model-bg.7f70ce92.png"} {
+		if !protected[name] {
+			t.Errorf("latest html ref %s should be protected", name)
+		}
+	}
+	// 上一版引用
+	for _, name := range []string{"xdrNormal.42fed2bf.css", "xdrNormal.1807d798.js"} {
+		if !protected[name] {
+			t.Errorf("previous html ref %s should be protected", name)
+		}
+	}
+	// 传递保护：上一版 CSS 里 url(...) 引用的 hash 图片
+	if !protected["riding-model-bg.e5853009.png"] {
+		t.Error("css url(...) ref riding-model-bg.e5853009.png should be protected transitively")
+	}
+}
+
+func TestBuildProtectedHashesFailsSafe(t *testing.T) {
+	dest := t.TempDir()
+	os.WriteFile(filepath.Join(dest, "xdrNormal.html"), []byte("<html></html>"), 0644)
+
+	origRevs := svnHTMLHistoryRevisions
+	t.Cleanup(func() { svnHTMLHistoryRevisions = origRevs })
+	svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]int64, error) {
+		return nil, fmt.Errorf("svn unavailable")
+	}
+
+	dm := &DeployManager{
+		config:    DeployConfig{},
+		destPath:  dest,
+		debugMode: false,
+		cache:     loadDeployCache(filepath.Join(dest, ".deploy-cache.json")),
+	}
+	if _, ok := dm.buildProtectedHashes(); ok {
+		t.Error("history fetch failure should return ok=false so cleanup is skipped")
+	}
+}
+
+func TestCleanHashFilesProtectsHTMLHistory(t *testing.T) {
+	// 今天事故场景：清理时上一生产版本引用的文件必须保留，无关旧 hash 删除
+	dest := t.TempDir()
+	os.WriteFile(filepath.Join(dest, "style.css"), []byte("base"), 0644)
+	os.WriteFile(filepath.Join(dest, "style.aaaabbbb.css"), []byte("current"), 0644)
+	os.WriteFile(filepath.Join(dest, "style.ccccdddd.css"), []byte("protected-prev"), 0644)
+	os.WriteFile(filepath.Join(dest, "style.eeeeffff.css"), []byte("protected-css-img"), 0644)
+	os.WriteFile(filepath.Join(dest, "style.11112222.css"), []byte("unprotected-old"), 0644)
+
+	dm := &DeployManager{
+		config:          DeployConfig{},
+		destPath:        dest,
+		debugMode:       false,
+		cache:           loadDeployCache(filepath.Join(dest, ".deploy-cache.json")),
+		protectedHashes: map[string]bool{"style.ccccdddd.css": true, "style.eeeeffff.css": true},
+	}
+
+	deleted := dm.cleanHashFiles(filepath.Join(dest, "style.css"), "style.aaaabbbb.css")
+	if deleted != 1 {
+		t.Errorf("expected 1 deleted (unprotected only), got %d", deleted)
+	}
+	if !fileExists(filepath.Join(dest, "style.ccccdddd.css")) {
+		t.Error("html-history protected file should be kept")
+	}
+	if !fileExists(filepath.Join(dest, "style.eeeeffff.css")) {
+		t.Error("css-transitive protected file should be kept")
+	}
+	if fileExists(filepath.Join(dest, "style.11112222.css")) {
+		t.Error("unprotected old hash should be deleted")
+	}
+}

@@ -84,6 +84,222 @@ fn clean_key(p: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// HTML 历史引用保护（dest 里线上 HTML 最近 24h 提交版本引用的 hash 资源）
+// ---------------------------------------------------------------------------
+
+/// 从文本中扫描出所有 `名字.<hex>.扩展名` 形式的带 hash 文件名（去重前）。
+/// 以非 [A-Za-z0-9_.-] 字符分词，再对每段取最后一个路径分量后校验 hash 形态
+fn hashed_names_in(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut Vec<String>| {
+        if token.is_empty() {
+            return;
+        }
+        let base = token
+            .rsplit(|c| c == '/' || c == '\\')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if crate::patterns::parse_hashed_filename(&base).is_some() {
+            out.push(base);
+        }
+        token.clear();
+    };
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '-' || ch == '/' || ch == '\\' {
+            token.push(ch);
+        } else {
+            flush(&mut token, &mut out);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
+}
+
+/// 从文本中扫描出带 hash 的 CSS 引用（保留路径部分，便于推导相对路径）
+fn hashed_css_paths_in(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut Vec<String>| {
+        if token.is_empty() {
+            return;
+        }
+        let base = token
+            .rsplit(|c| c == '/' || c == '\\')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if base.ends_with(".css") && crate::patterns::parse_hashed_filename(&base).is_some() {
+            out.push(token.clone());
+        }
+        token.clear();
+    };
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '-' || ch == '/' || ch == '\\' {
+            token.push(ch);
+        } else {
+            flush(&mut token, &mut out);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
+}
+
+/// 从 HTML 中匹配到的资源路径推导相对 dest 的路径：剥离 CDNPathPrefix
+fn derive_history_rel_path(matched: &str, cdn_prefix: &str) -> String {
+    let p = matched.replace('\\', "/");
+    let p = p.trim_start_matches("//");
+    let mut prefix = cdn_prefix.replace('\\', "/");
+    prefix = prefix.trim_start_matches("https://").to_string();
+    prefix = prefix.trim_start_matches("http://").to_string();
+    let prefix = prefix.trim_end_matches('/').to_string();
+    let stripped = if !prefix.is_empty() && p.starts_with(&prefix) {
+        p[prefix.len()..].to_string()
+    } else {
+        p.to_string()
+    };
+    stripped.trim_start_matches('/').to_string()
+}
+
+/// 查询文件在 since 之后的所有提交版本号 + 窗口边界前最后一次提交（最新在前）
+fn svn_history_revisions(wc_path: &str, since_days: i64, max_revs: usize) -> Result<Vec<i64>, String> {
+    let since = std::time::SystemTime::now()
+        - std::time::Duration::from_secs((since_days.max(1) * 24 * 60 * 60) as u64);
+    let since_str = format!("{{{}}}", format_svn_date(since));
+
+    let mut revs: Vec<i64> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let out = std::process::Command::new("svn")
+        .args(["log", "--xml", "-r", &format!("{}:HEAD", since_str), "-l", &max_revs.to_string(), wc_path])
+        .output()
+        .map_err(|e| format!("svn log 失败: {}", e))?;
+    if !out.status.success() {
+        return Err("svn log 失败".to_string());
+    }
+    for rev in extract_revisions(&String::from_utf8_lossy(&out.stdout)) {
+        if seen.insert(rev) {
+            revs.push(rev);
+        }
+    }
+    // 窗口边界前最后一次提交（该版本在窗口开始时仍在线上）
+    if let Ok(boundary) = std::process::Command::new("svn")
+        .args(["log", "--xml", "-r", &format!("{}:1", since_str), "-l", "1", wc_path])
+        .output()
+    {
+        if boundary.status.success() {
+            if let Some(rev) = extract_revisions(&String::from_utf8_lossy(&boundary.stdout)).first() {
+                if seen.insert(*rev) {
+                    revs.push(*rev);
+                }
+            }
+        }
+    }
+    if revs.is_empty() {
+        return Err("窗口内无提交历史".to_string());
+    }
+    if revs.len() > max_revs {
+        return Err(format!("窗口内版本数 {} 超过上限 {}", revs.len(), max_revs));
+    }
+    Ok(revs)
+}
+
+/// 从 svn log --xml 输出提取 revision 属性值
+fn extract_revisions(xml_text: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    let mut rest = xml_text;
+    while let Some(pos) = rest.find("<logentry") {
+        rest = &rest[pos..];
+        if let Some(attr_pos) = rest.find("revision=\"") {
+            let start = attr_pos + "revision=\"".len();
+            if let Some(end) = rest[start..].find('"') {
+                if let Ok(rev) = rest[start..start + end].parse::<i64>() {
+                    out.push(rev);
+                }
+            }
+        }
+        match rest.find('>') {
+            Some(p) => rest = &rest[p + 1..],
+            None => break,
+        }
+    }
+    out
+}
+
+/// 读取文件在指定版本的内容
+fn svn_cat_revision(wc_path: &str, rev: i64) -> Result<Vec<u8>, String> {
+    let out = std::process::Command::new("svn")
+        .args(["cat", "-r", &rev.to_string(), wc_path])
+        .output()
+        .map_err(|e| format!("svn cat 失败: {}", e))?;
+    if !out.status.success() {
+        return Err("svn cat 失败".to_string());
+    }
+    Ok(out.stdout)
+}
+
+/// dest 根目录（不递归）下的 HTML 文件
+fn find_dest_html_files(dest_path: &str) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(dest_path).map_err(|e| e.to_string())?;
+    let mut htmls = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !entry.path().is_dir() && name.to_ascii_lowercase().ends_with(".html") {
+            htmls.push(path_join(dest_path, &name));
+        }
+    }
+    Ok(htmls)
+}
+
+/// dest 下文件 basename → 完整路径 索引（跳过 .svn 目录）
+fn index_dest_files(dest_path: &str) -> std::collections::HashMap<String, String> {
+    let mut index = std::collections::HashMap::new();
+    fn walk(dir: &str, index: &mut std::collections::HashMap<String, String>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let path = entry.path().to_string_lossy().to_string();
+                if entry.path().is_dir() {
+                    if name != ".svn" {
+                        walk(&path, index);
+                    }
+                } else {
+                    index.insert(name, path);
+                }
+            }
+        }
+    }
+    walk(dest_path, &mut index);
+    index
+}
+
+/// 把 time_t 秒格式化成 svn 可识别的日期（UTC，YYYY-MM-DD）
+fn format_svn_date(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86400);
+    // days_from_civil 反算：以 1970-01-01 为 0 天
+    let (y, m, d) = civil_from_days(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// 纪元天数转 年/月/日（Howard Hinnant civil_from_days 算法）
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+// ---------------------------------------------------------------------------
 // FileCacheEntry / DeployCache
 // ---------------------------------------------------------------------------
 
@@ -98,6 +314,10 @@ pub struct DeployCache {
     pub files: HashMap<String, FileCacheEntry>,
     pub session_time: i64,
     pub released_hashes: std::collections::HashSet<String>,
+    /// 运行时字段（不持久化）：dest HTML 历史引用保护名单
+    pub protected_hashes: std::collections::HashSet<String>,
+    /// 运行时字段（不持久化）：保护名单构建失败时置位，本次跳过清理
+    pub cleanup_blocked: bool,
     cache_path: String,
     dirty: bool,
 }
@@ -110,6 +330,14 @@ const DEPLOY_SESSION_GAP_NANOS: i64 = 6 * 60 * 60 * 1_000_000_000;
 /// 浏览器仍缓存旧 HTML 的窗口期。
 const PROD_PROTECT_WINDOW_NANOS: i64 = 12 * 60 * 60 * 1_000_000_000;
 
+/// 线上 HTML 历史保护窗口：窗口内所有已提交 HTML 版本引用过的 hash 资源
+/// 一律保留。用户 HTML 缓存约 12 小时，窗口取 24 小时（12h × 2 保险）。
+/// HTML 可能被频繁提交，因此按时间窗扫描全部版本，不固定取"最近 N 版"
+const HTML_PROTECT_WINDOW_NANOS: i64 = 24 * 60 * 60 * 1_000_000_000;
+
+/// 单个 HTML 在窗口内允许扫描的最大版本数，超过则跳过本次清理
+const HTML_PROTECT_MAX_REVISIONS: usize = 50;
+
 /// Loads the deploy cache from disk. Returns an empty cache if the file is
 /// missing or unparseable. modTime is read as an exact i64 (Integer variant)
 /// so nanosecond precision is preserved; the legacy string form written by
@@ -119,6 +347,8 @@ pub fn load_deploy_cache(cache_path: &str) -> DeployCache {
         files: HashMap::new(),
         session_time: 0,
         released_hashes: std::collections::HashSet::new(),
+        protected_hashes: std::collections::HashSet::new(),
+        cleanup_blocked: false,
         cache_path: cache_path.to_string(),
         dirty: false,
     };
@@ -445,6 +675,110 @@ impl DeployManager {
         false
     }
 
+    /// 以 dest 里线上 HTML 的提交历史为准构建保护名单：
+    /// 最新已提交 HTML（当前上线版本）+ 窗口内所有版本的引用都保留；
+    /// 其中引用的带 hash CSS，其 url(...) 里的 hash 图片同样保护。
+    /// 任何查询失败返回 None（调用方跳过本次清理，宁可多留不可误删）
+    fn build_protected_hashes_with<F, G>(
+        &self,
+        history: F,
+        cat: G,
+    ) -> Option<std::collections::HashSet<String>>
+    where
+        F: Fn(&str, i64, usize) -> Result<Vec<i64>, String>,
+        G: Fn(&str, i64) -> Result<Vec<u8>, String>,
+    {
+        let html_files = find_dest_html_files(&self.dest_path).ok()?;
+        if html_files.is_empty() {
+            return None;
+        }
+        let dest_index = index_dest_files(&self.dest_path);
+        let since_days = HTML_PROTECT_WINDOW_NANOS / (24 * 60 * 60 * 1_000_000_000);
+        let mut protected = std::collections::HashSet::new();
+
+        for html_path in &html_files {
+            let revs = match history(html_path, since_days, HTML_PROTECT_MAX_REVISIONS) {
+                Ok(r) => r,
+                Err(e) => {
+                    println!(
+                        "⚠️  获取HTML历史版本失败 {}: {}，本次跳过旧hash清理",
+                        path_base(html_path),
+                        e
+                    );
+                    return None;
+                }
+            };
+            for rev in revs {
+                let content = match cat(html_path, rev) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        println!(
+                            "⚠️  读取HTML历史内容失败 {}@{}: {}，本次跳过旧hash清理",
+                            path_base(html_path),
+                            rev,
+                            e
+                        );
+                        return None;
+                    }
+                };
+                let text = String::from_utf8_lossy(&content).to_string();
+
+                // 1. HTML 中引用的所有带 hash 资源
+                for name in hashed_names_in(&text) {
+                    protected.insert(name);
+                }
+                // 2. 引用的带 hash CSS：其 url(...) 里的 hash 图片同样保护
+                for css_path in hashed_css_paths_in(&text) {
+                    let css_base = path_base(&css_path);
+                    match self.fetch_css_image_refs(&css_path, &css_base, rev, &dest_index, &cat) {
+                        Some(images) => {
+                            for img in images {
+                                protected.insert(img);
+                            }
+                        }
+                        None => {
+                            println!(
+                                "⚠️  获取CSS历史内容失败 {}@{}，本次跳过旧hash清理",
+                                css_base, rev
+                            );
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+        Some(protected)
+    }
+
+    fn build_protected_hashes(&self) -> Option<std::collections::HashSet<String>> {
+        self.build_protected_hashes_with(svn_history_revisions, svn_cat_revision)
+    }
+
+    /// 获取历史版本 CSS 内容中引用的带 hash 图片名。hash 文件名即内容指纹，
+    /// CSS 优先读 dest 本地副本；本地不存在时按 HTML 中的路径线索从 SVN 历史读取
+    fn fetch_css_image_refs<G>(
+        &self,
+        css_match: &str,
+        css_base: &str,
+        rev: i64,
+        dest_index: &std::collections::HashMap<String, String>,
+        cat: &G,
+    ) -> Option<Vec<String>>
+    where
+        G: Fn(&str, i64) -> Result<Vec<u8>, String>,
+    {
+        let content = if let Some(p) = dest_index.get(css_base) {
+            std::fs::read(p).ok()?
+        } else {
+            let rel = derive_history_rel_path(css_match, &self.config.cdn_path_prefix);
+            if rel.is_empty() || rel == css_base {
+                return None;
+            }
+            cat(&path_join(&self.dest_path, &rel), rev).ok()?
+        };
+        Some(hashed_names_in(&String::from_utf8_lossy(&content)))
+    }
+
     /// Removes old hashed files in the dest dir, keeping the newest version,
     /// the current live prod versions, and the session baseline within its
     /// 12h protection window. `live` = Some means the caller already fetched
@@ -467,6 +801,14 @@ impl DeployManager {
         let ext_no_dot = ext.trim_start_matches('.');
 
         if !file_exists(&dest_dir) {
+            return 0;
+        }
+
+        // 保护名单构建失败（现网抓取/HTML历史查询异常）时本次不清理
+        if self.cache.cleanup_blocked {
+            if self.debug_mode {
+                println!("    ⏭️  cleanup_blocked 生效，本次不清理");
+            }
             return 0;
         }
 
@@ -502,7 +844,12 @@ impl DeployManager {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let is_base = base_active && self.cache.released_hashes.contains(&name);
-                if name == dest_file_name || name == keep_file_name || live_set.contains(&name) || is_base {
+                if name == dest_file_name
+                    || name == keep_file_name
+                    || live_set.contains(&name)
+                    || is_base
+                    || self.cache.protected_hashes.contains(&name)
+                {
                     continue;
                 }
                 if matches_alnum_hash(&name, &basename, ext_no_dot) {
@@ -759,6 +1106,22 @@ impl DeployManager {
             }
         } else {
             println!("⚠️  无法获取现网版本，本次部署跳过旧hash清理");
+        }
+
+        // 以 dest 里线上 HTML 的提交历史构建保护名单：
+        // 当前上线版本 + 保护窗口内所有版本的引用（含 CSS 里的 hash 图片）都必须保留。
+        // 任何查询失败则本次不清理，宁可多留不可误删
+        match self.build_protected_hashes() {
+            Some(set) => {
+                if self.debug_mode {
+                    println!("🛡️  HTML历史保护名单: {} 个资源", set.len());
+                }
+                self.cache.protected_hashes = set;
+            }
+            None => {
+                println!("⚠️  无法构建HTML历史保护名单，本次部署跳过旧hash清理");
+                self.cache.cleanup_blocked = true;
+            }
         }
 
         // Update SVN repo first (mirrors Go's updateSvnRepo).
@@ -1846,6 +2209,148 @@ mod tests {
         assert!(file_exists(dir.join("style.css").to_str().unwrap()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_protected_hashes() {
+        // 模拟 dest：根目录一个 html，css/ 子目录一个带 hash 的 css（内容引用 hash 图片）
+        let dest = std::env::temp_dir().join(format!("protect_src_{}", tmp_id()));
+        std::fs::create_dir_all(dest.join("css")).unwrap();
+        std::fs::write(
+            dest.join("css").join("xdrNormal.42fed2bf.css"),
+            "body{background:url(../images/xdrNormal/202505/riding-model-bg.e5853009.png)}",
+        )
+        .unwrap();
+        std::fs::write(dest.join("xdrNormal.html"), "<html></html>").unwrap();
+
+        let dm = DeployManager {
+            config: DeployConfig {
+                cdn_path_prefix: "https://cdn.example.com/wap".to_string(),
+                ..DeployConfig::default()
+            },
+            source_path: String::new(),
+            dest_path: dest.to_string_lossy().to_string(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(dest.join(".deploy-cache.json").to_str().unwrap()),
+        };
+
+        let history = |_p: &str, _days: i64, max: usize| {
+            assert_eq!(max, HTML_PROTECT_MAX_REVISIONS);
+            Ok(vec![8640_i64, 8631])
+        };
+        let cat = |p: &str, rev: i64| {
+            let base = path_base(p);
+            if base == "xdrNormal.html" {
+                return match rev {
+                    8640 => Ok(concat!(
+                        r#"<link href="https://cdn.example.com/wap/css/xdrNormal.ff09cd59.css">"#,
+                        r#"<script src="https://cdn.example.com/wap/components/xdrsignNew/index.04f3b196.js">"#,
+                        r#"<img src="https://cdn.example.com/wap/images/xdrNormal/202505/riding-model-bg.7f70ce92.png">"#
+                    )
+                    .as_bytes()
+                    .to_vec()),
+                    8631 => Ok(concat!(
+                        r#"<link href="css/xdrNormal.42fed2bf.css">"#,
+                        r#"<script src="scripts/js/xdrNormal.1807d798.js">"#
+                    )
+                    .as_bytes()
+                    .to_vec()),
+                    _ => Err(format!("unexpected rev {}", rev)),
+                };
+            }
+            if base == "xdrNormal.ff09cd59.css" && rev == 8640 {
+                return Ok(b"body{margin:0}".to_vec());
+            }
+            Err(format!("unexpected {}@{}", base, rev))
+        };
+
+        let protected = dm
+            .build_protected_hashes_with(history, cat)
+            .expect("build_protected_hashes should succeed");
+
+        for name in [
+            "xdrNormal.ff09cd59.css",
+            "index.04f3b196.js",
+            "riding-model-bg.7f70ce92.png",
+            "xdrNormal.42fed2bf.css",
+            "xdrNormal.1807d798.js",
+        ] {
+            assert!(protected.contains(name), "{} should be protected", name);
+        }
+        assert!(
+            protected.contains("riding-model-bg.e5853009.png"),
+            "css url(...) image should be protected transitively"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn test_build_protected_hashes_fails_safe() {
+        let dest = std::env::temp_dir().join(format!("protect_fail_{}", tmp_id()));
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("xdrNormal.html"), "<html></html>").unwrap();
+
+        let dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: String::new(),
+            dest_path: dest.to_string_lossy().to_string(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(dest.join(".deploy-cache.json").to_str().unwrap()),
+        };
+
+        let history = |_p: &str, _days: i64, _max: usize| Err("svn unavailable".to_string());
+        let cat = |_p: &str, _rev: i64| Err("unused".to_string());
+        assert!(
+            dm.build_protected_hashes_with(history, cat).is_none(),
+            "history failure must return None so cleanup is skipped"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn test_clean_hash_files_protects_html_history() {
+        let dest = std::env::temp_dir().join(format!("protect_clean_{}", tmp_id()));
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("style.css"), "base").unwrap();
+        std::fs::write(dest.join("style.aaaabbbb.css"), "current").unwrap();
+        std::fs::write(dest.join("style.ccccdddd.css"), "protected-prev").unwrap();
+        std::fs::write(dest.join("style.eeeeffff.css"), "protected-css-img").unwrap();
+        std::fs::write(dest.join("style.11112222.css"), "unprotected-old").unwrap();
+
+        let mut cache = load_deploy_cache(dest.join(".deploy-cache.json").to_str().unwrap());
+        cache.protected_hashes.insert("style.ccccdddd.css".to_string());
+        cache.protected_hashes.insert("style.eeeeffff.css".to_string());
+        // 非首次运行：session_time 已建立，清理逻辑才会真正执行
+        cache.session_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+
+        let mut dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: String::new(),
+            dest_path: dest.to_string_lossy().to_string(),
+            debug_mode: false,
+            folder_opened: false,
+            cache,
+        };
+
+        let live: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let deleted = dm.clean_hash_files(
+            dest.join("style.css").to_str().unwrap(),
+            "style.aaaabbbb.css",
+            Some(&live),
+        );
+        assert_eq!(deleted, 1, "only the unprotected hash should be deleted");
+        assert!(file_exists(dest.join("style.ccccdddd.css").to_str().unwrap()));
+        assert!(file_exists(dest.join("style.eeeeffff.css").to_str().unwrap()));
+        assert!(!file_exists(dest.join("style.11112222.css").to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&dest);
     }
 
     #[test]

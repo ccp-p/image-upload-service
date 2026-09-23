@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1434,14 +1436,15 @@ func (vm *VersionManager) updateHTMLReferences(htmlPath string, resources map[st
 
 // DeployManager 部署管理器
 type DeployManager struct {
-	config       DeployConfig
-	sourcePath   string
-	destPath     string
-	debugMode    bool
-	folderOpened bool
-	cache        *DeployCache    // 持久化文件hash缓存
-	currentLive  map[string]bool // 本次抓取的现网引用名单
-	skipCleanup  bool            // 现网抓取失败/首次记录时跳过清理
+	config          DeployConfig
+	sourcePath      string
+	destPath        string
+	debugMode       bool
+	folderOpened    bool
+	cache           *DeployCache    // 持久化文件hash缓存
+	currentLive     map[string]bool // 本次抓取的现网引用名单
+	skipCleanup     bool            // 现网抓取失败/首次记录时跳过清理
+	protectedHashes map[string]bool // dest HTML 历史版本引用过的 hash 资源名单
 }
 
 // NewDeployManager 创建部署管理器
@@ -1762,6 +1765,218 @@ func (dm *DeployManager) prepareDeploySession() {
 	}
 }
 
+// ==================== HTML 历史引用保护 ====================
+
+// htmlProtectWindow 线上 HTML 历史保护窗口：窗口内所有已提交 HTML 版本
+// 引用过的 hash 资源一律保留。用户 HTML 缓存约 12 小时，窗口取 24 小时
+// （12h × 2 保险）：任何在窗口内上线过的 HTML 版本，其引用的资源都可能
+// 被缓存用户请求，删除即 404。HTML 可能被频繁提交，因此不固定取
+// "最近 N 版"，而是按时间窗扫描全部版本，避免频繁提交导致覆盖时间过短
+const htmlProtectWindow = 24 * time.Hour
+
+// htmlProtectMaxRevisions 单个 HTML 在窗口内允许扫描的最大版本数，超过则跳过本次清理
+const htmlProtectMaxRevisions = 50
+
+var reHashedBasename = regexp.MustCompile(`[A-Za-z0-9_-]+\.[a-f0-9]{4,64}\.[A-Za-z0-9]+`)
+var reHashedCSSPath = regexp.MustCompile(`[/\w.-]+\.[a-f0-9]{4,64}\.css`)
+
+// svnXMLLog svn log --xml 输出结构（仅解析所需字段）
+type svnXMLLog struct {
+	Entries []struct {
+		Revision string `xml:"revision,attr"`
+		Date     string `xml:"date"`
+	} `xml:"logentry"`
+}
+
+// svnHTMLHistoryRevisions 查询文件在 since 之后的所有提交版本号，
+// 外加窗口边界前最后一次提交（该版本在窗口开始时仍在线上）。
+// 返回按时间从新到旧排列；声明为 var 以便测试注入
+var svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]int64, error) {
+	if _, err := exec.LookPath("svn"); err != nil {
+		return nil, fmt.Errorf("未找到svn命令")
+	}
+	sinceStr := "{" + since.Format("2006-01-02") + "}"
+
+	cmd := exec.Command("svn", "log", "--xml", "-r", sinceStr+":HEAD", "-l", strconv.Itoa(maxRevs), wcPath)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var log svnXMLLog
+	if err := xml.Unmarshal(output, &log); err != nil {
+		return nil, err
+	}
+
+	seen := make(map[int64]bool)
+	revs := make([]int64, 0, len(log.Entries)+1)
+	for _, e := range log.Entries {
+		rev, err := strconv.ParseInt(e.Revision, 10, 64)
+		if err != nil || seen[rev] {
+			continue
+		}
+		seen[rev] = true
+		revs = append(revs, rev)
+	}
+
+	// 窗口边界前最后一次提交：该版本在窗口开始时仍在线上，同样需保护
+	boundaryCmd := exec.Command("svn", "log", "--xml", "-r", sinceStr+":1", "-l", "1", wcPath)
+	if boundaryOut, boundaryErr := boundaryCmd.Output(); boundaryErr == nil {
+		var boundaryLog svnXMLLog
+		if xml.Unmarshal(boundaryOut, &boundaryLog) == nil && len(boundaryLog.Entries) > 0 {
+			if rev, err := strconv.ParseInt(boundaryLog.Entries[0].Revision, 10, 64); err == nil && !seen[rev] {
+				revs = append(revs, rev)
+			}
+		}
+	}
+
+	if len(revs) == 0 {
+		return nil, fmt.Errorf("窗口内无提交历史")
+	}
+	if len(revs) > maxRevs {
+		return nil, fmt.Errorf("窗口内版本数 %d 超过上限 %d", len(revs), maxRevs)
+	}
+	return revs, nil
+}
+
+// svnCatRevision 读取文件在指定版本的内容；声明为 var 以便测试注入
+var svnCatRevision = func(wcPath string, rev int64) ([]byte, error) {
+	if _, err := exec.LookPath("svn"); err != nil {
+		return nil, fmt.Errorf("未找到svn命令")
+	}
+	cmd := exec.Command("svn", "cat", "-r", strconv.FormatInt(rev, 10), wcPath)
+	return cmd.Output()
+}
+
+// findDestHTMLFiles 扫描 dest 根目录（不递归）下的 HTML 文件
+func findDestHTMLFiles(destPath string) ([]string, error) {
+	var htmls []string
+	entries, err := os.ReadDir(destPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".html") {
+			htmls = append(htmls, filepath.Join(destPath, e.Name()))
+		}
+	}
+	return htmls, nil
+}
+
+// indexDestFiles 建立 dest 下文件 basename → 完整路径 索引（跳过 .svn 目录）
+func indexDestFiles(destPath string) (map[string]string, error) {
+	index := make(map[string]string)
+	err := filepath.WalkDir(destPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".svn" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		index[d.Name()] = path
+		return nil
+	})
+	return index, err
+}
+
+// deriveHistoryRelPath 从 HTML 中匹配到的资源路径推导相对 dest 的路径：
+// 优先剥离 CDNPathPrefix（形如 https://cdn域/前缀/wap），剩余即相对路径；
+// 本身就是相对路径（css/xxx.css）则原样返回
+func deriveHistoryRelPath(match string, cdnPrefix string) string {
+	p := strings.ReplaceAll(match, "\\", "/")
+	p = strings.TrimPrefix(p, "//")
+	prefix := strings.ReplaceAll(cdnPrefix, "\\", "/")
+	prefix = strings.TrimPrefix(prefix, "https://")
+	prefix = strings.TrimPrefix(prefix, "http://")
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix != "" && strings.HasPrefix(p, prefix) {
+		p = p[len(prefix):]
+	}
+	return strings.TrimPrefix(p, "/")
+}
+
+// buildProtectedHashes 以 dest 里线上 HTML 的提交历史为准构建保护名单：
+//   - dest 最新已提交 HTML = 当前上线版本，其引用的全部 hash 必须保留
+//   - 再回溯 htmlProtectWindow 内提交过的每个 HTML 版本，引用同样保留
+//     （覆盖缓存里还拿着旧版 HTML 的用户）
+//   - 其中引用的带 hash CSS，其内容里的 url(...) 带 hash 图片同样保护
+//   - 任何 SVN 查询失败返回 ok=false（调用方跳过本次清理，宁可多留不可误删）
+func (dm *DeployManager) buildProtectedHashes() (map[string]bool, bool) {
+	htmlFiles, err := findDestHTMLFiles(dm.destPath)
+	if err != nil || len(htmlFiles) == 0 {
+		return nil, false
+	}
+
+	destIndex, err := indexDestFiles(dm.destPath)
+	if err != nil {
+		return nil, false
+	}
+
+	protected := make(map[string]bool)
+	since := time.Now().Add(-htmlProtectWindow)
+	for _, htmlPath := range htmlFiles {
+		revs, err := svnHTMLHistoryRevisions(htmlPath, since, htmlProtectMaxRevisions)
+		if err != nil {
+			fmt.Printf("⚠️  获取HTML历史版本失败 %s: %v，本次跳过旧hash清理\n", filepath.Base(htmlPath), err)
+			return nil, false
+		}
+		for _, rev := range revs {
+			content, err := svnCatRevision(htmlPath, rev)
+			if err != nil {
+				fmt.Printf("⚠️  读取HTML历史内容失败 %s@%d: %v，本次跳过旧hash清理\n", filepath.Base(htmlPath), rev, err)
+				return nil, false
+			}
+			contentStr := string(content)
+
+			// 1. HTML 内容中引用的所有带 hash 资源
+			for _, m := range reHashedBasename.FindAllString(contentStr, -1) {
+				protected[m] = true
+			}
+
+			// 2. 引用的带 hash CSS：其内容里的 url(...) 带 hash 图片同样保护
+			for _, cssMatch := range reHashedCSSPath.FindAllString(contentStr, -1) {
+				cssBase := filepath.Base(cssMatch)
+				images, ok := dm.fetchCSSImageRefs(cssMatch, cssBase, rev, destIndex)
+				if !ok {
+					fmt.Printf("⚠️  获取CSS历史内容失败 %s@%d，本次跳过旧hash清理\n", cssBase, rev)
+					return nil, false
+				}
+				for _, img := range images {
+					protected[img] = true
+				}
+			}
+		}
+	}
+	return protected, true
+}
+
+// fetchCSSImageRefs 获取历史版本 CSS 内容中引用的带 hash 图片名。
+// hash 文件名即内容指纹（同名同内容），CSS 优先读 dest 本地副本；
+// 本地不存在时按 HTML 中的路径线索从 SVN 历史读取
+func (dm *DeployManager) fetchCSSImageRefs(cssMatch, cssBase string, rev int64, destIndex map[string]string) ([]string, bool) {
+	var content []byte
+	if cssPath, found := destIndex[cssBase]; found {
+		data, err := os.ReadFile(cssPath)
+		if err != nil {
+			return nil, false
+		}
+		content = data
+	} else {
+		relPath := deriveHistoryRelPath(cssMatch, dm.config.CDNPathPrefix)
+		if relPath == "" || relPath == cssBase {
+			return nil, false
+		}
+		data, err := svnCatRevision(filepath.Join(dm.destPath, filepath.FromSlash(relPath)), rev)
+		if err != nil {
+			return nil, false
+		}
+		content = data
+	}
+	return reHashedBasename.FindAllString(string(content), -1), true
+}
+
 // cleanHashFiles 清理旧 hash：保留本次新版本、当前现网版、
 // 以及 12 小时保护期内的会话基线版本；其余（灰度中间产物、
 // 超过保护期的旧现网版）删除。
@@ -1797,9 +2012,10 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 	for _, file := range files {
 		isBase := baseActive && dm.cache.ReleasedHashes[file.Name()]
 		if file.Name() == destFileName || file.Name() == keepFileName ||
-			dm.currentLive[file.Name()] || isBase {
+			dm.currentLive[file.Name()] || isBase ||
+			dm.protectedHashes[file.Name()] {
 			if dm.debugMode && isJSOrCSS(file.Name()) {
-				fmt.Printf("    🛡️  保留(最新/当前现网/基线): %s\n", file.Name())
+				fmt.Printf("    🛡️  保留(最新/当前现网/基线/HTML历史引用): %s\n", file.Name())
 			}
 			continue
 		}
@@ -2307,6 +2523,19 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 
 	// 部署前抓现网快照，确定本次保留名单
 	dm.prepareDeploySession()
+
+	// 以 dest 里线上 HTML 的提交历史构建保护名单：当前上线版本 +
+	// 保护窗口内所有版本的引用（含 CSS 里的 hash 图片）都必须保留。
+	// 任何查询失败则本次不清理，宁可多留不可误删
+	if protected, ok := dm.buildProtectedHashes(); ok {
+		dm.protectedHashes = protected
+		if dm.debugMode {
+			fmt.Printf("🛡️  HTML历史保护名单: %d 个资源\n", len(protected))
+		}
+	} else if !dm.skipCleanup {
+		dm.skipCleanup = true
+		fmt.Println("⚠️  无法构建HTML历史保护名单，本次部署跳过旧hash清理")
+	}
 
 	fmt.Println("📦 开始复制文件...")
 
