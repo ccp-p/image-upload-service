@@ -240,6 +240,71 @@ fn svn_cat_revision(wc_path: &str, rev: i64) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
+/// 查询文件在 SVN 中最后一次提交时间（纳秒时间戳，读本地工作副本元数据，不联网）
+fn svn_last_changed_nanos(wc_path: &str) -> Option<i64> {
+    let out = std::process::Command::new("svn")
+        .args(["info", "--xml", wc_path])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let start = text.find("<date>")? + "<date>".len();
+    let rest = &text[start..];
+    let end = rest.find("</date>")?;
+    parse_svn_xml_date_nanos(rest[..end].trim())
+}
+
+/// 天数转纪元天数（Howard Hinnant days_from_civil 算法）
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// 解析 SVN XML 日期（如 2026-09-04T04:34:56.123456Z 或带 +08:00 偏移），转 epoch 纳秒
+fn parse_svn_xml_date_nanos(s: &str) -> Option<i64> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 19 {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let year = num(0..4)?;
+    let month = num(5..7)?;
+    let day = num(8..10)?;
+    let hour = num(11..13)?;
+    let minute = num(14..16)?;
+    let second = num(17..19)?;
+    // 时区：'Z' 为 UTC；'+HH:MM' / '-HH:MM' 为偏移。先跳过小数秒
+    let mut offset_secs: i64 = 0;
+    let tz = s[19..].trim();
+    let tz = tz.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    if tz.starts_with('+') || tz.starts_with('-') {
+        let sign: i64 = if tz.starts_with('-') { -1 } else { 1 };
+        let digits: String = tz.chars().skip(1).filter(|c| c.is_ascii_digit()).collect();
+        if digits.len() >= 4 {
+            let hh: i64 = digits[0..2].parse().ok()?;
+            let mm: i64 = digits[2..4].parse().ok()?;
+            offset_secs = sign * (hh * 3600 + mm * 60);
+        }
+    }
+    let days = days_from_civil(year, month, day);
+    let secs = days * 86400 + hour * 3600 + minute * 60 + second - offset_secs;
+    Some(secs * 1_000_000_000)
+}
+
+/// 近期部署保留判定：提交时间距今在窗口内则保留
+fn should_keep_recent(now_nanos: i64, commit_nanos: Option<i64>, window_nanos: i64) -> bool {
+    match commit_nanos {
+        Some(t) => now_nanos - t < window_nanos,
+        None => false,
+    }
+}
+
 /// dest 根目录（不递归）下的 HTML 文件
 fn find_dest_html_files(dest_path: &str) -> Result<Vec<String>, String> {
     let entries = std::fs::read_dir(dest_path).map_err(|e| e.to_string())?;
@@ -856,6 +921,23 @@ impl DeployManager {
                 }
                 if matches_alnum_hash(&name, &basename, ext_no_dot) {
                     let file_path = path_join(&dest_dir, &name);
+                    // 第二条保护规则：近期部署产生的 hash 先保留一阵。
+                    // 部分旧 hash 在仓库里已无任何引用（引用它的缓存页面/仓库外页面
+                    // 无法从 SVN 证明），只能按提交时间保留最近若干轮部署的产物
+                    let now_nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as i64)
+                        .unwrap_or(0);
+                    if should_keep_recent(
+                        now_nanos,
+                        svn_last_changed_nanos(&file_path),
+                        HTML_PROTECT_WINDOW_NANOS,
+                    ) {
+                        if self.debug_mode {
+                            println!("    🛡️  保留(近期部署): {}", name);
+                        }
+                        continue;
+                    }
                     // 非最新且非已上线版本的旧 hash（含当晚多次部署的中间产物）直接清理
                     vcs_svn_delete(&file_path, self.debug_mode);
                     if std::fs::remove_file(&file_path).is_ok() {
@@ -2286,6 +2368,18 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn test_should_keep_recent() {
+        let now = 1_000_000_000_000i64;
+        let window = 24 * 60 * 60 * 1_000_000_000i64;
+        // 1 小时前提交 -> 保留
+        assert!(should_keep_recent(now, Some(now - 3_600_000_000_000), window));
+        // 72 小时前提交 -> 清理
+        assert!(!should_keep_recent(now, Some(now - 72 * 3_600_000_000_000), window));
+        // 查不到提交时间 -> 不按本规则保留
+        assert!(!should_keep_recent(now, None, window));
     }
 
     #[test]

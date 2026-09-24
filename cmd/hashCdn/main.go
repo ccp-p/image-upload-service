@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1784,9 +1785,14 @@ var reHashedCSSPath = regexp.MustCompile(`[/\w.-]+\.[a-f0-9]{4,64}\.css`)
 type svnXMLLog struct {
 	Entries []struct {
 		Revision string `xml:"revision,attr"`
+		Author   string `xml:"author"`
 		Date     string `xml:"date"`
 	} `xml:"logentry"`
 }
+
+// svnLogTrace svn 历史查询追踪（dry-run 时打开，打印实际执行的命令与结果），
+// 默认空实现；诊断走的是与生产完全相同的查询代码路径
+var svnLogTrace = func(format string, args ...interface{}) {}
 
 // svnHTMLHistoryRevisions 查询文件在 since 之后的所有提交版本号，
 // 外加窗口边界前最后一次提交（该版本在窗口开始时仍在线上）。
@@ -1809,6 +1815,7 @@ var svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) 
 
 	seen := make(map[int64]bool)
 	revs := make([]int64, 0, len(log.Entries)+1)
+	svnLogTrace("  [svn log] 窗口内版本查询: svn log -r %s:HEAD -l %d %s", sinceStr, maxRevs, filepath.Base(wcPath))
 	for _, e := range log.Entries {
 		rev, err := strconv.ParseInt(e.Revision, 10, 64)
 		if err != nil || seen[rev] {
@@ -1816,6 +1823,10 @@ var svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) 
 		}
 		seen[rev] = true
 		revs = append(revs, rev)
+		svnLogTrace("      r%d  %s  %s", rev, e.Date, e.Author)
+	}
+	if len(revs) == 0 {
+		svnLogTrace("      (窗口内无提交)")
 	}
 
 	// 窗口边界前最后一次提交：该版本在窗口开始时仍在线上，同样需保护。
@@ -1830,10 +1841,17 @@ var svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) 
 	if err := xml.Unmarshal(boundaryOut, &boundaryLog); err != nil {
 		return nil, fmt.Errorf("解析窗口边界版本失败: %w", err)
 	}
+	svnLogTrace("  [svn log] 窗口边界版本查询: svn log -r %s:1 -l 1 %s", sinceStr, filepath.Base(wcPath))
 	if len(boundaryLog.Entries) > 0 {
 		if rev, err := strconv.ParseInt(boundaryLog.Entries[0].Revision, 10, 64); err == nil && !seen[rev] {
 			revs = append(revs, rev)
+			svnLogTrace("      → 边界版本 r%d  %s  %s（窗口开始时仍在线上，须保护）",
+				rev, boundaryLog.Entries[0].Date, boundaryLog.Entries[0].Author)
+		} else if err == nil {
+			svnLogTrace("      → 边界版本 r%d 与窗口内版本重复，无需重复加入", rev)
 		}
+	} else {
+		svnLogTrace("      (窗口开始前该文件无提交，无边界版本)")
 	}
 
 	if len(revs) == 0 {
@@ -1854,6 +1872,34 @@ var svnCatRevision = func(wcPath string, rev int64) ([]byte, error) {
 	return cmd.Output()
 }
 
+// svnLastChangedTime 查询文件在 SVN 中最后一次提交时间（本地工作副本元数据，
+// 不联网）；用于"近期部署过的 hash 先保留一阵"的判定
+var svnLastChangedTime = func(wcPath string) (time.Time, bool) {
+	if _, err := exec.LookPath("svn"); err != nil {
+		return time.Time{}, false
+	}
+	cmd := exec.Command("svn", "info", "--xml", wcPath)
+	output, err := cmd.Output()
+	if err != nil {
+		return time.Time{}, false
+	}
+	out := string(output)
+	start := strings.Index(out, "<date>")
+	if start < 0 {
+		return time.Time{}, false
+	}
+	rest := out[start+len("<date>"):]
+	end := strings.Index(rest, "</date>")
+	if end < 0 {
+		return time.Time{}, false
+	}
+	t, err := time.Parse("2006-01-02T15:04:05.999999999Z07:00", strings.TrimSpace(rest[:end]))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 // findDestHTMLFiles 扫描 dest 根目录（不递归）下的 HTML 文件
 func findDestHTMLFiles(destPath string) ([]string, error) {
 	var htmls []string
@@ -1867,6 +1913,122 @@ func findDestHTMLFiles(destPath string) ([]string, error) {
 		}
 	}
 	return htmls, nil
+}
+
+// deployedHTMLFiles 返回本次部署涉及的 HTML 文件（dest 根目录下）：
+// 取 config.FilePaths 里的 .html 项；没有则回退扫描全部 .html。
+// 只保护本工具部署的页面，避免把无关页面的历史引用也保护进来
+func (dm *DeployManager) deployedHTMLFiles() []string {
+	all, err := findDestHTMLFiles(dm.destPath)
+	if err != nil {
+		return nil
+	}
+	want := make(map[string]bool)
+	for _, fp := range dm.config.FilePaths {
+		name := filepath.Base(strings.ReplaceAll(fp, "\\", "/"))
+		if strings.EqualFold(filepath.Ext(name), ".html") {
+			want[name] = true
+		}
+	}
+	if len(want) == 0 {
+		return all
+	}
+	var out []string
+	for _, p := range all {
+		if want[filepath.Base(p)] {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return all
+	}
+	return out
+}
+
+// diagnoseHashRetention 只读诊断：对本次部署涉及的目录做 hash 文件去留分类，
+// 打印"引用保护 / 近期部署保留 / 可清理"三类，供 dry-run 核对
+func (dm *DeployManager) diagnoseHashRetention(protected map[string]bool) {
+	type target struct {
+		dir      string
+		wildcard bool
+		base     string
+	}
+	var targets []target
+	for _, fp := range dm.config.FilePaths {
+		rel := strings.ReplaceAll(strings.TrimPrefix(fp, "/"), "\\", "/")
+		if strings.HasSuffix(rel, "/*") {
+			// 通配符项：去掉 /* 后本身就是目录
+			targets = append(targets, target{
+				dir:      filepath.Join(dm.destPath, filepath.FromSlash(strings.TrimSuffix(rel, "/*"))),
+				wildcard: true,
+			})
+		} else {
+			base := filepath.Base(rel)
+			if filepath.Ext(base) == "" {
+				continue
+			}
+			targets = append(targets, target{
+				dir:  filepath.Join(dm.destPath, filepath.FromSlash(filepath.Dir(rel))),
+				base: base,
+			})
+		}
+	}
+	var refProtected, recentKept, deletable []string
+	seen := make(map[string]bool)
+	for _, t := range targets {
+		basePrefix := strings.TrimSuffix(t.base, filepath.Ext(t.base)) + "."
+		filepath.WalkDir(t.dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if d.Name() == ".svn" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			name := d.Name()
+			if reHashedBasename.FindString(name) != name {
+				return nil
+			}
+			// 非通配符项只关心同 basename 的 hash 变体（与 cleanHashFiles 一致）
+			if !t.wildcard && !strings.HasPrefix(name, basePrefix) {
+				return nil
+			}
+			if seen[path] {
+				return nil
+			}
+			seen[path] = true
+			switch {
+			case protected[name]:
+				refProtected = append(refProtected, name)
+			default:
+				if commitTime, ok := svnLastChangedTime(path); ok &&
+					time.Since(commitTime) < htmlProtectWindow {
+					recentKept = append(recentKept, name+" (提交于 "+commitTime.Local().Format("01-02 15:04")+")")
+				} else {
+					deletable = append(deletable, name)
+				}
+			}
+			return nil
+		})
+	}
+	fmt.Printf("\n  📊 去留分类: HTML引用保护 %d 个，近期部署保留 %d 个，可清理 %d 个\n",
+		len(refProtected), len(recentKept), len(deletable))
+	if len(recentKept) > 0 {
+		fmt.Printf("     —— 近期部署保留（仓库里查不到引用，靠提交时间兜底）:\n")
+		sort.Strings(recentKept)
+		for _, n := range recentKept {
+			fmt.Printf("        🛡️ %s\n", n)
+		}
+	}
+	if len(deletable) > 0 {
+		fmt.Printf("     —— 可清理（不在任何保护名单、且提交超 %v）:\n", htmlProtectWindow)
+		sort.Strings(deletable)
+		for _, n := range deletable {
+			fmt.Printf("        🗑️ %s\n", n)
+		}
+	}
 }
 
 // indexDestFiles 建立 dest 下文件 basename → 完整路径 索引（跳过 .svn 目录）
@@ -1911,8 +2073,8 @@ func deriveHistoryRelPath(match string, cdnPrefix string) string {
 //   - 其中引用的带 hash CSS，其内容里的 url(...) 带 hash 图片同样保护
 //   - 任何 SVN 查询失败返回 ok=false（调用方跳过本次清理，宁可多留不可误删）
 func (dm *DeployManager) buildProtectedHashes() (map[string]bool, bool) {
-	htmlFiles, err := findDestHTMLFiles(dm.destPath)
-	if err != nil || len(htmlFiles) == 0 {
+	htmlFiles := dm.deployedHTMLFiles()
+	if len(htmlFiles) == 0 {
 		return nil, false
 	}
 
@@ -2029,7 +2191,18 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 
 		if hashPattern.MatchString(file.Name()) {
 			filePath := filepath.Join(destDir, file.Name())
-			// 不在保护名单内的旧 hash（灰度中间产物、过期现网版）直接清理
+			// 第二条保护规则：近期部署产生的 hash 先保留一阵。
+			// 部分旧 hash 在仓库里已无任何引用（引用它的缓存页面/仓库外页面无法
+			// 从 SVN 证明），只能按提交时间保留最近若干轮部署的产物
+			if commitTime, ok := svnLastChangedTime(filePath); ok &&
+				time.Since(commitTime) < htmlProtectWindow {
+				if isJSOrCSS(file.Name()) {
+					fmt.Printf("    🛡️  保留(近期部署/提交于 %s): %s\n",
+						commitTime.Local().Format("01-02 15:04"), file.Name())
+				}
+				continue
+			}
+			// 不在任何保护名单内的旧 hash（灰度中间产物、过期现网版）直接清理
 			vcsSvnDelete(filePath, dm.debugMode)
 			if err := os.Remove(filePath); err == nil {
 				deletedCount++
@@ -3081,6 +3254,28 @@ func main() {
 				fmt.Printf("    - %s\n", r)
 			}
 		}
+
+		// 旧 hash 保留诊断：打印窗口边界怎么取、最终保护名单，只读不修改
+		fmt.Printf("\n🛡️  === 旧hash保留诊断（只读）===\n")
+		fmt.Printf("  保护窗口: %v（用户 HTML 缓存约 12h，取 2 倍保险）\n", htmlProtectWindow)
+		dm := NewDeployManager(config.Deploy, true)
+		svnLogTrace = func(format string, args ...interface{}) { fmt.Printf(format+"\n", args...) }
+		if protected, ok := dm.buildProtectedHashes(); ok {
+			fmt.Printf("\n  ✅ 保护名单构建成功: %d 个资源\n", len(protected))
+			names := make([]string, 0, len(protected))
+			for name := range protected {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				fmt.Printf("      🛡️ %s\n", name)
+			}
+			dm.diagnoseHashRetention(protected)
+		} else {
+			fmt.Printf("\n  ⚠️ 保护名单构建失败 —— 生产环境本次部署将跳过旧hash清理（不删任何文件）\n")
+		}
+		svnLogTrace = func(format string, args ...interface{}) {}
+
 		fmt.Println("  （预览模式，不执行实际操作）")
 		return
 	}

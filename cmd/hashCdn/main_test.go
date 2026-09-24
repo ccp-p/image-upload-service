@@ -1471,3 +1471,38 @@ func TestCleanHashFilesProtectsHTMLHistory(t *testing.T) {
 		t.Error("unprotected old hash should be deleted")
 	}
 }
+
+func TestCleanHashFilesKeepsRecentDeployHash(t *testing.T) {
+	// 第二条保护规则：仓库里查不到引用、但近期部署提交过的 hash 也要保留
+	dest := t.TempDir()
+	os.WriteFile(filepath.Join(dest, "style.css"), []byte("base"), 0644)
+	os.WriteFile(filepath.Join(dest, "style.aaaabbbb.css"), []byte("current"), 0644)
+	os.WriteFile(filepath.Join(dest, "style.ccccdddd.css"), []byte("recent-deploy"), 0644)
+	os.WriteFile(filepath.Join(dest, "style.11112222.css"), []byte("ancient"), 0644)
+
+	origSvnTime := svnLastChangedTime
+	t.Cleanup(func() { svnLastChangedTime = origSvnTime })
+	svnLastChangedTime = func(wcPath string) (time.Time, bool) {
+		if filepath.Base(wcPath) == "style.ccccdddd.css" {
+			return time.Now().Add(-1 * time.Hour), true
+		}
+		return time.Now().Add(-72 * time.Hour), true
+	}
+
+	dm := &DeployManager{
+		config:    DeployConfig{},
+		destPath:  dest,
+		debugMode: false,
+		cache:     loadDeployCache(filepath.Join(dest, ".deploy-cache.json")),
+	}
+	deleted := dm.cleanHashFiles(filepath.Join(dest, "style.css"), "style.aaaabbbb.css")
+	if deleted != 1 {
+		t.Errorf("expected 1 deleted (ancient only), got %d", deleted)
+	}
+	if !fileExists(filepath.Join(dest, "style.ccccdddd.css")) {
+		t.Error("hash committed within window should be kept even without reference")
+	}
+	if fileExists(filepath.Join(dest, "style.11112222.css")) {
+		t.Error("hash committed long ago and unreferenced should be deleted")
+	}
+}
