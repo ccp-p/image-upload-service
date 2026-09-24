@@ -1372,6 +1372,53 @@ func TestBuildProtectedHashes(t *testing.T) {
 	}
 }
 
+func TestBuildProtectedHashesLongLivedVersion(t *testing.T) {
+	// 长期在线版本场景：9/8 上线的一版一直活到 9/24 才被替换。
+	// 它在 24h 窗口内没有提交，只能靠"窗口边界前最后一次提交"取到；
+	// 若漏掉边界版本，它引用的资源会被误删
+	dest := t.TempDir()
+	os.WriteFile(filepath.Join(dest, "xdrNormal.html"), []byte("<html></html>"), 0644)
+
+	origRevs := svnHTMLHistoryRevisions
+	origCat := svnCatRevision
+	t.Cleanup(func() { svnHTMLHistoryRevisions = origRevs; svnCatRevision = origCat })
+
+	// 历史查询返回：窗口内的新版(9001) + 边界版本(8001，即 9/8 那版)
+	svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]int64, error) {
+		return []int64{9001, 8001}, nil
+	}
+	svnCatRevision = func(wcPath string, rev int64) ([]byte, error) {
+		switch rev {
+		case 9001:
+			return []byte(`<link href="css/xdrNormal.ff09cd59.css"><script src="scripts/js/xdrNormal.90b39d66.js">`), nil
+		case 8001:
+			// 9/8 长期在线版本的引用 —— 必须保留
+			return []byte(`<link href="css/xdrNormal.42fed2bf.css"><script src="scripts/js/xdrNormal.1807d798.js"><img src="images/xdrNormal/202505/new/xdrmgyyvip.c1c58415.png">`), nil
+		}
+		return nil, fmt.Errorf("unexpected rev %d", rev)
+	}
+
+	dm := &DeployManager{
+		config:    DeployConfig{},
+		destPath:  dest,
+		debugMode: false,
+		cache:     loadDeployCache(filepath.Join(dest, ".deploy-cache.json")),
+	}
+	protected, ok := dm.buildProtectedHashes()
+	if !ok {
+		t.Fatal("buildProtectedHashes should succeed")
+	}
+	for _, name := range []string{
+		"xdrNormal.42fed2bf.css",
+		"xdrNormal.1807d798.js",
+		"xdrmgyyvip.c1c58415.png",
+	} {
+		if !protected[name] {
+			t.Errorf("long-lived version ref %s must be protected via boundary revision", name)
+		}
+	}
+}
+
 func TestBuildProtectedHashesFailsSafe(t *testing.T) {
 	dest := t.TempDir()
 	os.WriteFile(filepath.Join(dest, "xdrNormal.html"), []byte("<html></html>"), 0644)

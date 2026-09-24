@@ -1818,14 +1818,21 @@ var svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) 
 		revs = append(revs, rev)
 	}
 
-	// 窗口边界前最后一次提交：该版本在窗口开始时仍在线上，同样需保护
+	// 窗口边界前最后一次提交：该版本在窗口开始时仍在线上，同样需保护。
+	// 长寿命版本（如 9/8 上线、9/24 才被替换）只出现在这里，查询失败必须
+	// 中止本次清理，漏掉边界版本会误删仍在被缓存用户请求的上一生产版本
 	boundaryCmd := exec.Command("svn", "log", "--xml", "-r", sinceStr+":1", "-l", "1", wcPath)
-	if boundaryOut, boundaryErr := boundaryCmd.Output(); boundaryErr == nil {
-		var boundaryLog svnXMLLog
-		if xml.Unmarshal(boundaryOut, &boundaryLog) == nil && len(boundaryLog.Entries) > 0 {
-			if rev, err := strconv.ParseInt(boundaryLog.Entries[0].Revision, 10, 64); err == nil && !seen[rev] {
-				revs = append(revs, rev)
-			}
+	boundaryOut, boundaryErr := boundaryCmd.Output()
+	if boundaryErr != nil {
+		return nil, fmt.Errorf("查询窗口边界版本失败: %w", boundaryErr)
+	}
+	var boundaryLog svnXMLLog
+	if err := xml.Unmarshal(boundaryOut, &boundaryLog); err != nil {
+		return nil, fmt.Errorf("解析窗口边界版本失败: %w", err)
+	}
+	if len(boundaryLog.Entries) > 0 {
+		if rev, err := strconv.ParseInt(boundaryLog.Entries[0].Revision, 10, 64); err == nil && !seen[rev] {
+			revs = append(revs, rev)
 		}
 	}
 

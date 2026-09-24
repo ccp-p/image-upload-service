@@ -182,17 +182,19 @@ fn svn_history_revisions(wc_path: &str, since_days: i64, max_revs: usize) -> Res
             revs.push(rev);
         }
     }
-    // 窗口边界前最后一次提交（该版本在窗口开始时仍在线上）
-    if let Ok(boundary) = std::process::Command::new("svn")
+    // 窗口边界前最后一次提交（该版本在窗口开始时仍在线上）。长寿命版本
+    // （如 9/8 上线、9/24 才被替换）只出现在这里，查询失败必须中止本次清理，
+    // 漏掉边界版本会误删仍在被缓存用户请求的上一生产版本
+    let boundary = std::process::Command::new("svn")
         .args(["log", "--xml", "-r", &format!("{}:1", since_str), "-l", "1", wc_path])
         .output()
-    {
-        if boundary.status.success() {
-            if let Some(rev) = extract_revisions(&String::from_utf8_lossy(&boundary.stdout)).first() {
-                if seen.insert(*rev) {
-                    revs.push(*rev);
-                }
-            }
+        .map_err(|e| format!("svn log 边界查询失败: {}", e))?;
+    if !boundary.status.success() {
+        return Err("svn log 边界查询失败".to_string());
+    }
+    if let Some(rev) = extract_revisions(&String::from_utf8_lossy(&boundary.stdout)).first() {
+        if seen.insert(*rev) {
+            revs.push(*rev);
         }
     }
     if revs.is_empty() {
@@ -2282,6 +2284,55 @@ mod tests {
             protected.contains("riding-model-bg.e5853009.png"),
             "css url(...) image should be protected transitively"
         );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn test_build_protected_hashes_long_lived_version() {
+        // 长期在线版本：9/8 上线、9/24 才被替换，仅靠窗口边界版本取到；
+        // 漏掉边界版本会误删它引用的资源
+        let dest = std::env::temp_dir().join(format!("protect_long_{}", tmp_id()));
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("xdrNormal.html"), "<html></html>").unwrap();
+
+        let dm = DeployManager {
+            config: DeployConfig::default(),
+            source_path: String::new(),
+            dest_path: dest.to_string_lossy().to_string(),
+            debug_mode: false,
+            folder_opened: false,
+            cache: load_deploy_cache(dest.join(".deploy-cache.json").to_str().unwrap()),
+        };
+
+        // 9001 = 窗口内新版；8001 = 边界版本（9/8 长期在线那版）
+        let history = |_p: &str, _days: i64, _max: usize| Ok(vec![9001_i64, 8001]);
+        let cat = |_p: &str, rev: i64| match rev {
+            9001 => Ok(br#"<link href="css/xdrNormal.ff09cd59.css"><script src="scripts/js/xdrNormal.90b39d66.js">"#.to_vec()),
+            8001 => Ok(concat!(
+                r#"<link href="css/xdrNormal.42fed2bf.css">"#,
+                r#"<script src="scripts/js/xdrNormal.1807d798.js">"#,
+                r#"<img src="images/xdrNormal/202505/new/xdrmgyyvip.c1c58415.png">"#
+            )
+            .as_bytes()
+            .to_vec()),
+            _ => Err(format!("unexpected rev {}", rev)),
+        };
+
+        let protected = dm
+            .build_protected_hashes_with(history, cat)
+            .expect("build_protected_hashes should succeed");
+        for name in [
+            "xdrNormal.42fed2bf.css",
+            "xdrNormal.1807d798.js",
+            "xdrmgyyvip.c1c58415.png",
+        ] {
+            assert!(
+                protected.contains(name),
+                "long-lived version ref {} must be protected via boundary revision",
+                name
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dest);
     }
