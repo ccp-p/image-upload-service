@@ -59,23 +59,75 @@ func isHomeEnv() bool {
 	return os.Getenv("IS_HOME") == "1"
 }
 
-// vcsSvnDelete 通知SVN删除文件（保留本地副本），消除 VersionManager 和 DeployManager 中的重复实现
-// 声明为 var 以便测试替换，验证删除旧 hash 文件时会通知 SVN。
-var vcsSvnDelete = func(filePath string, debugMode bool) {
-	if _, err := exec.LookPath("svn"); err != nil {
+// vcsDestDelete 目标仓库删除旧 hash 文件的版本控制钩子。
+// SVN 时代需要 svn delete 标记删除；Git 下普通 os.Remove 即可，
+// 提交时 git add -A 会自动暂存删除，无需额外操作。
+// 声明为 var 以便测试替换，验证删除旧 hash 文件时会经过此钩子。
+var vcsDestDelete = func(filePath string, debugMode bool) {
+	_, _ = filePath, debugMode
+}
+
+// initLogFile 初始化运行日志：本次运行的全部输出（stdout/stderr，含子进程）
+// 同时写入 logs/ 下的时间戳日志文件，方便排查部署问题。
+// 实现方式：os.Stdout/os.Stderr 重定向到管道，后台协程把管道内容
+// 同步转发到控制台 + 日志文件（tee）。自动清理旧日志，仅保留最近 keep 个。
+// 返回日志文件句柄（调用方 defer Close）
+func initLogFile(keep int) (*os.File, error) {
+	logDir := "logs"
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, err
+	}
+	name := filepath.Join(logDir, fmt.Sprintf("hashcdn_%s.log", time.Now().Format("20060102_150405")))
+	f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, err
+	}
+	cleanOldLogs(logDir, keep)
+
+	console := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	os.Stdout = w
+	os.Stderr = w
+	go func() {
+		buf := make([]byte, 8192)
+		for {
+			n, readErr := r.Read(buf)
+			if n > 0 {
+				_, _ = console.Write(buf[:n])
+				_, _ = f.Write(buf[:n])
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+	fmt.Fprintf(f, "=== hashcdn 运行日志 %s ===\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(f, "命令行: %s\n\n", strings.Join(os.Args, " "))
+	return f, nil
+}
+
+// cleanOldLogs 清理旧日志文件，仅保留最近 keep 个（文件名含时间戳，字典序即时间序）
+func cleanOldLogs(logDir string, keep int) {
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
 		return
 	}
-	dir := filepath.Dir(filePath)
-	filename := filepath.Base(filePath)
-	cmd := exec.Command("svn", "delete", "--keep-local", filename)
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		if debugMode {
-			fmt.Printf("      ⚠️  SVN delete 失败: %s (%v)\n", filename, err)
-			fmt.Printf("      Output: %s\n", string(output))
+	var logs []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), "hashcdn_") && strings.HasSuffix(e.Name(), ".log") {
+			logs = append(logs, e.Name())
 		}
-	} else if debugMode {
-		fmt.Printf("    📝 SVN delete: %s\n", filename)
+	}
+	if len(logs) <= keep {
+		return
+	}
+	sort.Strings(logs)
+	for _, name := range logs[:len(logs)-keep] {
+		os.Remove(filepath.Join(logDir, name))
 	}
 }
 
@@ -143,6 +195,7 @@ type Config struct {
 	ExtraHashResources   []string `json:"extraHashResources"` // 额外需要hash的资源（非components路径的共享脚本，如utils_index.js）
 	ReplaceAllWithCDN    bool     `json:"replaceAllWithCDN"`  // 替换所有资源为CDN路径
 	ObfuscateJS          bool     `json:"obfuscateJS"`        // 实验性：对JS文件进行混淆（minify+mangle）
+	NoHash               bool     `json:"-"`                  // 运行时开关（mode 16/17）：CDN替换但跳过hash，部署只复制原始文件
 	// 新增：部署相关配置
 	RollbackAfterDeploy    bool         `json:"rollbackAfterDeploy"`    // 部署后回滚HTML
 	GitCommitAfterRollback bool         `json:"gitCommitAfterRollback"` // 回滚后执行git commit和push
@@ -303,6 +356,9 @@ func (vm *VersionManager) findAndDeleteOldHashFiles(dir, basename, ext, currentH
 
 // processHTMLFile 处理单个HTML文件及其关联资源
 func (vm *VersionManager) processHTMLFile(htmlPath string) error {
+	if vm.config.NoHash {
+		return vm.processHTMLFileNoHash(htmlPath)
+	}
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf("📄 处理: %s\n", htmlPath)
 	fmt.Println(strings.Repeat("=", 60))
@@ -515,6 +571,35 @@ func (vm *VersionManager) processHTMLFile(htmlPath string) error {
 	}
 
 	fmt.Println("\n✨ 处理完成!")
+	return nil
+}
+
+// processHTMLFileNoHash CDN替换但跳过hash的模式（mode 16/17）：
+// 不生成、不清理 hash 文件，仅将 HTML 中的相对 css/js 引用替换为
+// CDN 域名 + 原始文件名（复用 updateHTMLContent 的剩余资源 CDN 替换阶段，
+// resources 传空即只触发该阶段）。部署侧由 copyBaseFileOnly 只复制原始文件。
+func (vm *VersionManager) processHTMLFileNoHash(htmlPath string) error {
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("📄 处理(CDN无hash): %s\n", htmlPath)
+	fmt.Println(strings.Repeat("=", 60))
+
+	if !fileExists(htmlPath) {
+		return fmt.Errorf("文件不存在: %s", htmlPath)
+	}
+	if vm.config.CDNDomain == "" {
+		fmt.Println("ℹ️  CDN域名为空，HTML无需修改")
+		return nil
+	}
+
+	resources := map[string]map[string]string{
+		"css": {},
+		"js":  {},
+	}
+	if err := vm.updateHTMLContent(htmlPath, resources); err != nil {
+		return fmt.Errorf("更新HTML失败: %v", err)
+	}
+
+	fmt.Println("\n✨ CDN替换完成（未生成hash文件）!")
 	return nil
 }
 
@@ -1446,6 +1531,7 @@ type DeployManager struct {
 	currentLive     map[string]bool // 本次抓取的现网引用名单
 	skipCleanup     bool            // 现网抓取失败/首次记录时跳过清理
 	protectedHashes map[string]bool // dest HTML 历史版本引用过的 hash 资源名单
+	noHash          bool            // CDN无hash模式（mode 16/17）：只复制原始文件
 }
 
 // NewDeployManager 创建部署管理器
@@ -1522,14 +1608,61 @@ const prodProtectWindow = 12 * time.Hour
 func loadDeployCache(cachePath string) *DeployCache {
 	dc := &DeployCache{Files: make(map[string]FileCacheEntry), cachePath: cachePath}
 	if data, err := os.ReadFile(cachePath); err == nil {
+		// 标准包装格式（Go 写出，Rust 已兼容）：{"files":{...},"sessionTime":N,"releasedHashes":{...}}
 		var wrapper DeployCacheFile
 		if err := json.Unmarshal(data, &wrapper); err == nil && wrapper.Files != nil {
 			dc.Files = wrapper.Files
 			dc.SessionTime = wrapper.SessionTime
 			dc.ReleasedHashes = wrapper.ReleasedHashes
-		} else if err := json.Unmarshal(data, &dc.Files); err != nil {
-			// 兼容旧版直接序列化 Files 的扁平格式
-			fmt.Printf("⚠️  部署缓存解析失败，将重建缓存: %v\n", err)
+			return dc
+		}
+
+		// Rust 版扁平格式：文件条目与 __sessionTime / __releasedHashes 元数据键平级
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err == nil && len(raw) > 0 {
+			parsed := 0
+			for key, val := range raw {
+				switch key {
+				case "__sessionTime", "sessionTime":
+					var t int64
+					if json.Unmarshal(val, &t) == nil {
+						dc.SessionTime = t
+					}
+				case "__releasedHashes", "releasedHashes":
+					var arr []string
+					if json.Unmarshal(val, &arr) == nil && arr != nil {
+						dc.ReleasedHashes = make(map[string]bool, len(arr))
+						for _, name := range arr {
+							dc.ReleasedHashes[name] = true
+						}
+					} else {
+						var obj map[string]bool
+						if json.Unmarshal(val, &obj) == nil && obj != nil {
+							dc.ReleasedHashes = obj
+						}
+					}
+				default:
+					var entry FileCacheEntry
+					if json.Unmarshal(val, &entry) == nil && entry.Hash != "" {
+						dc.Files[key] = entry
+						parsed++
+					}
+				}
+			}
+			if parsed > 0 {
+				return dc
+			}
+		}
+
+		// 旧版扁平格式（无元数据键）
+		var legacy map[string]FileCacheEntry
+		if err := json.Unmarshal(data, &legacy); err == nil && legacy != nil {
+			dc.Files = legacy
+			return dc
+		}
+
+		if len(dc.Files) == 0 {
+			fmt.Printf("⚠️  部署缓存解析失败，将重建缓存: 无法识别的缓存格式\n")
 			dc.Files = make(map[string]FileCacheEntry)
 		}
 	}
@@ -1779,7 +1912,129 @@ const htmlProtectWindow = 24 * time.Hour
 const htmlProtectMaxRevisions = 50
 
 var reHashedBasename = regexp.MustCompile(`[A-Za-z0-9_-]+\.[a-f0-9]{4,64}\.[A-Za-z0-9]+`)
+var reHashedBasenameParts = regexp.MustCompile(`^([A-Za-z0-9_-]+)\.[a-f0-9]{4,64}\.([A-Za-z0-9]+)$`)
 var reHashedCSSPath = regexp.MustCompile(`[/\w.-]+\.[a-f0-9]{4,64}\.css`)
+
+// historyLogTrace dest 历史查询追踪（dry-run 时打开，打印实际执行的命令与结果），
+// 默认空实现；诊断走的是与生产完全相同的查询代码路径
+var historyLogTrace = func(format string, args ...interface{}) {}
+
+// destRepoKind 目标目录所属的版本控制系统类型
+type destRepoKind int
+
+const (
+	destRepoUnknown destRepoKind = iota
+	destRepoGit
+	destRepoSvn
+)
+
+func (k destRepoKind) String() string {
+	switch k {
+	case destRepoGit:
+		return "Git"
+	case destRepoSvn:
+		return "SVN"
+	}
+	return "未知"
+}
+
+// detectDestRepoKind 探测目录所属版本控制系统：优先 Git，其次 SVN。
+// 部署目标在 Git 仓库子目录（如 res/wap）下时 git 命令依然有效
+func detectDestRepoKind(dir string) destRepoKind {
+	if dir == "" {
+		return destRepoUnknown
+	}
+	if isGitRepo(dir) {
+		return destRepoGit
+	}
+	if isSvnRepo(dir) {
+		return destRepoSvn
+	}
+	return destRepoUnknown
+}
+
+// detectRepoKindForPath 按文件所在目录探测仓库类型
+func detectRepoKindForPath(wcPath string) destRepoKind {
+	return detectDestRepoKind(filepath.Dir(wcPath))
+}
+
+// destHTMLHistoryRevisions 按目标仓库类型分发历史版本查询：
+// 查询文件在 since 之后的所有提交（Git 完整 hash / SVN 版本号），
+// 外加窗口边界前最后一次提交（该版本在窗口开始时仍在线上）。
+// 返回按时间从新到旧排列；声明为 var 以便测试注入
+var destHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]string, error) {
+	switch detectRepoKindForPath(wcPath) {
+	case destRepoGit:
+		return gitHTMLHistoryRevisions(wcPath, since, maxRevs)
+	case destRepoSvn:
+		return svnHTMLHistoryRevisions(wcPath, since, maxRevs)
+	}
+	return nil, fmt.Errorf("目标目录既不是 Git 也不是 SVN 仓库: %s", filepath.Dir(wcPath))
+}
+
+// gitHTMLHistoryRevisions Git 实现：git log 窗口内提交 + git rev-list 边界提交
+func gitHTMLHistoryRevisions(wcPath string, since time.Time, maxRevs int) ([]string, error) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil, fmt.Errorf("未找到git命令")
+	}
+	dir := filepath.Dir(wcPath)
+	name := filepath.Base(wcPath)
+	sinceStr := since.Format("2006-01-02T15:04:05")
+
+	cmd := exec.Command("git", "log", "--format=%H", "--since="+sinceStr, "--", name)
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	commits := parseGitHashLines(string(output))
+	historyLogTrace("  [git log] 窗口内版本查询: git log --format=%%H --since=%s -- %s", sinceStr, name)
+	for _, c := range commits {
+		historyLogTrace("      %s", c)
+	}
+	if len(commits) == 0 {
+		historyLogTrace("      (窗口内无提交)")
+	}
+
+	// 窗口边界前最后一次提交：该版本在窗口开始时仍在线上，同样需保护。
+	// 长寿命版本（如 9/8 上线、9/24 才被替换）只出现在这里，查询失败必须
+	// 中止本次清理，漏掉边界版本会误删仍在被缓存用户请求的上一生产版本
+	boundaryCmd := exec.Command("git", "rev-list", "-1", "--before="+sinceStr, "HEAD", "--", name)
+	boundaryCmd.Dir = dir
+	boundaryOut, boundaryErr := boundaryCmd.Output()
+	if boundaryErr != nil {
+		return nil, fmt.Errorf("查询窗口边界版本失败: %w", boundaryErr)
+	}
+
+	boundaryCommit := strings.TrimSpace(string(boundaryOut))
+	historyLogTrace("  [git rev-list] 窗口边界版本查询: git rev-list -1 --before=%s HEAD -- %s", sinceStr, name)
+	if boundaryCommit != "" {
+		dup := false
+		for _, c := range commits {
+			if c == boundaryCommit {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			commits = append(commits, boundaryCommit)
+			historyLogTrace("      → 边界版本 %s（窗口开始时仍在线上，须保护）", boundaryCommit)
+		} else {
+			historyLogTrace("      → 边界版本 %s 与窗口内版本重复，无需重复加入", boundaryCommit)
+		}
+	} else {
+		historyLogTrace("      (窗口开始前该文件无提交，无边界版本)")
+	}
+
+	if len(commits) == 0 {
+		return nil, fmt.Errorf("窗口内无提交历史")
+	}
+	if len(commits) > maxRevs {
+		return nil, fmt.Errorf("窗口内版本数 %d 超过上限 %d", len(commits), maxRevs)
+	}
+	return commits, nil
+}
 
 // svnXMLLog svn log --xml 输出结构（仅解析所需字段）
 type svnXMLLog struct {
@@ -1790,14 +2045,8 @@ type svnXMLLog struct {
 	} `xml:"logentry"`
 }
 
-// svnLogTrace svn 历史查询追踪（dry-run 时打开，打印实际执行的命令与结果），
-// 默认空实现；诊断走的是与生产完全相同的查询代码路径
-var svnLogTrace = func(format string, args ...interface{}) {}
-
-// svnHTMLHistoryRevisions 查询文件在 since 之后的所有提交版本号，
-// 外加窗口边界前最后一次提交（该版本在窗口开始时仍在线上）。
-// 返回按时间从新到旧排列；声明为 var 以便测试注入
-var svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]int64, error) {
+// svnHTMLHistoryRevisions SVN 实现：svn log 窗口内版本 + 窗口边界前最后版本
+func svnHTMLHistoryRevisions(wcPath string, since time.Time, maxRevs int) ([]string, error) {
 	if _, err := exec.LookPath("svn"); err != nil {
 		return nil, fmt.Errorf("未找到svn命令")
 	}
@@ -1813,20 +2062,20 @@ var svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) 
 		return nil, err
 	}
 
-	seen := make(map[int64]bool)
-	revs := make([]int64, 0, len(log.Entries)+1)
-	svnLogTrace("  [svn log] 窗口内版本查询: svn log -r %s:HEAD -l %d %s", sinceStr, maxRevs, filepath.Base(wcPath))
+	seen := make(map[string]bool)
+	revs := make([]string, 0, len(log.Entries)+1)
+	historyLogTrace("  [svn log] 窗口内版本查询: svn log -r %s:HEAD -l %d %s", sinceStr, maxRevs, filepath.Base(wcPath))
 	for _, e := range log.Entries {
-		rev, err := strconv.ParseInt(e.Revision, 10, 64)
-		if err != nil || seen[rev] {
+		rev := strings.TrimSpace(e.Revision)
+		if rev == "" || seen[rev] {
 			continue
 		}
 		seen[rev] = true
 		revs = append(revs, rev)
-		svnLogTrace("      r%d  %s  %s", rev, e.Date, e.Author)
+		historyLogTrace("      r%s  %s  %s", rev, e.Date, e.Author)
 	}
 	if len(revs) == 0 {
-		svnLogTrace("      (窗口内无提交)")
+		historyLogTrace("      (窗口内无提交)")
 	}
 
 	// 窗口边界前最后一次提交：该版本在窗口开始时仍在线上，同样需保护。
@@ -1841,17 +2090,18 @@ var svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) 
 	if err := xml.Unmarshal(boundaryOut, &boundaryLog); err != nil {
 		return nil, fmt.Errorf("解析窗口边界版本失败: %w", err)
 	}
-	svnLogTrace("  [svn log] 窗口边界版本查询: svn log -r %s:1 -l 1 %s", sinceStr, filepath.Base(wcPath))
+	historyLogTrace("  [svn log] 窗口边界版本查询: svn log -r %s:1 -l 1 %s", sinceStr, filepath.Base(wcPath))
 	if len(boundaryLog.Entries) > 0 {
-		if rev, err := strconv.ParseInt(boundaryLog.Entries[0].Revision, 10, 64); err == nil && !seen[rev] {
+		rev := strings.TrimSpace(boundaryLog.Entries[0].Revision)
+		if rev != "" && !seen[rev] {
 			revs = append(revs, rev)
-			svnLogTrace("      → 边界版本 r%d  %s  %s（窗口开始时仍在线上，须保护）",
+			historyLogTrace("      → 边界版本 r%s  %s  %s（窗口开始时仍在线上，须保护）",
 				rev, boundaryLog.Entries[0].Date, boundaryLog.Entries[0].Author)
-		} else if err == nil {
-			svnLogTrace("      → 边界版本 r%d 与窗口内版本重复，无需重复加入", rev)
+		} else if rev != "" {
+			historyLogTrace("      → 边界版本 r%s 与窗口内版本重复，无需重复加入", rev)
 		}
 	} else {
-		svnLogTrace("      (窗口开始前该文件无提交，无边界版本)")
+		historyLogTrace("      (窗口开始前该文件无提交，无边界版本)")
 	}
 
 	if len(revs) == 0 {
@@ -1863,18 +2113,81 @@ var svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) 
 	return revs, nil
 }
 
-// svnCatRevision 读取文件在指定版本的内容；声明为 var 以便测试注入
-var svnCatRevision = func(wcPath string, rev int64) ([]byte, error) {
-	if _, err := exec.LookPath("svn"); err != nil {
-		return nil, fmt.Errorf("未找到svn命令")
+// parseGitHashLines 从 git log 输出解析提交 hash（每行一个）
+func parseGitHashLines(output string) []string {
+	var out []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
 	}
-	cmd := exec.Command("svn", "cat", "-r", strconv.FormatInt(rev, 10), wcPath)
+	return out
+}
+
+// showFileRevision 按目标仓库类型分发：读取文件在指定提交/版本的内容；
+// 声明为 var 以便测试注入
+var showFileRevision = func(wcPath string, commit string) ([]byte, error) {
+	switch detectRepoKindForPath(wcPath) {
+	case destRepoGit:
+		return gitShowRevision(wcPath, commit)
+	case destRepoSvn:
+		return svnCatRevision(wcPath, commit)
+	}
+	return nil, fmt.Errorf("目标目录既不是 Git 也不是 SVN 仓库: %s", filepath.Dir(wcPath))
+}
+
+// gitShowRevision Git 实现（:./ 相对当前目录解析路径）
+func gitShowRevision(wcPath string, commit string) ([]byte, error) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil, fmt.Errorf("未找到git命令")
+	}
+	cmd := exec.Command("git", "show", commit+":./"+filepath.Base(wcPath))
+	cmd.Dir = filepath.Dir(wcPath)
 	return cmd.Output()
 }
 
-// svnLastChangedTime 查询文件在 SVN 中最后一次提交时间（本地工作副本元数据，
-// 不联网）；用于"近期部署过的 hash 先保留一阵"的判定
-var svnLastChangedTime = func(wcPath string) (time.Time, bool) {
+// svnCatRevision SVN 实现：svn cat -r <版本号>
+func svnCatRevision(wcPath string, rev string) ([]byte, error) {
+	if _, err := exec.LookPath("svn"); err != nil {
+		return nil, fmt.Errorf("未找到svn命令")
+	}
+	cmd := exec.Command("svn", "cat", "-r", rev, wcPath)
+	return cmd.Output()
+}
+
+// destFileCommitTime 按目标仓库类型分发：查询文件最后一次提交时间
+// （本地元数据，不联网）；用于"近期部署过的 hash 先保留一阵"的判定
+var destFileCommitTime = func(wcPath string) (time.Time, bool) {
+	switch detectRepoKindForPath(wcPath) {
+	case destRepoGit:
+		return gitFileCommitTime(wcPath)
+	case destRepoSvn:
+		return svnLastChangedTime(wcPath)
+	}
+	return time.Time{}, false
+}
+
+// gitFileCommitTime Git 实现：git log -1 --format=%ct
+func gitFileCommitTime(wcPath string) (time.Time, bool) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return time.Time{}, false
+	}
+	cmd := exec.Command("git", "log", "-1", "--format=%ct", "--", filepath.Base(wcPath))
+	cmd.Dir = filepath.Dir(wcPath)
+	output, err := cmd.Output()
+	if err != nil {
+		return time.Time{}, false
+	}
+	secs, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(secs, 0), true
+}
+
+// svnLastChangedTime SVN 实现：解析 svn info --xml 的最后提交时间
+func svnLastChangedTime(wcPath string) (time.Time, bool) {
 	if _, err := exec.LookPath("svn"); err != nil {
 		return time.Time{}, false
 	}
@@ -1982,7 +2295,7 @@ func (dm *DeployManager) diagnoseHashRetention(protected map[string]bool) {
 				return nil
 			}
 			if d.IsDir() {
-				if d.Name() == ".svn" {
+				if d.Name() == ".svn" || d.Name() == ".git" {
 					return filepath.SkipDir
 				}
 				return nil
@@ -2003,7 +2316,7 @@ func (dm *DeployManager) diagnoseHashRetention(protected map[string]bool) {
 			case protected[name]:
 				refProtected = append(refProtected, name)
 			default:
-				if commitTime, ok := svnLastChangedTime(path); ok &&
+				if commitTime, ok := destFileCommitTime(path); ok &&
 					time.Since(commitTime) < htmlProtectWindow {
 					recentKept = append(recentKept, name+" (提交于 "+commitTime.Local().Format("01-02 15:04")+")")
 				} else {
@@ -2031,7 +2344,7 @@ func (dm *DeployManager) diagnoseHashRetention(protected map[string]bool) {
 	}
 }
 
-// indexDestFiles 建立 dest 下文件 basename → 完整路径 索引（跳过 .svn 目录）
+// indexDestFiles 建立 dest 下文件 basename → 完整路径 索引（跳过 .svn/.git 目录）
 func indexDestFiles(destPath string) (map[string]string, error) {
 	index := make(map[string]string)
 	err := filepath.WalkDir(destPath, func(path string, d fs.DirEntry, err error) error {
@@ -2039,7 +2352,7 @@ func indexDestFiles(destPath string) (map[string]string, error) {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == ".svn" {
+			if d.Name() == ".svn" || d.Name() == ".git" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -2071,7 +2384,7 @@ func deriveHistoryRelPath(match string, cdnPrefix string) string {
 //   - 再回溯 htmlProtectWindow 内提交过的每个 HTML 版本，引用同样保留
 //     （覆盖缓存里还拿着旧版 HTML 的用户）
 //   - 其中引用的带 hash CSS，其内容里的 url(...) 带 hash 图片同样保护
-//   - 任何 SVN 查询失败返回 ok=false（调用方跳过本次清理，宁可多留不可误删）
+//   - 任何 git 查询失败返回 ok=false（调用方跳过本次清理，宁可多留不可误删）
 func (dm *DeployManager) buildProtectedHashes() (map[string]bool, bool) {
 	htmlFiles := dm.deployedHTMLFiles()
 	if len(htmlFiles) == 0 {
@@ -2086,15 +2399,15 @@ func (dm *DeployManager) buildProtectedHashes() (map[string]bool, bool) {
 	protected := make(map[string]bool)
 	since := time.Now().Add(-htmlProtectWindow)
 	for _, htmlPath := range htmlFiles {
-		revs, err := svnHTMLHistoryRevisions(htmlPath, since, htmlProtectMaxRevisions)
+		commits, err := destHTMLHistoryRevisions(htmlPath, since, htmlProtectMaxRevisions)
 		if err != nil {
 			fmt.Printf("⚠️  获取HTML历史版本失败 %s: %v，本次跳过旧hash清理\n", filepath.Base(htmlPath), err)
 			return nil, false
 		}
-		for _, rev := range revs {
-			content, err := svnCatRevision(htmlPath, rev)
+		for _, commit := range commits {
+			content, err := showFileRevision(htmlPath, commit)
 			if err != nil {
-				fmt.Printf("⚠️  读取HTML历史内容失败 %s@%d: %v，本次跳过旧hash清理\n", filepath.Base(htmlPath), rev, err)
+				fmt.Printf("⚠️  读取HTML历史内容失败 %s@%s: %v，本次跳过旧hash清理\n", filepath.Base(htmlPath), commit, err)
 				return nil, false
 			}
 			contentStr := string(content)
@@ -2107,9 +2420,9 @@ func (dm *DeployManager) buildProtectedHashes() (map[string]bool, bool) {
 			// 2. 引用的带 hash CSS：其内容里的 url(...) 带 hash 图片同样保护
 			for _, cssMatch := range reHashedCSSPath.FindAllString(contentStr, -1) {
 				cssBase := filepath.Base(cssMatch)
-				images, ok := dm.fetchCSSImageRefs(cssMatch, cssBase, rev, destIndex)
+				images, ok := dm.fetchCSSImageRefs(cssMatch, cssBase, commit, destIndex)
 				if !ok {
-					fmt.Printf("⚠️  获取CSS历史内容失败 %s@%d，本次跳过旧hash清理\n", cssBase, rev)
+					fmt.Printf("⚠️  获取CSS历史内容失败 %s@%s，本次跳过旧hash清理\n", cssBase, commit)
 					return nil, false
 				}
 				for _, img := range images {
@@ -2123,8 +2436,8 @@ func (dm *DeployManager) buildProtectedHashes() (map[string]bool, bool) {
 
 // fetchCSSImageRefs 获取历史版本 CSS 内容中引用的带 hash 图片名。
 // hash 文件名即内容指纹（同名同内容），CSS 优先读 dest 本地副本；
-// 本地不存在时按 HTML 中的路径线索从 SVN 历史读取
-func (dm *DeployManager) fetchCSSImageRefs(cssMatch, cssBase string, rev int64, destIndex map[string]string) ([]string, bool) {
+// 本地不存在时按 HTML 中的路径线索从 git 历史读取
+func (dm *DeployManager) fetchCSSImageRefs(cssMatch, cssBase string, commit string, destIndex map[string]string) ([]string, bool) {
 	var content []byte
 	if cssPath, found := destIndex[cssBase]; found {
 		data, err := os.ReadFile(cssPath)
@@ -2137,7 +2450,7 @@ func (dm *DeployManager) fetchCSSImageRefs(cssMatch, cssBase string, rev int64, 
 		if relPath == "" || relPath == cssBase {
 			return nil, false
 		}
-		data, err := svnCatRevision(filepath.Join(dm.destPath, filepath.FromSlash(relPath)), rev)
+		data, err := showFileRevision(filepath.Join(dm.destPath, filepath.FromSlash(relPath)), commit)
 		if err != nil {
 			return nil, false
 		}
@@ -2193,8 +2506,8 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 			filePath := filepath.Join(destDir, file.Name())
 			// 第二条保护规则：近期部署产生的 hash 先保留一阵。
 			// 部分旧 hash 在仓库里已无任何引用（引用它的缓存页面/仓库外页面无法
-			// 从 SVN 证明），只能按提交时间保留最近若干轮部署的产物
-			if commitTime, ok := svnLastChangedTime(filePath); ok &&
+			// 从 git 历史证明），只能按提交时间保留最近若干轮部署的产物
+			if commitTime, ok := destFileCommitTime(filePath); ok &&
 				time.Since(commitTime) < htmlProtectWindow {
 				if isJSOrCSS(file.Name()) {
 					fmt.Printf("    🛡️  保留(近期部署/提交于 %s): %s\n",
@@ -2203,7 +2516,7 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 				continue
 			}
 			// 不在任何保护名单内的旧 hash（灰度中间产物、过期现网版）直接清理
-			vcsSvnDelete(filePath, dm.debugMode)
+			vcsDestDelete(filePath, dm.debugMode)
 			if err := os.Remove(filePath); err == nil {
 				deletedCount++
 				if isJSOrCSS(file.Name()) {
@@ -2216,8 +2529,115 @@ func (dm *DeployManager) cleanHashFiles(destPath, keepFileName string) int {
 	return deletedCount
 }
 
+// cleanHashOnly 独立清理模式：不部署复制，仅清理 dest 中配置目标范围内的旧
+// hash 文件。保护语义与部署时完全一致：当前现网版本、HTML 历史引用（24h 窗口）、
+// 会话基线、近期部署兜底；任何保护机制不可用则本次不清理（宁可多留不可误删）。
+func (dm *DeployManager) cleanHashOnly() error {
+	fmt.Println("🧹 开始清理 dest 旧 hash 文件（仅清理，不部署）")
+	destKind := detectDestRepoKind(dm.destPath)
+	fmt.Printf("📂 目标路径: %s（仓库类型: %s）\n\n", dm.destPath, destKind)
+
+	// 先更新 dest 仓库，保证历史保护查询基于最新提交
+	switch destKind {
+	case destRepoGit:
+		if err := dm.updateDestGit(); err != nil {
+			fmt.Printf("⚠️  dest Git 拉取失败: %v，继续清理...\n", err)
+		}
+	case destRepoSvn:
+		if err := dm.updateSvnRepo(); err != nil {
+			fmt.Printf("⚠️  SVN更新失败: %v，继续清理...\n", err)
+		}
+	default:
+		fmt.Printf("⚠️  目标目录未识别为 Git/SVN 仓库: %s\n", dm.destPath)
+	}
+
+	// 现网快照 + 会话基线（失败/首次记录时 skipCleanup 置位）
+	dm.prepareDeploySession()
+	if dm.skipCleanup {
+		fmt.Println("ℹ️  现网快照不可用或首次记录，本次清理取消（宁可多留不可误删）")
+		return nil
+	}
+
+	// HTML 历史保护名单
+	if protected, ok := dm.buildProtectedHashes(); ok {
+		dm.protectedHashes = protected
+		if dm.debugMode {
+			fmt.Printf("🛡️  HTML历史保护名单: %d 个资源\n", len(protected))
+		}
+	} else {
+		fmt.Println("⚠️  无法构建HTML历史保护名单，本次清理取消（宁可多留不可误删）")
+		return nil
+	}
+
+	fmt.Println("📦 开始清理...")
+	totalDeleted := 0
+	for _, fp := range dm.config.FilePaths {
+		if strings.Contains(fp, "*") {
+			deleted, err := dm.cleanWildcardPath(fp)
+			if err != nil {
+				fmt.Printf("⚠️  处理失败: %s - %v\n", fp, err)
+				continue
+			}
+			totalDeleted += deleted
+		} else {
+			rel := strings.TrimPrefix(fp, "/")
+			destFile := filepath.Join(dm.destPath, filepath.FromSlash(rel))
+			totalDeleted += dm.cleanHashFiles(destFile, "")
+		}
+	}
+
+	fmt.Printf("\n%s\n", strings.Repeat("=", 50))
+	fmt.Printf("🧹 清理完成: 共清理 %d 个旧 hash 文件\n", totalDeleted)
+	fmt.Printf("%s\n\n", strings.Repeat("=", 50))
+	dm.openFolder()
+	return nil
+}
+
+// cleanWildcardPath 清理通配符目标目录下的旧 hash 文件（不部署复制）。
+// 以 dest 目录为准遍历（源目录可能已删除部分文件，dest 中遗留的也要清），
+// 对每个带 hash 的文件还原其 base 文件路径，调用 cleanHashFiles 清理
+// 同 base 的所有未受保护 hash 变体
+func (dm *DeployManager) cleanWildcardPath(wildcardPath string) (int, error) {
+	dirPath := strings.TrimSuffix(wildcardPath, "/*")
+	destDirPath := filepath.Join(dm.destPath, dirPath)
+	if !fileExists(destDirPath) {
+		return 0, fmt.Errorf("目标目录不存在: %s", destDirPath)
+	}
+
+	total := 0
+	seen := make(map[string]bool)
+	err := filepath.WalkDir(destDirPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" || d.Name() == ".svn" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		m := reHashedBasenameParts.FindStringSubmatch(d.Name())
+		if m == nil {
+			return nil
+		}
+		base := m[1] + "." + m[2]
+		if seen[base] {
+			return nil
+		}
+		seen[base] = true
+		destFile := filepath.Join(filepath.Dir(path), base)
+		total += dm.cleanHashFiles(destFile, "")
+		return nil
+	})
+	return total, err
+}
+
 // copyFileWithVersions 复制文件（包括hash版本）
 func (dm *DeployManager) copyFileWithVersions(sourcePath, destPath string) (int, int, error) {
+	// CDN无hash模式（mode 16/17）：只复制原始文件，不查找/复制hash版本，不清理
+	if dm.noHash {
+		return dm.copyBaseFileOnly(sourcePath, destPath)
+	}
 	versions := dm.findAllFileVersions(sourcePath)
 
 	if len(versions) == 0 {
@@ -2376,6 +2796,27 @@ func (dm *DeployManager) handleWildcardPath(wildcardPath string) (int, int, erro
 	return totalCopied, totalSkipped, nil
 }
 
+// copyBaseFileOnly 无hash模式部署：仅复制原始文件到 dest
+// （跳过hash版本查找与旧hash清理，缓存照常更新）
+func (dm *DeployManager) copyBaseFileOnly(sourcePath, destPath string) (int, int, error) {
+	sourceFullPath := filepath.Join(dm.sourcePath, sourcePath)
+	if !fileExists(sourceFullPath) {
+		return 0, 0, fmt.Errorf("源文件不存在: %s", sourcePath)
+	}
+	if err := copyFile(sourceFullPath, destPath); err != nil {
+		return 0, 0, err
+	}
+	if info, err := os.Stat(sourceFullPath); err == nil {
+		if hash, hashErr := getFileHash(sourceFullPath); hashErr == nil {
+			dm.cache.updateCache(destPath, hash, info.Size(), info.ModTime().UnixNano())
+		}
+	}
+	if dm.debugMode {
+		fmt.Printf("  📄 无hash复制: %s\n", filepath.Base(destPath))
+	}
+	return 1, 0, nil
+}
+
 // isSvnRepo 检查是否是SVN仓库
 func isSvnRepo(dir string) bool {
 	cmd := exec.Command("svn", "info")
@@ -2522,6 +2963,80 @@ func (dm *DeployManager) svnCommit(message string) error {
 	return nil
 }
 
+// updateDestGit 拉取 dest git 仓库远程 master 分支
+func (dm *DeployManager) updateDestGit() error {
+	fmt.Printf("🔄 正在拉取 dest Git 仓库 (origin master): %s\n", dm.destPath)
+
+	cmd := exec.Command("git", "pull", "origin", "master")
+	cmd.Dir = dm.destPath
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git pull 失败: %s", strings.TrimSpace(string(output)))
+	}
+
+	fmt.Printf("✅ dest Git 拉取成功\n%s\n", string(output))
+	return nil
+}
+
+// commitAndPushDest 提交 dest git 仓库的所有变更并推送远程 master。
+// git add -A 自动暂存新增/修改/删除；push 失败时按约定尝试本机 7890 代理重试
+func (dm *DeployManager) commitAndPushDest(message string) error {
+	fmt.Printf("📤 正在提交 dest Git 更改...\n")
+	fmt.Printf("   提交信息: %s\n", message)
+
+	addCmd := exec.Command("git", "add", "-A")
+	addCmd.Dir = dm.destPath
+	if output, err := addCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add 失败: %s", string(output))
+	}
+
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = dm.destPath
+	statusOut, err := statusCmd.Output()
+	if err != nil {
+		return fmt.Errorf("获取git状态失败: %v", err)
+	}
+	if strings.TrimSpace(string(statusOut)) == "" {
+		fmt.Println("ℹ️  没有需要提交的更改")
+		return nil
+	}
+
+	commitCmd := exec.Command("git", "commit", "-m", message)
+	commitCmd.Dir = dm.destPath
+	if output, err := commitCmd.CombinedOutput(); err != nil {
+		combined := string(output)
+		if strings.Contains(combined, "nothing to commit") {
+			fmt.Println("ℹ️  没有需要提交的更改")
+			return nil
+		}
+		return fmt.Errorf("git commit 失败: %s", combined)
+	}
+	fmt.Printf("✅ git commit 成功\n")
+
+	pushCmd := exec.Command("git", "push", "origin", "master")
+	pushCmd.Dir = dm.destPath
+	pushCmd.Stdout = os.Stdout
+	pushCmd.Stderr = os.Stderr
+	if err := pushCmd.Run(); err != nil {
+		// 按约定：push 失败时尝试走本机 7890 代理重试
+		fmt.Println("⚠️  push 失败，尝试使用本机代理 http://127.0.0.1:7890 重试...")
+		retryCmd := exec.Command("git", "push", "origin", "master")
+		retryCmd.Dir = dm.destPath
+		retryCmd.Env = append(os.Environ(),
+			"HTTPS_PROXY=http://127.0.0.1:7890",
+			"HTTP_PROXY=http://127.0.0.1:7890")
+		retryCmd.Stdout = os.Stdout
+		retryCmd.Stderr = os.Stderr
+		if retryErr := retryCmd.Run(); retryErr != nil {
+			return fmt.Errorf("git push 失败（含代理重试）: %v", retryErr)
+		}
+	}
+
+	fmt.Printf("✅ git push 成功\n")
+	return nil
+}
+
 // revertAllSvn 回退dest SVN工作副本的所有本地变更（递归 svn revert）
 // 恢复已修改的文件、撤销已标记的 svn add/delete，将工作副本还原到上次提交状态
 func (dm *DeployManager) revertAllSvn() error {
@@ -2633,6 +3148,72 @@ func (dm *DeployManager) revertSrcGit() error {
 	return nil
 }
 
+// revertDestGit 回退 dest git 仓库的所有本地变更。
+// git reset --hard HEAD 恢复已跟踪文件的修改并清空暂存区（含删除标记），
+// git clean -fd 移除未跟踪的新增文件/目录，整体还原到上次提交状态
+func (dm *DeployManager) revertDestGit() error {
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("🔄 回退 dest Git 的所有本地变更")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("📂 目标路径: %s\n", dm.destPath)
+
+	if dm.destPath == "" {
+		return fmt.Errorf("未配置dest路径（请检查 version.config.json 中的 deploy.homeDestPath / deploy.companyDestPath）")
+	}
+
+	if !isGitRepo(dm.destPath) {
+		return fmt.Errorf("目标路径不是Git仓库: %s", dm.destPath)
+	}
+
+	// 先查看当前待提交的状态，便于确认回退内容
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = dm.destPath
+	if statusOut, statusErr := statusCmd.Output(); statusErr == nil {
+		statusStr := strings.TrimSpace(string(statusOut))
+		if statusStr == "" {
+			fmt.Println("ℹ️  当前没有待提交的本地变更，无需回退")
+			fmt.Println(strings.Repeat("=", 60))
+			return nil
+		}
+		fmt.Println("📋 待回退的本地变更:")
+		fmt.Println(statusStr)
+	}
+
+	fmt.Println("\n⏳ 正在执行 git reset --hard HEAD ...")
+	resetCmd := exec.Command("git", "reset", "--hard", "HEAD")
+	resetCmd.Dir = dm.destPath
+	resetCmd.Stdout = os.Stdout
+	resetCmd.Stderr = os.Stderr
+	if err := resetCmd.Run(); err != nil {
+		return fmt.Errorf("git reset --hard 失败: %v", err)
+	}
+
+	fmt.Println("⏳ 正在执行 git clean -fd ...")
+	cleanCmd := exec.Command("git", "clean", "-fd")
+	cleanCmd.Dir = dm.destPath
+	cleanCmd.Stdout = os.Stdout
+	cleanCmd.Stderr = os.Stderr
+	if err := cleanCmd.Run(); err != nil {
+		return fmt.Errorf("git clean 失败: %v", err)
+	}
+
+	fmt.Println("✅ dest Git 的所有本地变更已回退")
+	fmt.Println(strings.Repeat("=", 60))
+	return nil
+}
+
+// revertDestVcs 按目标仓库类型分发回退：Git → reset --hard + clean，
+// SVN → 递归 svn revert + 清理未版本化文件
+func (dm *DeployManager) revertDestVcs() error {
+	switch detectDestRepoKind(dm.destPath) {
+	case destRepoSvn:
+		return dm.revertAllSvn()
+	case destRepoGit:
+		return dm.revertDestGit()
+	}
+	return fmt.Errorf("目标路径不是 Git/SVN 仓库: %s", dm.destPath)
+}
+
 // openFolderInOS 跨平台打开文件夹
 func openFolderInOS(path string) error {
 	var cmd *exec.Cmd
@@ -2671,7 +3252,8 @@ func (dm *DeployManager) openFolder() {
 func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath string, cdnDomain string) error {
 	fmt.Println("🚀 开始部署操作...")
 	fmt.Printf("📂 源路径: %s\n", dm.sourcePath)
-	fmt.Printf("📂 目标路径: %s\n\n", dm.destPath)
+	destKind := detectDestRepoKind(dm.destPath)
+	fmt.Printf("📂 目标路径: %s（仓库类型: %s）\n\n", dm.destPath, destKind)
 
 	// 文件hash缓存
 	fmt.Printf("💾 已加载文件缓存: %d 个条目\n\n", len(dm.cache.Files))
@@ -2694,11 +3276,18 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 		}
 	}
 
-	// 先更新SVN仓库
-	if isSvnRepo(dm.destPath) {
+	// 按目标仓库类型更新（Git pull / SVN update）
+	switch destKind {
+	case destRepoGit:
+		if err := dm.updateDestGit(); err != nil {
+			fmt.Printf("⚠️  dest Git 拉取失败: %v，继续部署...\n", err)
+		}
+	case destRepoSvn:
 		if err := dm.updateSvnRepo(); err != nil {
 			fmt.Printf("⚠️  SVN更新失败: %v，继续部署...\n", err)
 		}
+	default:
+		fmt.Printf("⚠️  目标目录未识别为 Git/SVN 仓库，跳过远程更新: %s\n", dm.destPath)
 	}
 
 	// 部署前抓现网快照，确定本次保留名单
@@ -2772,32 +3361,47 @@ func (dm *DeployManager) Run(autoCommit bool, commitMessage string, htmlPath str
 	}
 	fmt.Printf("%s\n\n", strings.Repeat("=", 50))
 
-	// 自动提交
-	if autoCommit && isSvnRepo(dm.destPath) {
-		svnMessage := ""
-		if commitMessage != "" {
-			// 使用自定义提交信息
-			svnMessage = commitMessage
-			fmt.Printf("\n📝 使用自定义提交信息: %s\n", svnMessage)
-		} else {
-			// 使用Git最新提交信息
-			hash, message, err := dm.getLatestGitCommit()
-			if err != nil {
-				fmt.Printf("⚠️  获取Git提交信息失败: %v\n", err)
-				fmt.Println("💡 请手动提交SVN更改")
-				return nil
-			}
-			svnMessage = message
-			fmt.Printf("\n📝 Git提交: %s - %s\n", hash, message)
+	// 自动提交（按目标仓库类型选择提交方式）
+	if autoCommit {
+		var commitFn func(string) error
+		var repoLabel string
+		switch destKind {
+		case destRepoGit:
+			commitFn = dm.commitAndPushDest
+			repoLabel = "Git"
+		case destRepoSvn:
+			commitFn = dm.svnCommit
+			repoLabel = "SVN"
 		}
 
-		fmt.Println("⏳ 2秒后开始提交...")
-		time.Sleep(2 * time.Second)
-
-		if err := dm.svnCommit(svnMessage); err != nil {
-			fmt.Printf("❌ 自动提交失败: %v\n", err)
+		if commitFn == nil {
+			fmt.Printf("⚠️  目标目录未识别为 Git/SVN 仓库，跳过自动提交: %s\n", dm.destPath)
 		} else {
-			fmt.Println("🎉 自动提交完成！")
+			destMessage := ""
+			if commitMessage != "" {
+				// 使用自定义提交信息
+				destMessage = commitMessage
+				fmt.Printf("\n📝 使用自定义提交信息: %s\n", destMessage)
+			} else {
+				// 使用Git最新提交信息
+				hash, message, err := dm.getLatestGitCommit()
+				if err != nil {
+					fmt.Printf("⚠️  获取Git提交信息失败: %v\n", err)
+					fmt.Println("💡 请手动提交更改")
+					return nil
+				}
+				destMessage = message
+				fmt.Printf("\n📝 Git提交: %s - %s\n", hash, message)
+			}
+
+			fmt.Println("⏳ 2秒后开始提交...")
+			time.Sleep(2 * time.Second)
+
+			if err := commitFn(destMessage); err != nil {
+				fmt.Printf("❌ 自动提交失败: %v\n", err)
+			} else {
+				fmt.Printf("🎉 自动提交完成！（%s）\n", repoLabel)
+			}
 		}
 	}
 
@@ -2858,6 +3462,7 @@ func (vm *VersionManager) runDeploy() {
 	fmt.Println(strings.Repeat("=", 60))
 
 	dm := NewDeployManager(vm.config.Deploy, vm.debugMode)
+	dm.noHash = vm.config.NoHash
 
 	autoCommit := vm.config.Deploy.AutoCommit
 	if vm.config.Deploy.Command == "copy-commit" {
@@ -3138,6 +3743,14 @@ func loadConfig(configPath string) (*Config, error) {
 }
 
 func main() {
+	logFile, logErr := initLogFile(20)
+	if logErr == nil {
+		defer logFile.Close()
+		fmt.Printf("📝 日志文件: %s\n\n", logFile.Name())
+	} else {
+		fmt.Printf("⚠️  日志文件创建失败（仅控制台输出）: %v\n\n", logErr)
+	}
+
 	configPath := flag.String("config", "version.config.json", "配置文件路径")
 	htmlFile := flag.String("file", "", "单个HTML文件路径（命令行指定，优先级高于配置文件）")
 	scanAll := flag.Bool("all", false, "扫描所有HTML文件")
@@ -3145,9 +3758,10 @@ func main() {
 	debugMode := flag.Bool("debug", false, "调试模式（显示详细日志）")
 	deployOnly := flag.Bool("deploy", false, "仅执行部署（不处理hash）")
 	deployCommit := flag.Bool("deploy-commit", false, "部署并自动提交")
-	deployMode := flag.Int("mode", 6, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles)")
+	deployMode := flag.Int("mode", 6, "部署模式：1=pre-script+copy, 2=pre-script+copy-commit, 3=pre-script+copy-commit+回滚HTML+git commit&push, 4=不替换CDN+copy, 5=不替换CDN+copy-commit, 6=不替换CDN+copy-commit+回滚HTML+git commit&push, 7=copy(排除cdnExcludeFiles), 8=copy-commit(排除cdnExcludeFiles), 9=copy-commit+回滚HTML+git commit&push(排除cdnExcludeFiles), 16=CDN替换+跳过hash+copy, 17=CDN替换+跳过hash+copy-commit")
 	commitMessage := flag.String("message", "", "自定义SVN提交信息（不指定则使用Git最新提交信息）")
-	revertSvn := flag.Bool("revert-svn", false, "回退dest SVN工作副本的所有本地变更（递归 svn revert）")
+	revertSvn := flag.Bool("revert-svn", false, "回退dest仓库的所有本地变更（自动识别 Git/SVN；Git 用 reset --hard + clean，SVN 用递归 revert）")
+	cleanHash := flag.Bool("clean-hash", false, "仅清理dest旧hash文件（不部署不复制；保护现网/HTML历史/近期部署）")
 	revertGit := flag.Bool("revert-git", false, "回退src Git工作区的所有本地改动（git reset --hard HEAD + git clean -fd）")
 	dryRun := flag.Bool("dry-run", false, "预览模式（只显示将要执行的操作，不实际修改文件）")
 
@@ -3222,6 +3836,18 @@ func main() {
 			config.RollbackAfterDeploy = true    // 回滚HTML
 			config.GitCommitAfterRollback = true // 回滚后执行git commit和push
 			config.CDNExcludeFiles = []string{}  // 清空CDN排除文件
+		case 16:
+			// CDN替换 + 跳过hash：保留CDN域名，部署只复制原始文件
+			config.Deploy.AutoCommit = false
+			config.Deploy.ForcePreScript = false
+			config.Deploy.Command = "copy"
+			config.NoHash = true
+		case 17:
+			// CDN替换 + 跳过hash + 自动提交
+			config.Deploy.AutoCommit = true
+			config.Deploy.ForcePreScript = false
+			config.Deploy.Command = "copy-commit"
+			config.NoHash = true
 		}
 	}
 	// deployMode
@@ -3259,7 +3885,7 @@ func main() {
 		fmt.Printf("\n🛡️  === 旧hash保留诊断（只读）===\n")
 		fmt.Printf("  保护窗口: %v（用户 HTML 缓存约 12h，取 2 倍保险）\n", htmlProtectWindow)
 		dm := NewDeployManager(config.Deploy, true)
-		svnLogTrace = func(format string, args ...interface{}) { fmt.Printf(format+"\n", args...) }
+		historyLogTrace = func(format string, args ...interface{}) { fmt.Printf(format+"\n", args...) }
 		if protected, ok := dm.buildProtectedHashes(); ok {
 			fmt.Printf("\n  ✅ 保护名单构建成功: %d 个资源\n", len(protected))
 			names := make([]string, 0, len(protected))
@@ -3274,7 +3900,7 @@ func main() {
 		} else {
 			fmt.Printf("\n  ⚠️ 保护名单构建失败 —— 生产环境本次部署将跳过旧hash清理（不删任何文件）\n")
 		}
-		svnLogTrace = func(format string, args ...interface{}) {}
+		historyLogTrace = func(format string, args ...interface{}) {}
 
 		fmt.Println("  （预览模式，不执行实际操作）")
 		return
@@ -3287,11 +3913,11 @@ func main() {
 		vm.commitMessage = *commitMessage
 	}
 
-	// 回退本地变更：-revert-svn 回退dest SVN，-revert-git 回退src Git，可同时使用
+	// 回退本地变更：-revert-svn 回退dest仓库（自动识别 Git/SVN），-revert-git 回退src Git，可同时使用
 	if *revertSvn || *revertGit {
 		dm := NewDeployManager(config.Deploy, *debugMode)
 		if *revertSvn {
-			if err := dm.revertAllSvn(); err != nil {
+			if err := dm.revertDestVcs(); err != nil {
 				fmt.Printf("❌ SVN回退失败: %v\n", err)
 				os.Exit(1)
 			}
@@ -3301,6 +3927,18 @@ func main() {
 				fmt.Printf("❌ Git回退失败: %v\n", err)
 				os.Exit(1)
 			}
+		}
+		duration := time.Since(startTime)
+		fmt.Printf("\n⏱️  总运行时间: %v\n", duration)
+		return
+	}
+
+	// 仅清理dest旧hash文件：-clean-hash
+	if *cleanHash {
+		dm := NewDeployManager(config.Deploy, *debugMode)
+		if err := dm.cleanHashOnly(); err != nil {
+			fmt.Printf("❌ 清理失败: %v\n", err)
+			os.Exit(1)
 		}
 		duration := time.Since(startTime)
 		fmt.Printf("\n⏱️  总运行时间: %v\n", duration)

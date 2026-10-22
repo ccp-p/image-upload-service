@@ -4,7 +4,7 @@
 
 ## 项目一句话
 
-为 H5 页面（xdrNormal.html 及其组件）生成带 MD5 hash 的静态资源副本，替换 CDN 引用，复制到 SVN 灰度目录并提交。Go 版和 Rust 版功能等价，共享 `version.config.json`。
+为 H5 页面（xdrNormal.html 及其组件）生成带 MD5 hash 的静态资源副本，替换 CDN 引用，复制到灰度目录并提交。部署目标自动识别 Git/SVN 仓库（当前指向 gitHuidu Git 仓库：pull origin master → copy → commit → push）。Go 版和 Rust 版功能等价，共享 `version.config.json`。
 
 ## 体系结构
 

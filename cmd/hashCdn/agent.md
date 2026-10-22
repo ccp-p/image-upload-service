@@ -37,7 +37,7 @@ image-upload-service/                 Go module: image-upload-service
 
 **源路径 (source)**: git 仓库 `richinfo_tyjf_xhmqqthy/src/main/webapp/res/wap`，开发改代码的地方。
 
-**目标路径 (dest)**: SVN 工作副本 `huidu/xhmqqthy-res`，灰度发布目录，文件复制到这里后提交 SVN。
+**目标路径 (dest)**: 灰度发布目录，文件复制到这里后提交。部署时自动识别仓库类型（优先 Git，其次 SVN）：Git 走 `pull origin master` → `add -A` → `commit` → `push origin master`（push 失败走本机 7890 代理重试）；SVN 走原有 `svn update` / `svn commit`。当前指向 Git 仓库 `gitHuidu/xhmqqthy-res/res/wap`。
 
 **组件 (components)**: `includeComponents` 配置项指定只处理哪些组件（如 `xdrInvite`、`xdrsign`、`xdrsignNew`）。未配置则处理全部。
 
@@ -51,7 +51,7 @@ image-upload-service/                 Go module: image-upload-service
 2. **CDN 替换**: 可选地将 HTML 中的相对路径替换为 CDN 域名前缀（`https://qqt-res.cmicrwx.cn/2016tyjf/xhmqqthy/res/wap`）。
 3. **部署复制**: 将源路径中的文件（含 hash 版本）复制到目标路径，用 `.deploy-cache.json` 缓存避免重复计算 MD5。
 4. **CDN 校验**: 部署后校验 HTML 中引用的 CDN 资源是否都已在目标目录就绪（忽略 HTML 注释中的引用）。
-5. **SVN 提交**: 可选地自动 `svn commit`，提交信息取自 Git 最新 commit 或用户自定义。
+5. **提交**: 可选地自动提交 dest 仓库（Git: add/commit/push；SVN: svn add/commit），提交信息取自源仓库 Git 最新 commit 或用户自定义。
 6. **HTML 回滚 + Git 提交**: 可选地用 `git checkout HEAD --` 回滚 HTML 到 CDN 替换前的状态，然后 `git add -A && git commit && git pull --rebase && git push`。
 
 ## 配置文件 version.config.json
@@ -70,7 +70,7 @@ image-upload-service/                 Go module: image-upload-service
 | `deploy.command` | string | `copy` 或 `copy-commit` |
 | `deploy.autoCommit` | bool | 是否自动提交 SVN |
 | `deploy.homeSourcePath` / `companySourcePath` | string | 源路径 (git 仓库) |
-| `deploy.homeDestPath` / `companyDestPath` | string | 目标路径 (SVN 灰度目录) |
+| `deploy.homeDestPath` / `companyDestPath` | string | 目标路径 (灰度目录，运行时自动识别 Git/SVN) |
 | `deploy.filePaths` | []string | 要复制的文件 glob 模式 |
 | `deploy.cdnPathPrefix` | string | CDN URL 中需裁掉的前缀，用于映射到 dest 本地路径 |
 | `deploy.gitAuthors` | []string | Git 作者过滤 |
@@ -112,8 +112,10 @@ Go 版和 Rust 版参数一致（Rust 额外支持 `-revert-git`）:
 | 7 | 排除盲盒组件后替换CDN | copy | 否 |
 | 8 | 排除盲盒组件后替换CDN | copy-commit | 否 |
 | 9 | 排除盲盒组件后替换CDN | copy-commit | 是 |
+| 16 | 替换CDN + 跳过hash（原始文件名直走CDN） | copy | 沿用配置 |
+| 17 | 替换CDN + 跳过hash（原始文件名直走CDN） | copy-commit | 沿用配置 |
 
-bat 脚本额外提供: mode 10 = 仅部署 copy，11 = 仅部署 copy-commit，12 = 回退 SVN (Rust: 13 = 回退 SVN+git，14 = 仅回退 git)。
+bat 脚本额外提供: mode 10 = 仅部署 copy，11 = 仅部署 copy-commit，12 = 回退 dest 仓库本地变更（自动识别 Git/SVN；Rust: 13 = 回退 dest+src，14 = 仅回退 src），15 = 仅清理 dest 旧 hash 文件（CLI `-clean-hash`，两版支持；保护语义与部署时一致）。mode 16/17 见上表（CLI `-mode=16/17`）。
 
 ## Go 版代码结构 (main.go)
 

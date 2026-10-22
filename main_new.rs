@@ -13,6 +13,8 @@ use deploy::DeployManager;
 use version_manager::VersionManager;
 
 fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    deploy::init_run_log(&argv);
     let args: Vec<String> = std::env::args().collect();
     let mut config_path = "version.config.json".to_string();
     let mut html_file = String::new();
@@ -26,6 +28,7 @@ fn main() {
     let mut dry_run = false;
     let mut revert_svn = false;
     let mut revert_git = false;
+    let mut clean_hash = false;
 
     let start = std::time::Instant::now();
 
@@ -83,6 +86,7 @@ fn main() {
             "-dry-run" => dry_run = true,
             "-revert-svn" => revert_svn = true,
             "-revert-git" => revert_git = true,
+            "-clean-hash" => clean_hash = true,
             "-h" | "--help" | "-help" => {
                 print_usage();
                 return;
@@ -116,12 +120,12 @@ fn main() {
     apply_deploy_mode(&mut config, deploy_mode);
     println!("📋 部署模式: {}", deploy_mode);
 
-    // Revert local changes: dest SVN (-revert-svn) and/or src git (-revert-git).
+    // Revert local changes: dest repo (-revert-svn, auto-detects Git/SVN) and/or src git (-revert-git).
     if revert_svn || revert_git {
         let dm = DeployManager::new(config.deploy.clone(), debug_mode);
         if revert_svn {
-            if let Err(e) = dm.revert_all_svn() {
-                eprintln!("❌ SVN回退失败: {}", e);
+            if let Err(e) = dm.revert_dest_vcs() {
+                eprintln!("❌ dest仓库回退失败: {}", e);
                 std::process::exit(1);
             }
         }
@@ -130,6 +134,17 @@ fn main() {
                 eprintln!("❌ Git回退失败: {}", e);
                 std::process::exit(1);
             }
+        }
+        print_total_elapsed(start);
+        return;
+    }
+
+    // 仅清理dest旧hash文件：-clean-hash
+    if clean_hash {
+        let mut dm = DeployManager::new(config.deploy.clone(), debug_mode);
+        if let Err(e) = dm.clean_hash_only() {
+            eprintln!("❌ 清理失败: {}", e);
+            std::process::exit(1);
         }
         print_total_elapsed(start);
         return;
@@ -234,10 +249,11 @@ fn apply_deploy_mode(config: &mut Config, mode: i32) {
         return;
     }
     config.deploy.enabled = true;
-    let auto_commit = matches!(mode, 2 | 3 | 5 | 6 | 8 | 9);
+    let auto_commit = matches!(mode, 2 | 3 | 5 | 6 | 8 | 9 | 17);
     let no_cdn = matches!(mode, 4 | 5 | 6);
     let clear_excludes = matches!(mode, 7 | 8 | 9);
     let rollback = matches!(mode, 3 | 6 | 9);
+    let no_hash = matches!(mode, 16 | 17);
 
     config.deploy.auto_commit = auto_commit;
     config.deploy.command = if auto_commit { "copy-commit" } else { "copy" }.to_string();
@@ -247,8 +263,13 @@ fn apply_deploy_mode(config: &mut Config, mode: i32) {
     if clear_excludes {
         config.cdn_exclude_files = Vec::new();
     }
-    config.rollback_after_deploy = rollback;
-    config.git_commit_after_rollback = rollback;
+    if !no_hash {
+        // mode 16/17 沿用配置文件中的回滚设置（与 Go 版 mode switch 行为一致）
+        config.rollback_after_deploy = rollback;
+        config.git_commit_after_rollback = rollback;
+    }
+    // mode 16/17：CDN替换 + 跳过hash（保留CDN域名，部署只复制原始文件）
+    config.no_hash = no_hash;
 }
 
 /// Creates a DeployManager and runs the deploy workflow, then always rolls back
@@ -268,6 +289,7 @@ fn run_deploy(config: &Config, debug_mode: bool, commit_message: &str, dry_run: 
     println!("{}", "=".repeat(60));
 
     let mut dm = DeployManager::new(config.deploy.clone(), debug_mode);
+    dm.no_hash = config.no_hash;
     if let Err(e) = dm.run(config.deploy.auto_commit, commit_message, &config.single_html_file, &config.cdn_domain) {
         eprintln!("❌ 部署失败: {}", e);
         return;

@@ -1,5 +1,6 @@
 .gocache/
 .deploy-cache.json
+logs/
 
 # Rust
 target/

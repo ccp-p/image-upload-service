@@ -57,7 +57,7 @@ if exist "%cache_file%" (
 echo.
 echo Select deploy mode:
 echo [1]  copy                       CDN replace, no auto-commit
-echo [2]  copy-commit                CDN replace, auto-commit svn
+echo [2]  copy-commit                CDN replace, auto-commit (dest Git/SVN auto)
 echo [3]  copy-commit + git push    CDN replace, rollback HTML
 echo [4]  copy  - no CDN             keep relative paths
 echo [5]  copy-commit - no CDN
@@ -67,9 +67,12 @@ echo [8]  copy-commit dark components to CDN
 echo [9]  copy-commit + git dark components, rollback HTML
 echo [10] deploy only, then copy
 echo [11] deploy only, then copy-commit
-echo [12] revert dest SVN local changes
-echo [13] revert dest SVN + revert src git
+echo [12] revert dest repo local changes (auto Git/SVN)
+echo [13] revert dest repo + revert src git
 echo [14] revert src git only
+echo [15] clean old hash files in dest (no deploy, keep live/history refs)
+echo [16] CDN replace + no hash, copy (original files via CDN)
+echo [17] CDN replace + no hash, copy-commit
 echo.
 echo [last] mode=%last_mode%  press Enter to reuse, or input r to reset
 echo.
@@ -101,6 +104,7 @@ if "!mode_input!"=="6" goto ask_message
 if "!mode_input!"=="8" goto ask_message
 if "!mode_input!"=="9" goto ask_message
 if "!mode_input!"=="11" goto ask_message
+if "!mode_input!"=="17" goto ask_message
 goto save_cache
 
 :ask_message
@@ -113,6 +117,7 @@ REM Save mode to cache (skip for revert to avoid accidental reuse)
 if /i "!mode_input!"=="12" goto run
 if /i "!mode_input!"=="13" goto run
 if /i "!mode_input!"=="14" goto run
+if /i "!mode_input!"=="15" goto run
 echo mode=!mode_input!> "!cache_file!"
 goto run
 
@@ -150,6 +155,12 @@ if "!mode_input!"=="14" (
     echo [cmd] "%RS_EXE%" -config version.config.json -revert-git
     echo.
     "%RS_EXE%" -config version.config.json -revert-git
+    goto check_result
+)
+if "!mode_input!"=="15" (
+    echo [cmd] "%RS_EXE%" -config version.config.json -clean-hash
+    echo.
+    "%RS_EXE%" -config version.config.json -clean-hash
     goto check_result
 )
 

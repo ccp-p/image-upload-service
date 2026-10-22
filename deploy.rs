@@ -7,8 +7,97 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{is_home_env, DeployConfig};
 use crate::json::JsonValue;
-use crate::patterns::{matches_alnum_hash, remove_html_comments};
-use crate::version_manager::{copy_file, file_exists, get_file_hash, is_js_or_css, vcs_svn_delete};
+use crate::patterns::{matches_alnum_hash, parse_hashed_filename, remove_html_comments};
+use crate::version_manager::{copy_file, file_exists, get_file_hash, is_js_or_css, vcs_dest_delete};
+
+use std::sync::OnceLock;
+
+static LOG_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+/// 本地时间戳（UTC+8）形如 2026-10-21 15:22:31
+fn log_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 + 8 * 3600)
+        .unwrap_or(0);
+    let (y, m, d) = civil_from_days(secs.div_euclid(86400));
+    let sod = secs.rem_euclid(86400);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        y,
+        m,
+        d,
+        sod / 3600,
+        (sod % 3600) / 60,
+        sod % 60
+    )
+}
+
+/// 初始化运行日志：logs/hashcdn_时间戳.log，保留最近 20 个。
+/// （对应 Go 版 initLogFile；Rust 无法截获 println! 宏输出，
+/// 由关键节点调用 log_line 写入同等排查信息）
+pub fn init_run_log(argv: &[String]) {
+    let _ = std::fs::create_dir_all("logs");
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 + 8 * 3600)
+        .unwrap_or(0);
+    let (y, m, d) = civil_from_days(secs.div_euclid(86400));
+    let sod = secs.rem_euclid(86400);
+    let name = format!(
+        "logs/hashcdn_{:04}{:02}{:02}_{:02}{:02}{:02}.log",
+        y,
+        m,
+        d,
+        sod / 3600,
+        (sod % 3600) / 60,
+        sod % 60
+    );
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&name)
+        .ok();
+    let _ = LOG_PATH.set(Some(name));
+    clean_old_logs(20);
+    log_line(&format!("=== hashcdn 运行日志（Rust） ==="));
+    log_line(&format!("命令行: {}", argv.join(" ")));
+}
+
+/// 清理旧日志文件，仅保留最近 keep 个（文件名含时间戳，字典序即时间序）
+fn clean_old_logs(keep: usize) {
+    let entries = match std::fs::read_dir("logs") {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut logs: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with("hashcdn_") && n.ends_with(".log"))
+        .collect();
+    if logs.len() <= keep {
+        return;
+    }
+    logs.sort();
+    for name in &logs[..logs.len() - keep] {
+        let _ = std::fs::remove_file(format!("logs/{}", name));
+    }
+}
+
+/// 写一行关键节点日志（自动带时间戳前缀）
+pub fn log_line(msg: &str) {
+    if let Some(Some(path)) = LOG_PATH.get() {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "[{}] {}", log_timestamp(), msg);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Path helpers (local copies; version_manager has its own private set)
@@ -162,13 +251,107 @@ fn derive_history_rel_path(matched: &str, cdn_prefix: &str) -> String {
     stripped.trim_start_matches('/').to_string()
 }
 
-/// 查询文件在 since 之后的所有提交版本号 + 窗口边界前最后一次提交（最新在前）
-fn svn_history_revisions(wc_path: &str, since_days: i64, max_revs: usize) -> Result<Vec<i64>, String> {
+/// 目标仓库类型（与 Go 的 destRepoKind 对应）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestRepoKind {
+    Unknown,
+    Git,
+    Svn,
+}
+
+impl DestRepoKind {
+    fn label(&self) -> &'static str {
+        match self {
+            DestRepoKind::Git => "Git",
+            DestRepoKind::Svn => "SVN",
+            DestRepoKind::Unknown => "未知",
+        }
+    }
+}
+
+/// 探测目录所属版本控制系统：优先 Git，其次 SVN。
+/// 部署目标在 Git 仓库子目录（如 res/wap）下时 git 命令依然有效
+fn detect_dest_repo_kind(dir: &str) -> DestRepoKind {
+    if dir.is_empty() {
+        return DestRepoKind::Unknown;
+    }
+    if is_git_repo(dir) {
+        return DestRepoKind::Git;
+    }
+    if is_svn_repo(dir) {
+        return DestRepoKind::Svn;
+    }
+    DestRepoKind::Unknown
+}
+
+/// 按目标仓库类型分发历史版本查询：
+/// 查询文件在 since 之后的所有提交（Git 完整 hash / SVN 版本号），
+/// 外加窗口边界前最后一次提交（该版本在窗口开始时仍在线上），最新在前
+fn dest_history_revisions(wc_path: &str, since_days: i64, max_revs: usize) -> Result<Vec<String>, String> {
+    let dir = path_dir(wc_path);
+    match detect_dest_repo_kind(&dir) {
+        DestRepoKind::Git => git_history_revisions(wc_path, since_days, max_revs),
+        DestRepoKind::Svn => svn_history_revisions(wc_path, since_days, max_revs),
+        DestRepoKind::Unknown => Err(format!(
+            "目标目录既不是 Git 也不是 SVN 仓库: {}",
+            dir
+        )),
+    }
+}
+
+/// Git 实现：git log 窗口内提交 + git rev-list 边界提交（最新在前）
+fn git_history_revisions(wc_path: &str, since_days: i64, max_revs: usize) -> Result<Vec<String>, String> {
+    let since = std::time::SystemTime::now()
+        - std::time::Duration::from_secs((since_days.max(1) * 24 * 60 * 60) as u64);
+    let since_str = format_svn_date(since);
+    let dir = path_dir(wc_path);
+    let name = path_base(wc_path);
+
+    let out = std::process::Command::new("git")
+        .args(["log", "--format=%H", &format!("--since={}", since_str), "--", &name])
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| format!("git log 失败: {}", e))?;
+    if !out.status.success() {
+        return Err("git log 失败".to_string());
+    }
+    let mut commits: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    // 窗口边界前最后一次提交（该版本在窗口开始时仍在线上）。长寿命版本
+    // （如 9/8 上线、9/24 才被替换）只出现在这里，查询失败必须中止本次清理，
+    // 漏掉边界版本会误删仍在被缓存用户请求的上一生产版本
+    let boundary = std::process::Command::new("git")
+        .args(["rev-list", "-1", &format!("--before={}", since_str), "HEAD", "--", &name])
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| format!("git 窗口边界版本查询失败: {}", e))?;
+    if !boundary.status.success() {
+        return Err("git 窗口边界版本查询失败".to_string());
+    }
+    let boundary_commit = String::from_utf8_lossy(&boundary.stdout).trim().to_string();
+    if !boundary_commit.is_empty() && !commits.contains(&boundary_commit) {
+        commits.push(boundary_commit);
+    }
+    if commits.is_empty() {
+        return Err("窗口内无提交历史".to_string());
+    }
+    if commits.len() > max_revs {
+        return Err(format!("窗口内版本数 {} 超过上限 {}", commits.len(), max_revs));
+    }
+    Ok(commits)
+}
+
+/// SVN 实现：查询文件在 since 之后的所有提交版本号 + 窗口边界前最后一次提交（最新在前）
+fn svn_history_revisions(wc_path: &str, since_days: i64, max_revs: usize) -> Result<Vec<String>, String> {
     let since = std::time::SystemTime::now()
         - std::time::Duration::from_secs((since_days.max(1) * 24 * 60 * 60) as u64);
     let since_str = format!("{{{}}}", format_svn_date(since));
 
-    let mut revs: Vec<i64> = Vec::new();
+    let mut revs: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let out = std::process::Command::new("svn")
         .args(["log", "--xml", "-r", &format!("{}:HEAD", since_str), "-l", &max_revs.to_string(), wc_path])
@@ -178,8 +361,9 @@ fn svn_history_revisions(wc_path: &str, since_days: i64, max_revs: usize) -> Res
         return Err("svn log 失败".to_string());
     }
     for rev in extract_revisions(&String::from_utf8_lossy(&out.stdout)) {
-        if seen.insert(rev) {
-            revs.push(rev);
+        let rev_str = rev.to_string();
+        if seen.insert(rev_str.clone()) {
+            revs.push(rev_str);
         }
     }
     // 窗口边界前最后一次提交（该版本在窗口开始时仍在线上）。长寿命版本
@@ -193,8 +377,9 @@ fn svn_history_revisions(wc_path: &str, since_days: i64, max_revs: usize) -> Res
         return Err("svn log 边界查询失败".to_string());
     }
     if let Some(rev) = extract_revisions(&String::from_utf8_lossy(&boundary.stdout)).first() {
-        if seen.insert(*rev) {
-            revs.push(*rev);
+        let rev_str = rev.to_string();
+        if seen.insert(rev_str.clone()) {
+            revs.push(rev_str);
         }
     }
     if revs.is_empty() {
@@ -228,10 +413,38 @@ fn extract_revisions(xml_text: &str) -> Vec<i64> {
     out
 }
 
-/// 读取文件在指定版本的内容
-fn svn_cat_revision(wc_path: &str, rev: i64) -> Result<Vec<u8>, String> {
+/// 按目标仓库类型分发：读取文件在指定提交/版本的内容
+fn dest_show_revision(wc_path: &str, commit: &str) -> Result<Vec<u8>, String> {
+    let dir = path_dir(wc_path);
+    match detect_dest_repo_kind(&dir) {
+        DestRepoKind::Git => git_show_revision(wc_path, commit),
+        DestRepoKind::Svn => svn_cat_revision(wc_path, commit),
+        DestRepoKind::Unknown => Err(format!(
+            "目标目录既不是 Git 也不是 SVN 仓库: {}",
+            dir
+        )),
+    }
+}
+
+/// Git 实现（:./ 相对当前目录解析路径）
+fn git_show_revision(wc_path: &str, commit: &str) -> Result<Vec<u8>, String> {
+    let dir = path_dir(wc_path);
+    let name = path_base(wc_path);
+    let out = std::process::Command::new("git")
+        .args(["show", &format!("{}:./{}", commit, name)])
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| format!("git show 失败: {}", e))?;
+    if !out.status.success() {
+        return Err("git show 失败".to_string());
+    }
+    Ok(out.stdout)
+}
+
+/// SVN 实现：svn cat -r <版本号>
+fn svn_cat_revision(wc_path: &str, rev: &str) -> Result<Vec<u8>, String> {
     let out = std::process::Command::new("svn")
-        .args(["cat", "-r", &rev.to_string(), wc_path])
+        .args(["cat", "-r", rev, wc_path])
         .output()
         .map_err(|e| format!("svn cat 失败: {}", e))?;
     if !out.status.success() {
@@ -240,7 +453,33 @@ fn svn_cat_revision(wc_path: &str, rev: i64) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
-/// 查询文件在 SVN 中最后一次提交时间（纳秒时间戳，读本地工作副本元数据，不联网）
+/// 按目标仓库类型分发：查询文件最后一次提交时间（纳秒时间戳，本地元数据，不联网）
+fn dest_last_changed_nanos(wc_path: &str) -> Option<i64> {
+    let dir = path_dir(wc_path);
+    match detect_dest_repo_kind(&dir) {
+        DestRepoKind::Git => git_last_changed_nanos(wc_path),
+        DestRepoKind::Svn => svn_last_changed_nanos(wc_path),
+        DestRepoKind::Unknown => None,
+    }
+}
+
+/// Git 实现：git log -1 --format=%ct（秒 → 纳秒）
+fn git_last_changed_nanos(wc_path: &str) -> Option<i64> {
+    let dir = path_dir(wc_path);
+    let name = path_base(wc_path);
+    let out = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%ct", "--", &name])
+        .current_dir(&dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let secs: i64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    Some(secs.saturating_mul(1_000_000_000))
+}
+
+/// SVN 实现：查询文件在 SVN 中最后一次提交时间（纳秒时间戳，读本地工作副本元数据）
 fn svn_last_changed_nanos(wc_path: &str) -> Option<i64> {
     let out = std::process::Command::new("svn")
         .args(["info", "--xml", wc_path])
@@ -431,6 +670,60 @@ pub fn load_deploy_cache(cache_path: &str) -> DeployCache {
     };
 
     if let JsonValue::Object(entries) = &json {
+        // Go 包装格式（两版统一写出的标准格式）：
+        // {"files":{path:{hash,size,modTime}},"sessionTime":N,"releasedHashes":{name:true}}
+        let wrapper_files = entries.iter().find_map(|(k, v)| match (k.as_str(), v) {
+            ("files", JsonValue::Object(files)) => Some(files),
+            _ => None,
+        });
+        if let Some(files) = wrapper_files {
+            for (key, val) in files {
+                let hash = val.get_str("hash").unwrap_or("").to_string();
+                let size = val.get_num("size").map(|n| n as i64).unwrap_or(0);
+                let mod_time = val
+                    .get_i64("modTime")
+                    .or_else(|| val.get_str("modTime").and_then(|s| s.parse::<i64>().ok()))
+                    .unwrap_or(0);
+                cache.files.insert(
+                    key.clone(),
+                    FileCacheEntry {
+                        hash,
+                        size,
+                        mod_time,
+                    },
+                );
+            }
+            for (key, val) in entries {
+                match key.as_str() {
+                    "sessionTime" | "__sessionTime" => {
+                        if let JsonValue::Integer(t) = val {
+                            cache.session_time = *t;
+                        }
+                    }
+                    "releasedHashes" | "__releasedHashes" => match val {
+                        JsonValue::Object(map) => {
+                            for (name, v) in map {
+                                if matches!(v, JsonValue::Bool(true)) {
+                                    cache.released_hashes.insert(name.clone());
+                                }
+                            }
+                        }
+                        JsonValue::Array(list) => {
+                            for item in list {
+                                if let JsonValue::String(s) = item {
+                                    cache.released_hashes.insert(s.clone());
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+            return cache;
+        }
+
+        // 旧 Rust 扁平格式：文件条目与 __sessionTime / __releasedHashes 平级
         for (key, val) in entries {
             if key == "__sessionTime" {
                 if let JsonValue::Integer(t) = val {
@@ -492,26 +785,29 @@ fn serialize_cache(
     session_time: i64,
     released_hashes: &std::collections::HashSet<String>,
 ) -> String {
-    let mut entries: Vec<(String, JsonValue)> = Vec::new();
-    entries.push(("__sessionTime".to_string(), JsonValue::Integer(session_time)));
-    entries.push((
-        "__releasedHashes".to_string(),
-        JsonValue::Array(
-            released_hashes
-                .iter()
-                .map(|s| JsonValue::String(s.clone()))
-                .collect(),
-        ),
-    ));
+    // 统一写 Go 包装格式：{"files":{...},"sessionTime":N,"releasedHashes":{name:true}}
+    let mut files_obj: Vec<(String, JsonValue)> = Vec::new();
     for (k, v) in files {
         let entry = JsonValue::Object(vec![
             ("hash".to_string(), JsonValue::String(v.hash.clone())),
             ("size".to_string(), JsonValue::Number(v.size as f64)),
             ("modTime".to_string(), JsonValue::Integer(v.mod_time)),
         ]);
-        entries.push((k.clone(), entry));
+        files_obj.push((k.clone(), entry));
     }
-    JsonValue::Object(entries).to_json_pretty()
+    let mut root: Vec<(String, JsonValue)> = Vec::new();
+    root.push(("files".to_string(), JsonValue::Object(files_obj)));
+    root.push(("sessionTime".to_string(), JsonValue::Integer(session_time)));
+    root.push((
+        "releasedHashes".to_string(),
+        JsonValue::Object(
+            released_hashes
+                .iter()
+                .map(|s| (s.clone(), JsonValue::Bool(true)))
+                .collect(),
+        ),
+    ));
+    JsonValue::Object(root).to_json_pretty()
 }
 
 impl DeployCache {
@@ -586,6 +882,7 @@ pub struct DeployManager {
     pub dest_path: String,
     pub debug_mode: bool,
     pub folder_opened: bool,
+    pub no_hash: bool,
     pub cache: DeployCache,
 }
 
@@ -610,6 +907,7 @@ impl DeployManager {
             dest_path,
             debug_mode,
             folder_opened: false,
+            no_hash: false,
             cache: load_deploy_cache(".deploy-cache.json"),
         }
     }
@@ -752,10 +1050,10 @@ impl DeployManager {
         cat: G,
     ) -> Option<std::collections::HashSet<String>>
     where
-        F: Fn(&str, i64, usize) -> Result<Vec<i64>, String>,
-        G: Fn(&str, i64) -> Result<Vec<u8>, String>,
+        F: Fn(&str, i64, usize) -> Result<Vec<String>, String>,
+        G: Fn(&str, &str) -> Result<Vec<u8>, String>,
     {
-        let html_files = find_dest_html_files(&self.dest_path).ok()?;
+        let html_files = self.deployed_html_files();
         if html_files.is_empty() {
             return None;
         }
@@ -775,14 +1073,14 @@ impl DeployManager {
                     return None;
                 }
             };
-            for rev in revs {
-                let content = match cat(html_path, rev) {
+            for commit in revs {
+                let content = match cat(html_path, &commit) {
                     Ok(c) => c,
                     Err(e) => {
                         println!(
-                            "⚠️  读取HTML历史内容失败 {}@{}: {}，本次跳过旧hash清理",
+                        "⚠️  读取HTML历史内容失败 {}@{}: {}，本次跳过旧hash清理",
                             path_base(html_path),
-                            rev,
+                            &commit,
                             e
                         );
                         return None;
@@ -797,7 +1095,7 @@ impl DeployManager {
                 // 2. 引用的带 hash CSS：其 url(...) 里的 hash 图片同样保护
                 for css_path in hashed_css_paths_in(&text) {
                     let css_base = path_base(&css_path);
-                    match self.fetch_css_image_refs(&css_path, &css_base, rev, &dest_index, &cat) {
+                    match self.fetch_css_image_refs(&css_path, &css_base, &commit, &dest_index, &cat) {
                         Some(images) => {
                             for img in images {
                                 protected.insert(img);
@@ -806,7 +1104,7 @@ impl DeployManager {
                         None => {
                             println!(
                                 "⚠️  获取CSS历史内容失败 {}@{}，本次跳过旧hash清理",
-                                css_base, rev
+                                css_base, &commit
                             );
                             return None;
                         }
@@ -818,7 +1116,37 @@ impl DeployManager {
     }
 
     fn build_protected_hashes(&self) -> Option<std::collections::HashSet<String>> {
-        self.build_protected_hashes_with(svn_history_revisions, svn_cat_revision)
+        self.build_protected_hashes_with(dest_history_revisions, dest_show_revision)
+    }
+
+    /// 本次部署涉及的 HTML 文件（dest 根目录下）：取 config.file_paths 里的
+    /// .html 项；没有则回退扫描全部 .html。只保护本工具部署的页面，
+    /// 避免把无关页面（如 hkBus 等子项目）的历史引用也保护进来
+    /// （对应 Go 的 deployedHTMLFiles）
+    fn deployed_html_files(&self) -> Vec<String> {
+        let all = match find_dest_html_files(&self.dest_path) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        let mut want: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for fp in &self.config.file_paths {
+            let name = path_base(fp);
+            if name.to_lowercase().ends_with(".html") {
+                want.insert(name);
+            }
+        }
+        if want.is_empty() {
+            return all;
+        }
+        let out: Vec<String> = all
+            .into_iter()
+            .filter(|p| want.contains(&path_base(p)))
+            .collect();
+        if out.is_empty() {
+            find_dest_html_files(&self.dest_path).unwrap_or_default()
+        } else {
+            out
+        }
     }
 
     /// 获取历史版本 CSS 内容中引用的带 hash 图片名。hash 文件名即内容指纹，
@@ -827,12 +1155,12 @@ impl DeployManager {
         &self,
         css_match: &str,
         css_base: &str,
-        rev: i64,
+        commit: &str,
         dest_index: &std::collections::HashMap<String, String>,
         cat: &G,
     ) -> Option<Vec<String>>
     where
-        G: Fn(&str, i64) -> Result<Vec<u8>, String>,
+        G: Fn(&str, &str) -> Result<Vec<u8>, String>,
     {
         let content = if let Some(p) = dest_index.get(css_base) {
             std::fs::read(p).ok()?
@@ -841,7 +1169,7 @@ impl DeployManager {
             if rel.is_empty() || rel == css_base {
                 return None;
             }
-            cat(&path_join(&self.dest_path, &rel), rev).ok()?
+            cat(&path_join(&self.dest_path, &rel), commit).ok()?
         };
         Some(hashed_names_in(&String::from_utf8_lossy(&content)))
     }
@@ -930,7 +1258,7 @@ impl DeployManager {
                         .unwrap_or(0);
                     if should_keep_recent(
                         now_nanos,
-                        svn_last_changed_nanos(&file_path),
+                        dest_last_changed_nanos(&file_path),
                         HTML_PROTECT_WINDOW_NANOS,
                     ) {
                         if self.debug_mode {
@@ -939,7 +1267,7 @@ impl DeployManager {
                         continue;
                     }
                     // 非最新且非已上线版本的旧 hash（含当晚多次部署的中间产物）直接清理
-                    vcs_svn_delete(&file_path, self.debug_mode);
+                    vcs_dest_delete(&file_path, self.debug_mode);
                     if std::fs::remove_file(&file_path).is_ok() {
                         deleted += 1;
                     }
@@ -947,6 +1275,149 @@ impl DeployManager {
             }
         }
         deleted
+    }
+
+    /// 独立清理模式（对应 Go 的 cleanHashOnly）：不部署复制，仅清理 dest 中
+    /// 配置目标范围内的旧 hash 文件。保护语义与部署时一致：当前现网版本、
+    /// HTML 历史引用（24h 窗口）、会话基线、近期部署兜底；任何保护机制
+    /// 不可用则本次不清理（宁可多留不可误删）。
+    pub fn clean_hash_only(&mut self) -> Result<(), String> {
+        println!("🧹 开始清理 dest 旧 hash 文件（仅清理，不部署）");
+        let dest_kind = detect_dest_repo_kind(&self.dest_path);
+        println!(
+            "📂 目标路径: {}（仓库类型: {}）",
+            self.dest_path,
+            dest_kind.label()
+        );
+        log_line(&format!(
+            "独立清理开始: 目标={}（仓库类型: {}）",
+            self.dest_path,
+            dest_kind.label()
+        ));
+
+        // 先更新 dest 仓库，保证历史保护查询基于最新提交
+        match dest_kind {
+            DestRepoKind::Git => {
+                if let Err(e) = self.update_dest_git() {
+                    println!("⚠️  dest Git 拉取失败: {}，继续清理...", e);
+                }
+            }
+            DestRepoKind::Svn => {
+                if let Err(e) = self.update_svn_repo() {
+                    println!("⚠️  SVN更新失败: {}，继续清理...", e);
+                }
+            }
+            DestRepoKind::Unknown => {
+                println!("⚠️  目标目录未识别为 Git/SVN 仓库: {}", self.dest_path);
+            }
+        }
+
+        // 现网快照 + 会话基线（失败/首次记录时取消清理）
+        let live_set = match self.fetch_live_hashes() {
+            Some(set) => set,
+            None => {
+                let msg = "现网快照不可用，本次清理取消（宁可多留不可误删）";
+                println!("ℹ️  {}", msg);
+                log_line(msg);
+                return Ok(());
+            }
+        };
+        if self.prepare_session(&live_set) {
+            let msg = "首次记录现网快照，本次清理取消（宁可多留不可误删）";
+            println!("ℹ️  {}", msg);
+            log_line(msg);
+            return Ok(());
+        }
+
+        // HTML 历史保护名单
+        match self.build_protected_hashes() {
+            Some(set) => {
+                if self.debug_mode {
+                    println!("🛡️  HTML历史保护名单: {} 个资源", set.len());
+                }
+                self.cache.protected_hashes = set;
+                self.cache.cleanup_blocked = false;
+                self.cache.dirty = true;
+            }
+            None => {
+                let msg = "无法构建HTML历史保护名单，本次清理取消（宁可多留不可误删）";
+                println!("⚠️  {}", msg);
+                log_line(msg);
+                self.cache.cleanup_blocked = true;
+                self.cache.dirty = true;
+                let _ = self.cache.save();
+                return Ok(());
+            }
+        }
+
+        println!("📦 开始清理...");
+        let mut total_deleted = 0;
+        let file_paths = self.config.file_paths.clone();
+        for fp in &file_paths {
+            if fp.contains('*') {
+                total_deleted += self.clean_wildcard_path(fp, &live_set);
+            } else {
+                let dest = path_join(&self.dest_path, fp);
+                total_deleted += self.clean_hash_files(&dest, "", Some(&live_set));
+            }
+        }
+        let _ = self.cache.save();
+
+        println!();
+        println!("{}", "=".repeat(50));
+        println!("🧹 清理完成: 共清理 {} 个旧 hash 文件", total_deleted);
+        println!("{}\n", "=".repeat(50));
+        log_line(&format!("独立清理完成: 清理 {} 个", total_deleted));
+        Ok(())
+    }
+
+    /// 清理通配符目标目录下的旧 hash 文件（对应 Go 的 cleanWildcardPath）。
+    /// 以 dest 目录为准遍历（源目录可能已删除部分文件，dest 遗留的也要清），
+    /// 对每个带 hash 的文件还原 base 文件路径，调用 clean_hash_files 清理
+    /// 同 base 的所有未受保护 hash 变体
+    fn clean_wildcard_path(
+        &mut self,
+        wildcard_path: &str,
+        live_set: &std::collections::HashSet<String>,
+    ) -> usize {
+        let dir_rel = wildcard_path.trim_end_matches("/*");
+        let dest_dir = path_join(&self.dest_path, dir_rel);
+        if !file_exists(&dest_dir) {
+            println!("⚠️  目标目录不存在: {}", dest_dir);
+            return 0;
+        }
+
+        let mut files: Vec<String> = Vec::new();
+        if let Err(e) = walk_dir_collect(Path::new(&dest_dir), Path::new(&dest_dir), &mut files) {
+            println!("⚠️  遍历目标目录失败: {} - {}", dest_dir, e);
+            return 0;
+        }
+
+        let mut total = 0;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for rel in &files {
+            let name = path_base(rel);
+            let (base, _hash, ext) = match parse_hashed_filename(&name) {
+                Some(parts) => parts,
+                None => continue,
+            };
+            if !seen.insert(format!("{}.{}", base, ext)) {
+                continue;
+            }
+            // 还原 base 文件路径：同目录下 base.ext
+            let rel_dir = match rel.rfind('/') {
+                Some(p) => &rel[..p],
+                None => "",
+            };
+            let base_name = format!("{}.{}", base, ext);
+            let base_path = if rel_dir.is_empty() {
+                path_join(&dest_dir, &base_name)
+            } else {
+                path_join(&dest_dir, &format!("{}/{}", rel_dir, base_name))
+            };
+            total += self.clean_hash_files(&base_path, "", Some(live_set));
+        }
+        total
     }
 
     /// Copies the base file and the latest hashed version from source to dest.
@@ -958,6 +1429,10 @@ impl DeployManager {
         dest_path: &str,
         live: Option<&std::collections::HashSet<String>>,
     ) -> Result<(usize, usize), String> {
+        // CDN无hash模式（mode 16/17）：只复制原始文件，不查找/复制hash版本，不清理
+        if self.no_hash {
+            return self.copy_base_file_only(source_path, dest_path);
+        }
         let versions = self.find_all_file_versions(source_path);
         if versions.is_empty() {
             return Err(format!("source file not found: {}", source_path));
@@ -1037,6 +1512,32 @@ impl DeployManager {
         }
 
         Ok((copied, skipped))
+    }
+
+    /// 无hash模式部署：仅复制原始文件到 dest
+    /// （跳过hash版本查找与旧hash清理，缓存照常更新）
+    fn copy_base_file_only(
+        &mut self,
+        source_path: &str,
+        dest_path: &str,
+    ) -> Result<(usize, usize), String> {
+        let src = path_join(&self.source_path, source_path);
+        if !file_exists(&src) {
+            return Err(format!("源文件不存在: {}", source_path));
+        }
+        copy_file(&src, dest_path)?;
+        let hash = get_file_hash(&src)?;
+        let meta = std::fs::metadata(&src).map_err(|e| e.to_string())?;
+        let size = meta.len() as i64;
+        let mod_time = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        self.cache.update_cache(dest_path, &hash, size, mod_time);
+        println!("  📄 无hash复制: {}", path_base(dest_path));
+        Ok((1, 0))
     }
 
     /// Handles a wildcard path like "/images/*" by walking the source
@@ -1177,7 +1678,12 @@ impl DeployManager {
     ) -> Result<(), String> {
         println!("🚀 开始部署操作...");
         println!("📂 源路径: {}", self.source_path);
-        println!("📂 目标路径: {}", self.dest_path);
+        let dest_kind = detect_dest_repo_kind(&self.dest_path);
+        println!("📂 目标路径: {}（仓库类型: {}）", self.dest_path, dest_kind.label());
+        log_line(&format!(
+            "部署开始: 源={} 目标={}（仓库类型: {}） auto_commit={}",
+            self.source_path, self.dest_path, dest_kind.label(), auto_commit
+        ));
         println!();
         println!("💾 已加载文件缓存: {} 个条目", self.cache.files.len());
         println!();
@@ -1201,6 +1707,10 @@ impl DeployManager {
                     println!("🛡️  HTML历史保护名单: {} 个资源", set.len());
                 }
                 self.cache.protected_hashes = set;
+                // 构建成功必须复位阻塞标记：cleanup_blocked 持久化在缓存里，
+                // 若只在失败时置位从不清除，一次失败会永久禁用之后的清理
+                self.cache.cleanup_blocked = false;
+                self.cache.dirty = true;
             }
             None => {
                 println!("⚠️  无法构建HTML历史保护名单，本次部署跳过旧hash清理");
@@ -1208,10 +1718,26 @@ impl DeployManager {
             }
         }
 
-        // Update SVN repo first (mirrors Go's updateSvnRepo).
-        if is_svn_repo(&self.dest_path) {
-            if let Err(e) = self.update_svn_repo() {
-                println!("⚠️  SVN更新失败: {}，继续部署...", e);
+        // 按目标仓库类型更新（Git pull / SVN update）
+        match dest_kind {
+            DestRepoKind::Git => {
+                if let Err(e) = self.update_dest_git() {
+                    println!("⚠️  dest Git 拉取失败: {}，继续部署...", e);
+                    log_line(&format!("dest Git 拉取失败: {}", e));
+                } else {
+                    log_line("dest Git 拉取成功");
+                }
+            }
+            DestRepoKind::Svn => {
+                if let Err(e) = self.update_svn_repo() {
+                    println!("⚠️  SVN更新失败: {}，继续部署...", e);
+                    log_line(&format!("SVN更新失败: {}", e));
+                } else {
+                    log_line("SVN更新成功");
+                }
+            }
+            DestRepoKind::Unknown => {
+                println!("⚠️  目标目录未识别为 Git/SVN 仓库，跳过远程更新: {}", self.dest_path);
             }
         }
 
@@ -1260,6 +1786,10 @@ impl DeployManager {
             "📊 复制完成: 复制 {}, 跳过 {}, 失败 {}",
             total_copied, total_skipped, total_failed
         );
+        log_line(&format!(
+            "复制完成: 复制 {}, 跳过 {}, 失败 {}",
+            total_copied, total_skipped, total_failed
+        ));
 
         // Validate CDN resources exist in dest (non-fatal so rollback still runs).
         let mut validation_ok = true;
@@ -1281,34 +1811,27 @@ impl DeployManager {
         }
         println!("{}\n", "=".repeat(50));
 
-        // SVN add + commit (mirrors Go's svnAddAll / svnCommit).
-        if auto_commit && is_svn_repo(&self.dest_path) {
-            let svn_message = if !commit_message.is_empty() {
-                println!();
-                println!("📝 使用自定义提交信息: {}", commit_message);
-                commit_message.to_string()
-            } else {
-                match self.get_latest_git_commit() {
-                    Ok((hash, message)) => {
-                        println!();
-                        println!("📝 Git提交: {} - {}", hash, message);
-                        message
-                    }
-                    Err(e) => {
-                        println!("⚠️  获取Git提交信息失败: {}", e);
-                        println!("💡 请手动提交SVN修改");
-                        return Ok(());
-                    }
+        // 自动提交（按目标仓库类型选择提交方式）
+        if auto_commit {
+            let commit_result = match dest_kind {
+                DestRepoKind::Git => self.prepare_commit_message(commit_message).and_then(|msg| self.commit_and_push_dest(&msg)),
+                DestRepoKind::Svn => self.prepare_commit_message(commit_message).and_then(|msg| self.svn_commit(&msg)),
+                DestRepoKind::Unknown => {
+                    println!("⚠️  目标目录未识别为 Git/SVN 仓库，跳过自动提交: {}", self.dest_path);
+                    Ok(())
                 }
             };
-
-            println!("⏳ 2秒后开始提交...");
-            std::thread::sleep(std::time::Duration::from_secs(2));
-
-            if let Err(e) = self.svn_commit(&svn_message) {
-                println!("❌ 自动提交失败: {}", e);
-            } else {
-                println!("🎉 自动提交完成！");
+            match commit_result {
+                Ok(()) => {
+                    if dest_kind != DestRepoKind::Unknown {
+                        println!("🎉 自动提交完成！（{}）", dest_kind.label());
+                        log_line(&format!("自动提交完成（{}）", dest_kind.label()));
+                    }
+                }
+                Err(e) => {
+                    println!("❌ 自动提交失败: {}", e);
+                    log_line(&format!("自动提交失败: {}", e));
+                }
             }
         }
 
@@ -1432,6 +1955,134 @@ impl DeployManager {
         let stdout = String::from_utf8_lossy(&output.stdout);
         println!("✅ SVN提交成功");
         println!("{}", stdout.trim());
+        Ok(())
+    }
+
+    /// 解析提交信息：自定义优先，否则取源仓库 Git 最新提交信息
+    fn prepare_commit_message(&self, commit_message: &str) -> Result<String, String> {
+        if !commit_message.is_empty() {
+            println!();
+            println!("📝 使用自定义提交信息: {}", commit_message);
+            return Ok(commit_message.to_string());
+        }
+        match self.get_latest_git_commit() {
+            Ok((hash, message)) => {
+                println!();
+                println!("📝 Git提交: {} - {}", hash, message);
+                Ok(message)
+            }
+            Err(e) => {
+                println!("⚠️  获取Git提交信息失败: {}", e);
+                println!("💡 请手动提交更改");
+                Err(e)
+            }
+        }
+    }
+
+    /// 拉取 dest Git 仓库远程 master 分支（对应 Go 的 updateDestGit）
+    pub fn update_dest_git(&self) -> Result<(), String> {
+        println!("🔄 正在拉取 dest Git 仓库 (origin master): {}", self.dest_path);
+
+        let output = std::process::Command::new("git")
+            .args(["pull", "origin", "master"])
+            .current_dir(&self.dest_path)
+            .output()
+            .map_err(|e| format!("git pull failed: {}", e))?;
+
+        if !output.status.success() {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Err(format!("git pull 失败: {}", combined.trim()));
+        }
+
+        println!("✅ dest Git 拉取成功");
+        println!("{}", String::from_utf8_lossy(&output.stdout).trim());
+        Ok(())
+    }
+
+    /// 提交 dest Git 仓库的所有变更并推送远程 master（对应 Go 的 commitAndPushDest）。
+    /// git add -A 自动暂存新增/修改/删除；push 失败时按约定尝试本机 7890 代理重试
+    pub fn commit_and_push_dest(&self, message: &str) -> Result<(), String> {
+        println!("📤 正在提交 dest Git 更改...");
+        println!("   提交信息: {}", message);
+        log_line(&format!("dest Git 开始提交: {}", message));
+
+        let add = std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&self.dest_path)
+            .output()
+            .map_err(|e| format!("git add failed: {}", e))?;
+        if !add.status.success() {
+            return Err(format!(
+                "git add 失败: {}",
+                String::from_utf8_lossy(&add.stderr).trim()
+            ));
+        }
+
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&self.dest_path)
+            .output()
+            .map_err(|e| format!("git status failed: {}", e))?;
+        if String::from_utf8_lossy(&status.stdout).trim().is_empty() {
+            println!("ℹ️  没有需要提交的更改");
+            return Ok(());
+        }
+
+        let commit = std::process::Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(&self.dest_path)
+            .output()
+            .map_err(|e| format!("git commit failed: {}", e))?;
+        if !commit.status.success() {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&commit.stdout),
+                String::from_utf8_lossy(&commit.stderr)
+            );
+            if combined.contains("nothing to commit") {
+                println!("ℹ️  没有需要提交的更改");
+                return Ok(());
+            }
+            return Err(format!("git commit 失败: {}", combined.trim()));
+        }
+        println!("✅ git commit 成功");
+        log_line("git commit 成功");
+
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "master"])
+            .current_dir(&self.dest_path)
+            .output()
+            .map_err(|e| format!("git push failed: {}", e))?;
+        if !push.status.success() {
+            // 按约定：push 失败时尝试走本机 7890 代理重试
+            println!("⚠️  push 失败，尝试使用本机代理 http://127.0.0.1:7890 重试...");
+            let retry = std::process::Command::new("git")
+                .args(["push", "origin", "master"])
+                .current_dir(&self.dest_path)
+                .env("HTTPS_PROXY", "http://127.0.0.1:7890")
+                .env("HTTP_PROXY", "http://127.0.0.1:7890")
+                .output()
+                .map_err(|e| format!("git push failed: {}", e))?;
+            if !retry.status.success() {
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&push.stderr),
+                    String::from_utf8_lossy(&retry.stderr)
+                );
+                log_line(&format!(
+                    "git push 失败（含代理重试）: {}",
+                    combined.trim()
+                ));
+                return Err(format!("git push 失败（含代理重试）: {}", combined.trim()));
+            }
+        }
+
+        println!("✅ git push 成功");
+        log_line("git push 成功");
         Ok(())
     }
 
@@ -1624,6 +2275,81 @@ impl DeployManager {
 
         println!("{}", "=".repeat(60));
         Ok(())
+
+    }
+
+    /// 回退 dest Git 仓库的所有本地变更（对应 Go 的 revertDestGit）。
+    /// git reset --hard HEAD 恢复已跟踪文件的修改并清空暂存区，
+    /// git clean -fd 移除未跟踪的新增文件/目录，整体还原到上次提交状态
+    pub fn revert_dest_git(&self) -> Result<(), String> {
+        println!();
+        println!("{}", "=".repeat(60));
+        println!("🔄 回退 dest Git 的所有本地变更");
+        println!("{}", "=".repeat(60));
+        println!("📂 目标路径: {}", self.dest_path);
+
+        if self.dest_path.is_empty() {
+            return Err(
+                "未设置dest路径（请检查 version.config.json 中的 deploy.homeDestPath / deploy.companyDestPath）"
+                    .to_string(),
+            );
+        }
+
+        if !is_git_repo(&self.dest_path) {
+            return Err(format!("目标路径不是Git仓库: {}", self.dest_path));
+        }
+
+        // 1. Show current pending changes before reverting
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&self.dest_path)
+            .output()
+            .map_err(|e| format!("git status 失败: {}", e))?;
+        let status_str = String::from_utf8_lossy(&status.stdout).trim().to_string();
+        if status_str.is_empty() {
+            println!("ℹ️  当前没有待提交的本地变更，无需回退");
+            println!("{}", "=".repeat(60));
+            return Ok(());
+        }
+        println!("📋 待回退的本地变更:");
+        println!("{}", status_str);
+
+        // 2. git reset --hard HEAD: 恢复已跟踪修改并清空暂存区（含删除标记）
+        println!();
+        println!("⏳ 正在执行 git reset --hard HEAD ...");
+        let reset = std::process::Command::new("git")
+            .args(["reset", "--hard", "HEAD"])
+            .current_dir(&self.dest_path)
+            .status()
+            .map_err(|e| format!("git reset 失败: {}", e))?;
+        if !reset.success() {
+            return Err("git reset --hard HEAD 失败".to_string());
+        }
+
+        // 3. git clean -fd: 移除未跟踪的新增文件/目录（保留 .gitignore 排除项）
+        println!("⏳ 正在执行 git clean -fd ...");
+        let clean = std::process::Command::new("git")
+            .args(["clean", "-fd"])
+            .current_dir(&self.dest_path)
+            .status()
+            .map_err(|e| format!("git clean 失败: {}", e))?;
+        if !clean.success() {
+            return Err("git clean -fd 失败".to_string());
+        }
+
+        println!("✅ dest Git 的所有本地变更已回退");
+        println!("{}", "=".repeat(60));
+        log_line("dest Git 本地变更已回退");
+        Ok(())
+    }
+
+    /// 按目标仓库类型分发回退：Git → reset --hard + clean，SVN → 递归 revert
+    pub fn revert_dest_vcs(&self) -> Result<(), String> {
+        match detect_dest_repo_kind(&self.dest_path) {
+            DestRepoKind::Svn => self.revert_all_svn(),
+            DestRepoKind::Git => self.revert_dest_git(),
+            DestRepoKind::Unknown => Err(format!("目标路径不是 Git/SVN 仓库: {}", self.dest_path)),
+        }
     }
 }
 
@@ -1987,6 +2713,63 @@ mod tests {
     }
 
     #[test]
+    fn test_git_history_and_show_real_repo() {
+        // 真实 git 仓库端到端验证：仓库类型识别 + 窗口历史查询 + 历史内容读取
+        // + 提交时间查询。git 不可用时直接返回（不阻塞其余测试）。
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("git_hist_{}", tmp_id()));
+        std::fs::create_dir_all(dir.join("res").join("wap")).unwrap();
+        let sub = dir.join("res").join("wap");
+        std::fs::write(sub.join("xdrNormal.html"), "<html>v1</html>").unwrap();
+
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("git should be runnable");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "test"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        // 仓库类型识别：目标目录是仓库子目录（与真实 dest = 仓库内 res/wap 一致）
+        assert_eq!(
+            detect_dest_repo_kind(sub.to_str().unwrap()),
+            DestRepoKind::Git
+        );
+
+        let html = sub.join("xdrNormal.html");
+        let html_str = html.to_str().unwrap();
+
+        // 窗口内提交（1 天内）应查到刚才的提交；提交时间查询应可用
+        let revs = git_history_revisions(html_str, 1, 50)
+            .expect("git history query should succeed");
+        assert_eq!(revs.len(), 1);
+        assert!(git_last_changed_nanos(html_str).is_some());
+
+        // 历史内容读取（:./ 相对当前目录解析路径）
+        let content = git_show_revision(html_str, &revs[0]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&content), "<html>v1</html>");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_deploy_cache() {
         let dir = std::env::temp_dir().join(format!("deploy_cache_{}", tmp_id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2108,6 +2891,7 @@ mod tests {
         std::fs::write(dest_dir.join("js").join("app.js"), "1").unwrap();
 
         let dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dest_dir.to_string_lossy().to_string(),
@@ -2140,6 +2924,7 @@ mod tests {
         std::fs::write(dir.join("other.css"), "unrelated").unwrap();
 
         let mut dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dir.to_string_lossy().to_string(),
@@ -2180,6 +2965,7 @@ mod tests {
         std::fs::write(dir.join("style.eeeeffff.css"), "intermediate").unwrap();
         std::fs::write(dir.join("style.css"), "base").unwrap();
         let mut dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dir.to_string_lossy().to_string(),
@@ -2213,6 +2999,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dir.to_string_lossy().to_string(),
@@ -2262,6 +3049,7 @@ mod tests {
             .unwrap();
 
         let mut dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dir.to_string_lossy().to_string(),
@@ -2308,6 +3096,7 @@ mod tests {
         std::fs::write(dest.join("xdrNormal.html"), "<html></html>").unwrap();
 
         let dm = DeployManager {
+            no_hash: false,
             config: DeployConfig {
                 cdn_path_prefix: "https://cdn.example.com/wap".to_string(),
                 ..DeployConfig::default()
@@ -2321,32 +3110,32 @@ mod tests {
 
         let history = |_p: &str, _days: i64, max: usize| {
             assert_eq!(max, HTML_PROTECT_MAX_REVISIONS);
-            Ok(vec![8640_i64, 8631])
+            Ok(vec!["8640".to_string(), "8631".to_string()])
         };
-        let cat = |p: &str, rev: i64| {
+        let cat = |p: &str, commit: &str| {
             let base = path_base(p);
             if base == "xdrNormal.html" {
-                return match rev {
-                    8640 => Ok(concat!(
+                return match commit {
+                    "8640" => Ok(concat!(
                         r#"<link href="https://cdn.example.com/wap/css/xdrNormal.ff09cd59.css">"#,
                         r#"<script src="https://cdn.example.com/wap/components/xdrsignNew/index.04f3b196.js">"#,
                         r#"<img src="https://cdn.example.com/wap/images/xdrNormal/202505/riding-model-bg.7f70ce92.png">"#
                     )
                     .as_bytes()
                     .to_vec()),
-                    8631 => Ok(concat!(
+                    "8631" => Ok(concat!(
                         r#"<link href="css/xdrNormal.42fed2bf.css">"#,
                         r#"<script src="scripts/js/xdrNormal.1807d798.js">"#
                     )
                     .as_bytes()
                     .to_vec()),
-                    _ => Err(format!("unexpected rev {}", rev)),
+                    _ => Err(format!("unexpected commit {}", commit)),
                 };
             }
-            if base == "xdrNormal.ff09cd59.css" && rev == 8640 {
+            if base == "xdrNormal.ff09cd59.css" && commit == "8640" {
                 return Ok(b"body{margin:0}".to_vec());
             }
-            Err(format!("unexpected {}@{}", base, rev))
+            Err(format!("unexpected {}@{}", base, commit))
         };
 
         let protected = dm
@@ -2391,6 +3180,7 @@ mod tests {
         std::fs::write(dest.join("xdrNormal.html"), "<html></html>").unwrap();
 
         let dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dest.to_string_lossy().to_string(),
@@ -2400,17 +3190,17 @@ mod tests {
         };
 
         // 9001 = 窗口内新版；8001 = 边界版本（9/8 长期在线那版）
-        let history = |_p: &str, _days: i64, _max: usize| Ok(vec![9001_i64, 8001]);
-        let cat = |_p: &str, rev: i64| match rev {
-            9001 => Ok(br#"<link href="css/xdrNormal.ff09cd59.css"><script src="scripts/js/xdrNormal.90b39d66.js">"#.to_vec()),
-            8001 => Ok(concat!(
+        let history = |_p: &str, _days: i64, _max: usize| Ok(vec!["9001".to_string(), "8001".to_string()]);
+        let cat = |_p: &str, commit: &str| match commit {
+            "9001" => Ok(br#"<link href="css/xdrNormal.ff09cd59.css"><script src="scripts/js/xdrNormal.90b39d66.js">"#.to_vec()),
+            "8001" => Ok(concat!(
                 r#"<link href="css/xdrNormal.42fed2bf.css">"#,
                 r#"<script src="scripts/js/xdrNormal.1807d798.js">"#,
                 r#"<img src="images/xdrNormal/202505/new/xdrmgyyvip.c1c58415.png">"#
             )
             .as_bytes()
             .to_vec()),
-            _ => Err(format!("unexpected rev {}", rev)),
+            _ => Err(format!("unexpected commit {}", commit)),
         };
 
         let protected = dm
@@ -2438,6 +3228,7 @@ mod tests {
         std::fs::write(dest.join("xdrNormal.html"), "<html></html>").unwrap();
 
         let dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dest.to_string_lossy().to_string(),
@@ -2446,8 +3237,8 @@ mod tests {
             cache: load_deploy_cache(dest.join(".deploy-cache.json").to_str().unwrap()),
         };
 
-        let history = |_p: &str, _days: i64, _max: usize| Err("svn unavailable".to_string());
-        let cat = |_p: &str, _rev: i64| Err("unused".to_string());
+        let history = |_p: &str, _days: i64, _max: usize| Err("vcs unavailable".to_string());
+        let cat = |_p: &str, _commit: &str| Err("unused".to_string());
         assert!(
             dm.build_protected_hashes_with(history, cat).is_none(),
             "history failure must return None so cleanup is skipped"
@@ -2476,6 +3267,7 @@ mod tests {
             .unwrap_or(0);
 
         let mut dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dest.to_string_lossy().to_string(),
@@ -2510,6 +3302,7 @@ mod tests {
         std::fs::write(src_dir.join("app.aaaabbbb.js"), "console.log(1)").unwrap();
 
         let mut dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: src_dir.to_string_lossy().to_string(),
             dest_path: dst_dir.to_string_lossy().to_string(),
@@ -2555,6 +3348,7 @@ mod tests {
         std::fs::create_dir_all(&dst_root).unwrap();
 
         let mut dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: src_root.to_string_lossy().to_string(),
             dest_path: dst_root.to_string_lossy().to_string(),
@@ -2631,6 +3425,7 @@ mod tests {
         std::fs::write(dst_nested.join("gift-carousel2.deadbeef.png"), "stale").unwrap();
 
         let mut dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: src_root.to_string_lossy().to_string(),
             dest_path: dst_root.to_string_lossy().to_string(),
@@ -2697,6 +3492,7 @@ mod tests {
         std::fs::write(comp_dir.join("app.ccccdddd.js"), "1").unwrap();
 
         let mut dm = DeployManager {
+            no_hash: false,
             config: DeployConfig {
                 cdn_path_prefix: cdn_domain.to_string(),
                 ..Default::default()
@@ -2740,6 +3536,7 @@ mod tests {
         std::fs::write(comp_dir.join("index.aaaabbbb.css"), "body{}").unwrap();
 
         let dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dest_dir.to_string_lossy().to_string(),
@@ -2781,6 +3578,7 @@ mod tests {
         std::fs::write(dest_dir.join("css").join("style.css"), "body{}").unwrap();
 
         let dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: dest_dir.to_string_lossy().to_string(),
@@ -2856,6 +3654,7 @@ mod tests {
     #[test]
     fn test_revert_src_git_errors_on_empty_source() {
         let dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: String::new(),
             dest_path: String::new(),
@@ -2908,6 +3707,7 @@ mod tests {
         std::fs::write(dir.join("untracked_dir").join("inside.png"), "i").unwrap();
 
         let dm = DeployManager {
+            no_hash: false,
             config: DeployConfig::default(),
             source_path: dir.to_string_lossy().to_string(),
             dest_path: String::new(),

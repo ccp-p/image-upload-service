@@ -7,34 +7,34 @@ import (
 	"time"
 )
 
-// svnDeleteRecorder records every path passed to vcsSvnDelete so tests can
-// assert that old hash files are announced to SVN before being removed.
-type svnDeleteRecorder struct {
+// destDeleteRecorder records every path passed to vcsDestDelete so tests can
+// assert that old hash files are announced to the dest VCS layer before being removed.
+type destDeleteRecorder struct {
 	paths []string
 }
 
-func (r *svnDeleteRecorder) call(filePath string, debugMode bool) {
+func (r *destDeleteRecorder) call(filePath string, debugMode bool) {
 	r.paths = append(r.paths, filePath)
 }
 
-// TestVcsSvnDelete_VarIsSwappable verifies the SVN delete hook is a swappable
+// TestvcsDestDelete_VarIsSwappable verifies the dest delete hook is a swappable
 // var, which is the seam the notification tests rely on.
-func TestVcsSvnDelete_VarIsSwappable(t *testing.T) {
-	orig := vcsSvnDelete
+func TestVcsDestDelete_VarIsSwappable(t *testing.T) {
+	orig := vcsDestDelete
 	called := false
-	vcsSvnDelete = func(string, bool) { called = true }
-	t.Cleanup(func() { vcsSvnDelete = orig })
+	vcsDestDelete = func(string, bool) { called = true }
+	t.Cleanup(func() { vcsDestDelete = orig })
 
-	vcsSvnDelete("/nonexistent/file.css", false)
+	vcsDestDelete("/nonexistent/file.css", false)
 	if !called {
-		t.Fatal("swapped vcsSvnDelete was not invoked")
+		t.Fatal("swapped vcsDestDelete was not invoked")
 	}
 }
 
 // TestFindAndDeleteOldHashFiles_RemovesSrcOldHash verifies src cleanup keeps
 // only the current hash and does not notify SVN; dest cache protection owns
 // old-version retention.
-func TestFindAndDeleteOldHashFiles_NotifiesSvnDelete(t *testing.T) {
+func TestFindAndDeleteOldHashFiles_NotifiesDestDelete(t *testing.T) {
 	tmpDir := t.TempDir()
 	vm := NewVersionManager(Config{HashLength: 8}, false)
 
@@ -43,17 +43,17 @@ func TestFindAndDeleteOldHashFiles_NotifiesSvnDelete(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "style.eeeeffff.css"), []byte("older"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "other.css"), []byte("unrelated"), 0644)
 
-	rec := &svnDeleteRecorder{}
-	orig := vcsSvnDelete
-	vcsSvnDelete = rec.call
-	t.Cleanup(func() { vcsSvnDelete = orig })
+	rec := &destDeleteRecorder{}
+	orig := vcsDestDelete
+	vcsDestDelete = rec.call
+	t.Cleanup(func() { vcsDestDelete = orig })
 
 	if err := vm.findAndDeleteOldHashFiles(tmpDir, "style", ".css", "aaaabbbb"); err != nil {
 		t.Fatalf("findAndDeleteOldHashFiles failed: %v", err)
 	}
 
 	if len(rec.paths) != 0 {
-		t.Fatalf("expected 0 svn delete notifications, got %d: %v", len(rec.paths), rec.paths)
+		t.Fatalf("expected 0 dest delete notifications, got %d: %v", len(rec.paths), rec.paths)
 	}
 	for _, f := range []string{"style.ccccdddd.css", "style.eeeeffff.css"} {
 		if fileExists(filepath.Join(tmpDir, f)) {
@@ -65,10 +65,10 @@ func TestFindAndDeleteOldHashFiles_NotifiesSvnDelete(t *testing.T) {
 	}
 }
 
-// TestCleanHashFiles_NotifiesSvnDelete verifies that cleaning old hash files
+// TestCleanHashFiles_NotifiesDestDelete verifies that cleaning old hash files
 // from the dest dir notifies SVN for the removed file only, while released
 // versions stay.
-func TestCleanHashFiles_NotifiesSvnDelete(t *testing.T) {
+func TestCleanHashFiles_NotifiesDestDelete(t *testing.T) {
 	tmpDir := t.TempDir()
 	os.WriteFile(filepath.Join(tmpDir, "style.aaaabbbb.css"), []byte("keep"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "style.ccccdddd.css"), []byte("old"), 0644)
@@ -85,20 +85,20 @@ func TestCleanHashFiles_NotifiesSvnDelete(t *testing.T) {
 	dm.cache.SessionTime = time.Now().UnixNano()
 	dm.cache.ReleasedHashes = map[string]bool{}
 
-	rec := &svnDeleteRecorder{}
-	orig := vcsSvnDelete
-	vcsSvnDelete = rec.call
-	t.Cleanup(func() { vcsSvnDelete = orig })
+	rec := &destDeleteRecorder{}
+	orig := vcsDestDelete
+	vcsDestDelete = rec.call
+	t.Cleanup(func() { vcsDestDelete = orig })
 
 	deleted := dm.cleanHashFiles(filepath.Join(tmpDir, "style.css"), "style.aaaabbbb.css")
 	if deleted != 1 {
 		t.Fatalf("expected 1 deleted, got %d", deleted)
 	}
 	if len(rec.paths) != 1 {
-		t.Fatalf("expected 1 svn delete notification, got %d: %v", len(rec.paths), rec.paths)
+		t.Fatalf("expected 1 dest delete notification, got %d: %v", len(rec.paths), rec.paths)
 	}
 	if filepath.Base(rec.paths[0]) != "style.ccccdddd.css" {
-		t.Errorf("svn delete called on %s; want style.ccccdddd.css", filepath.Base(rec.paths[0]))
+		t.Errorf("dest delete called on %s; want style.ccccdddd.css", filepath.Base(rec.paths[0]))
 	}
 	for _, f := range []string{"style.aaaabbbb.css", "style.css", "other.css"} {
 		if !fileExists(filepath.Join(tmpDir, f)) {

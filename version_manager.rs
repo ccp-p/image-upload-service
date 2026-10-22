@@ -145,13 +145,15 @@ fn vcs_git_add(file_path: &str, debug_mode: bool) {
     }
 }
 
-/// Runs `svn delete --keep-local <basename>` from the file's directory,
-/// mirroring Go's vcsSvnDelete. Best-effort and non-fatal: failures (e.g. not
-/// an SVN working copy, or svn missing from PATH) only log a warning so the
-/// delete flow never aborts. `--keep-local` leaves the file on disk so the
-/// subsequent remove_file is what actually removes it.
-pub fn vcs_svn_delete(file_path: &str, debug_mode: bool) {
+/// Dest-repo delete hook (mirrors Go's vcsDestDelete). Git needs no VCS
+/// bookkeeping for deletions (`git add -A` stages removals at commit time);
+/// only SVN working copies (detected by a `.svn` directory) run
+/// `svn delete --keep-local` first. Best-effort and non-fatal.
+pub fn vcs_dest_delete(file_path: &str, debug_mode: bool) {
     let dir = path_dir(file_path);
+    if !std::path::Path::new(&dir).join(".svn").exists() {
+        return;
+    }
     let base = path_base(file_path);
     // Use .output() (not .status()) so svn's stderr is captured and never
     // leaks to the console, mirroring Go's CombinedOutput(). Failures are
@@ -927,6 +929,9 @@ impl VersionManager {
     }
 
     pub fn process_html_file(&mut self, html_path: &str) -> Result<(), String> {
+        if self.config.no_hash {
+            return self.process_html_file_no_hash(html_path);
+        }
         if !file_exists(html_path) {
             return Err(format!("file not found: {}", html_path));
         }
@@ -1085,6 +1090,31 @@ impl VersionManager {
         self.update_html_content(html_path, &resources)?;
         println!("✅ HTML文件已更新");
         println!();
+        Ok(())
+    }
+
+    /// CDN替换但跳过hash的模式（mode 16/17，对应 Go 的 processHTMLFileNoHash）：
+    /// 不生成、不清理 hash 文件，仅将 HTML 中的相对 css/js 引用替换为
+    /// CDN 域名 + 原始文件名（resources 传空，只触发 update_html_content
+    /// 的剩余资源 CDN 替换阶段）
+    pub fn process_html_file_no_hash(&self, html_path: &str) -> Result<(), String> {
+        println!("{}", "=".repeat(60));
+        println!("📄 处理(CDN无hash): {}", html_path);
+        println!("{}", "=".repeat(60));
+
+        if !file_exists(html_path) {
+            return Err(format!("文件不存在: {}", html_path));
+        }
+        if self.config.cdn_domain.is_empty() {
+            println!("ℹ️  CDN域名为空，HTML无需修改");
+            return Ok(());
+        }
+
+        let resources: HashMap<String, HashMap<String, String>> = HashMap::new();
+        self.update_html_content(html_path, &resources)?;
+
+        println!();
+        println!("✨ CDN替换完成（未生成hash文件）!");
         Ok(())
     }
 
@@ -2133,6 +2163,55 @@ mod tests {
             !result.contains("../https://"),
             "found ../https:// precursor, got: {result}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_process_html_file_no_hash() {
+        // mode 16/17：CDN替换 + 跳过hash——HTML引用替换为CDN+原始文件名，
+        // 不生成任何 hash 副本
+        let dir = std::env::temp_dir().join(format!("no_hash_{}", tmp_id()));
+        std::fs::create_dir_all(dir.join("css")).unwrap();
+        std::fs::create_dir_all(dir.join("js")).unwrap();
+        std::fs::write(dir.join("css").join("style.css"), "body{}").unwrap();
+        std::fs::write(dir.join("js").join("app.js"), "1").unwrap();
+        let html_path = dir.join("index.html");
+        std::fs::write(
+            &html_path,
+            "<link href=\"css/style.css\"><script src=\"js/app.js\"></script>",
+        )
+        .unwrap();
+
+        let cfg = Config {
+            cdn_domain: "https://cdn.example.com/wap".to_string(),
+            no_hash: true,
+            ..Default::default()
+        };
+        let mut vm = VersionManager::new(cfg, false);
+        vm.process_html_file(html_path.to_str().unwrap()).unwrap();
+
+        let content = std::fs::read_to_string(&html_path).unwrap();
+        assert!(
+            content.contains("https://cdn.example.com/wap/css/style.css"),
+            "CSS ref should be CDN + original name, got: {}",
+            content
+        );
+        assert!(
+            content.contains("https://cdn.example.com/wap/js/app.js"),
+            "JS ref should be CDN + original name, got: {}",
+            content
+        );
+        assert!(
+            !content.contains("style.") || !content.contains(".css.css"),
+            "unexpected hashed filename in HTML"
+        );
+
+        // 不生成 hash 副本：css/js 目录各只有 1 个文件
+        let css_count = std::fs::read_dir(dir.join("css")).unwrap().count();
+        assert_eq!(css_count, 1, "css dir should contain only the base file");
+        let js_count = std::fs::read_dir(dir.join("js")).unwrap().count();
+        assert_eq!(js_count, 1, "js dir should contain only the base file");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

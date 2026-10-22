@@ -235,6 +235,48 @@ func TestUpdateCSSImageReferences(t *testing.T) {
 	}
 }
 
+func TestProcessHTMLFileNoHash(t *testing.T) {
+	// mode 16/17：CDN替换 + 跳过hash——HTML引用替换为CDN+原始文件名，
+	// 不生成任何 hash 副本
+	tmpDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tmpDir, "css"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "js"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "css", "style.css"), []byte("body{}"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "js", "app.js"), []byte("1"), 0644)
+	htmlPath := filepath.Join(tmpDir, "index.html")
+	os.WriteFile(htmlPath, []byte(`<link href="css/style.css"><script src="js/app.js"></script>`), 0644)
+
+	vm := NewVersionManager(Config{
+		CDNDomain: "https://cdn.example.com/wap",
+		NoHash:    true,
+	}, false)
+	if err := vm.processHTMLFile(htmlPath); err != nil {
+		t.Fatalf("processHTMLFile (noHash) failed: %v", err)
+	}
+
+	content, _ := os.ReadFile(htmlPath)
+	strContent := string(content)
+	if !strings.Contains(strContent, "https://cdn.example.com/wap/css/style.css") {
+		t.Errorf("CSS ref should be CDN + original name, got: %s", strContent)
+	}
+	if !strings.Contains(strContent, "https://cdn.example.com/wap/js/app.js") {
+		t.Errorf("JS ref should be CDN + original name, got: %s", strContent)
+	}
+	if strings.Contains(strContent, "style.abcdef12") || strings.Contains(strContent, "app.12345678") {
+		t.Errorf("hashed filename should not appear in HTML: %s", strContent)
+	}
+
+	// 不生成 hash 副本：css/js 目录各只有 1 个文件
+	cssEntries, _ := os.ReadDir(filepath.Join(tmpDir, "css"))
+	if len(cssEntries) != 1 {
+		t.Errorf("css dir should contain only the base file, got %d entries", len(cssEntries))
+	}
+	jsEntries, _ := os.ReadDir(filepath.Join(tmpDir, "js"))
+	if len(jsEntries) != 1 {
+		t.Errorf("js dir should contain only the base file, got %d entries", len(jsEntries))
+	}
+}
+
 func TestCollectImagesFromCSS(t *testing.T) {
 	cssContent := `
 		.test1 { background: url('test1.png'); }
@@ -1311,36 +1353,36 @@ func TestBuildProtectedHashes(t *testing.T) {
 	htmlPath := filepath.Join(dest, "xdrNormal.html")
 	os.WriteFile(htmlPath, []byte("<html></html>"), 0644)
 
-	origRevs := svnHTMLHistoryRevisions
-	origCat := svnCatRevision
-	t.Cleanup(func() { svnHTMLHistoryRevisions = origRevs; svnCatRevision = origCat })
+	origRevs := destHTMLHistoryRevisions
+	origCat := showFileRevision
+	t.Cleanup(func() { destHTMLHistoryRevisions = origRevs; showFileRevision = origCat })
 
-	svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]int64, error) {
+	destHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]string, error) {
 		if maxRevs != htmlProtectMaxRevisions {
 			t.Errorf("expected maxRevs %d, got %d", htmlProtectMaxRevisions, maxRevs)
 		}
-		return []int64{8640, 8631}, nil
+		return []string{"8640", "8631"}, nil
 	}
 	rev8640 := `<link href="https://cdn.example.com/wap/css/xdrNormal.ff09cd59.css">` +
 		`<script src="https://cdn.example.com/wap/components/xdrsignNew/index.04f3b196.js">` +
 		`<img src="https://cdn.example.com/wap/images/xdrNormal/202505/riding-model-bg.7f70ce92.png">`
 	rev8631 := `<link href="css/xdrNormal.42fed2bf.css">` +
 		`<script src="scripts/js/xdrNormal.1807d798.js">`
-	svnCatRevision = func(wcPath string, rev int64) ([]byte, error) {
+	showFileRevision = func(wcPath string, commit string) ([]byte, error) {
 		base := filepath.Base(wcPath)
 		if base == "xdrNormal.html" {
-			switch rev {
-			case 8640:
+			switch commit {
+			case "8640":
 				return []byte(rev8640), nil
-			case 8631:
+			case "8631":
 				return []byte(rev8631), nil
 			}
 		}
 		// 历史 CSS（本地不存在时从 SVN 读取）
-		if base == "xdrNormal.ff09cd59.css" && rev == 8640 {
+		if base == "xdrNormal.ff09cd59.css" && commit == "8640" {
 			return []byte("body{margin:0}"), nil
 		}
-		return nil, fmt.Errorf("unexpected %s@%d", base, rev)
+		return nil, fmt.Errorf("unexpected %s@%s", base, commit)
 	}
 
 	dm := &DeployManager{
@@ -1379,23 +1421,23 @@ func TestBuildProtectedHashesLongLivedVersion(t *testing.T) {
 	dest := t.TempDir()
 	os.WriteFile(filepath.Join(dest, "xdrNormal.html"), []byte("<html></html>"), 0644)
 
-	origRevs := svnHTMLHistoryRevisions
-	origCat := svnCatRevision
-	t.Cleanup(func() { svnHTMLHistoryRevisions = origRevs; svnCatRevision = origCat })
+	origRevs := destHTMLHistoryRevisions
+	origCat := showFileRevision
+	t.Cleanup(func() { destHTMLHistoryRevisions = origRevs; showFileRevision = origCat })
 
 	// 历史查询返回：窗口内的新版(9001) + 边界版本(8001，即 9/8 那版)
-	svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]int64, error) {
-		return []int64{9001, 8001}, nil
+	destHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]string, error) {
+		return []string{"9001", "8001"}, nil
 	}
-	svnCatRevision = func(wcPath string, rev int64) ([]byte, error) {
-		switch rev {
-		case 9001:
+	showFileRevision = func(wcPath string, commit string) ([]byte, error) {
+		switch commit {
+		case "9001":
 			return []byte(`<link href="css/xdrNormal.ff09cd59.css"><script src="scripts/js/xdrNormal.90b39d66.js">`), nil
-		case 8001:
+		case "8001":
 			// 9/8 长期在线版本的引用 —— 必须保留
 			return []byte(`<link href="css/xdrNormal.42fed2bf.css"><script src="scripts/js/xdrNormal.1807d798.js"><img src="images/xdrNormal/202505/new/xdrmgyyvip.c1c58415.png">`), nil
 		}
-		return nil, fmt.Errorf("unexpected rev %d", rev)
+		return nil, fmt.Errorf("unexpected commit %s", commit)
 	}
 
 	dm := &DeployManager{
@@ -1423,10 +1465,10 @@ func TestBuildProtectedHashesFailsSafe(t *testing.T) {
 	dest := t.TempDir()
 	os.WriteFile(filepath.Join(dest, "xdrNormal.html"), []byte("<html></html>"), 0644)
 
-	origRevs := svnHTMLHistoryRevisions
-	t.Cleanup(func() { svnHTMLHistoryRevisions = origRevs })
-	svnHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]int64, error) {
-		return nil, fmt.Errorf("svn unavailable")
+	origRevs := destHTMLHistoryRevisions
+	t.Cleanup(func() { destHTMLHistoryRevisions = origRevs })
+	destHTMLHistoryRevisions = func(wcPath string, since time.Time, maxRevs int) ([]string, error) {
+		return nil, fmt.Errorf("vcs unavailable")
 	}
 
 	dm := &DeployManager{
@@ -1480,9 +1522,9 @@ func TestCleanHashFilesKeepsRecentDeployHash(t *testing.T) {
 	os.WriteFile(filepath.Join(dest, "style.ccccdddd.css"), []byte("recent-deploy"), 0644)
 	os.WriteFile(filepath.Join(dest, "style.11112222.css"), []byte("ancient"), 0644)
 
-	origSvnTime := svnLastChangedTime
-	t.Cleanup(func() { svnLastChangedTime = origSvnTime })
-	svnLastChangedTime = func(wcPath string) (time.Time, bool) {
+	origSvnTime := destFileCommitTime
+	t.Cleanup(func() { destFileCommitTime = origSvnTime })
+	destFileCommitTime = func(wcPath string) (time.Time, bool) {
 		if filepath.Base(wcPath) == "style.ccccdddd.css" {
 			return time.Now().Add(-1 * time.Hour), true
 		}

@@ -48,7 +48,7 @@ if exist "%cache_file%" (
 echo.
 echo 请选择部署模式:
 REM [1] 默认的 copy
-REM [2] copy-commit (自动提交svn)
+REM [2] copy-commit (自动提交，dest按仓库类型Git/SVN)
 echo [1] copy(常态化的走cdn，不包括盲盒组件)
 echo [2] copy-commit（常态化的走cdn，不包括盲盒组件)
 echo [3] copy-commit，提交git (HTML回滚后)
@@ -60,7 +60,10 @@ echo [8] copy-commit (盲盒组件走cdn)
 echo [9] copy-commit，提交git (盲盒组件走cdn，HTML回滚后)
 echo [10] 仅部署，不处理hash，然后 copy
 echo [11] 仅部署，不处理hash，然后 copy-commit
-echo [12] 回退dest SVN的所有本地变更
+echo [12] 回退dest仓库的所有本地变更（自动识别Git/SVN）
+echo [15] 仅清理dest旧hash文件（不部署，保护现网/HTML历史引用）
+echo [16] CDN替换+跳过hash，copy（原始文件直接走CDN）
+echo [17] CDN替换+跳过hash，copy-commit
 echo.
 
 echo [上次] 模式=%last_mode%
@@ -89,6 +92,7 @@ if "%mode_input%"=="6" goto ask_message
 if "%mode_input%"=="8" goto ask_message
 if "%mode_input%"=="9" goto ask_message
 if "%mode_input%"=="11" goto ask_message
+if "%mode_input%"=="17" goto ask_message
 goto save_cache
 
 :ask_message
@@ -99,6 +103,7 @@ goto save_cache
 :save_cache
 REM 保存本次选项到缓存文件（只缓存模式；回退操作不缓存，避免误触）
 if /i "%mode_input%"=="12" goto run
+if /i "%mode_input%"=="15" goto run
 (
     echo mode=!mode_input!
 ) > "!cache_file!"
@@ -125,6 +130,12 @@ if "%mode_input%"=="12" (
     echo [调试] 完整命令: hashCdn.exe -config=version.config.json -revert-svn
     echo.
     hashCdn.exe -config=version.config.json -revert-svn
+    goto check_result
+)
+if "%mode_input%"=="15" (
+    echo [调试] 完整命令: hashCdn.exe -config=version.config.json -clean-hash
+    echo.
+    hashCdn.exe -config=version.config.json -clean-hash
     goto check_result
 )
 

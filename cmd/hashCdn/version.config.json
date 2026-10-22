@@ -31,9 +31,9 @@
     "rollback_after_deploy": true,
     "autoCommit": false,
     "homeSourcePath": "D:\\job_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap",
-    "homeDestPath": "D:\\job_project\\china_mobile\\huidu\\xhmqqthy-res",
+    "homeDestPath": "D:\\job_project\\china_mobile\\gitHuidu\\xhmqqthy-res\\res\\wap",
     "companySourcePath": "D:\\project\\cx_project\\china_mobile\\gitProject\\richinfo_tyjf_xhmqqthy\\src\\main\\webapp\\res\\wap",
-    "companyDestPath": "D:\\project\\cx_project\\china_mobile\\huidu\\xhmqqthy-res",
+    "companyDestPath": "D:\\project\\cx_project\\china_mobile\\gitHuidu\\xhmqqthy-res\\res\\wap",
     "filePaths": [
       "/components/xdrsignNew/*",
       "/css/xdrNormal.css",
