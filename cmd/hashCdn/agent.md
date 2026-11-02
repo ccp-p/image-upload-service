@@ -37,7 +37,7 @@ image-upload-service/                 Go module: image-upload-service
 
 **源路径 (source)**: git 仓库 `richinfo_tyjf_xhmqqthy/src/main/webapp/res/wap`，开发改代码的地方。
 
-**目标路径 (dest)**: 灰度发布目录，文件复制到这里后提交。部署时自动识别仓库类型（优先 Git，其次 SVN）：Git 走 `pull origin master` → `add -A` → `commit` → `push origin master`（push 失败走本机 7890 代理重试）；SVN 走原有 `svn update` / `svn commit`。当前指向 Git 仓库 `gitHuidu/xhmqqthy-res/res/wap`。
+**目标路径 (dest)**: 灰度发布目录，文件复制到这里后提交。部署时自动识别仓库类型（优先 Git，其次 SVN）：Git 走 `pull origin develop` → `add -A` → `commit` → `push origin develop`（push 失败走本机 7890 代理重试）；SVN 走原有 `svn update` / `svn commit`。当前指向 Git 仓库 `gitHuidu/xhmqqthy-res/res/wap`。
 
 **组件 (components)**: `includeComponents` 配置项指定只处理哪些组件（如 `xdrInvite`、`xdrsign`、`xdrsignNew`）。未配置则处理全部。
 

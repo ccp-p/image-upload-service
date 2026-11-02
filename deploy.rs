@@ -1996,12 +1996,43 @@ impl DeployManager {
         }
     }
 
-    /// 拉取 dest Git 仓库远程 master 分支（对应 Go 的 updateDestGit）
+    /// 确保 dest 工作副本在 develop 分支后拉取远程 develop
+    /// （对应 Go 的 updateDestGit；本地无 develop 时从 origin/develop 创建跟踪分支）
     pub fn update_dest_git(&self) -> Result<(), String> {
-        println!("🔄 正在拉取 dest Git 仓库 (origin master): {}", self.dest_path);
+        println!("🔄 正在切换/更新 dest Git 仓库 (develop 分支): {}", self.dest_path);
 
+        // 1. 确保当前分支为 develop
+        let checkout = std::process::Command::new("git")
+            .args(["checkout", "develop"])
+            .current_dir(&self.dest_path)
+            .output()
+            .map_err(|e| format!("git checkout failed: {}", e))?;
+        if !checkout.status.success() {
+            // 本地无 develop：优先从 origin/develop 创建跟踪分支，其次从当前 HEAD 新建
+            let create = std::process::Command::new("git")
+                .args(["checkout", "-B", "develop", "origin/develop"])
+                .current_dir(&self.dest_path)
+                .output()
+                .map_err(|e| format!("git checkout failed: {}", e))?;
+            if !create.status.success() {
+                let create_local = std::process::Command::new("git")
+                    .args(["checkout", "-B", "develop"])
+                    .current_dir(&self.dest_path)
+                    .output()
+                    .map_err(|e| format!("git checkout failed: {}", e))?;
+                if !create_local.status.success() {
+                    return Err(format!(
+                        "切换到 develop 分支失败: {} / {}",
+                        String::from_utf8_lossy(&create.stderr).trim(),
+                        String::from_utf8_lossy(&create_local.stderr).trim()
+                    ));
+                }
+            }
+        }
+
+        // 2. 拉取远程 develop
         let output = std::process::Command::new("git")
-            .args(["pull", "origin", "master"])
+            .args(["pull", "origin", "develop"])
             .current_dir(&self.dest_path)
             .output()
             .map_err(|e| format!("git pull failed: {}", e))?;
@@ -2020,7 +2051,7 @@ impl DeployManager {
         Ok(())
     }
 
-    /// 提交 dest Git 仓库的所有变更并推送远程 master（对应 Go 的 commitAndPushDest）。
+    /// 提交 dest Git 仓库的所有变更并推送远程 develop（对应 Go 的 commitAndPushDest）。
     /// git add -A 自动暂存新增/修改/删除；push 失败时按约定尝试本机 7890 代理重试
     pub fn commit_and_push_dest(&self, message: &str) -> Result<(), String> {
         println!("📤 正在提交 dest Git 更改...");
@@ -2070,7 +2101,7 @@ impl DeployManager {
         log_line("git commit 成功");
 
         let push = std::process::Command::new("git")
-            .args(["push", "origin", "master"])
+            .args(["push", "origin", "develop"])
             .current_dir(&self.dest_path)
             .output()
             .map_err(|e| format!("git push failed: {}", e))?;
@@ -2078,7 +2109,7 @@ impl DeployManager {
             // 按约定：push 失败时尝试走本机 7890 代理重试
             println!("⚠️  push 失败，尝试使用本机代理 http://127.0.0.1:7890 重试...");
             let retry = std::process::Command::new("git")
-                .args(["push", "origin", "master"])
+                .args(["push", "origin", "develop"])
                 .current_dir(&self.dest_path)
                 .env("HTTPS_PROXY", "http://127.0.0.1:7890")
                 .env("HTTP_PROXY", "http://127.0.0.1:7890")

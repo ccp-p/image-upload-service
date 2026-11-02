@@ -2963,11 +2963,34 @@ func (dm *DeployManager) svnCommit(message string) error {
 	return nil
 }
 
-// updateDestGit 拉取 dest git 仓库远程 master 分支
+// updateDestGit 确保 dest 工作副本在 develop 分支后拉取远程 develop。
+// 本地无 develop 时自动从 origin/develop 创建跟踪分支；远程也无则从当前 HEAD 新建。
 func (dm *DeployManager) updateDestGit() error {
-	fmt.Printf("🔄 正在拉取 dest Git 仓库 (origin master): %s\n", dm.destPath)
+	fmt.Printf("🔄 正在切换/更新 dest Git 仓库 (develop 分支): %s\n", dm.destPath)
 
-	cmd := exec.Command("git", "pull", "origin", "master")
+	// 1. 确保当前分支为 develop
+	checkout := exec.Command("git", "checkout", "develop")
+	checkout.Dir = dm.destPath
+	if out, err := checkout.CombinedOutput(); err != nil {
+		// 本地无 develop：优先从 origin/develop 创建跟踪分支
+		create := exec.Command("git", "checkout", "-B", "develop", "origin/develop")
+		create.Dir = dm.destPath
+		if out2, err2 := create.CombinedOutput(); err2 != nil {
+			// 远程也无 develop：从当前 HEAD 新建
+			createLocal := exec.Command("git", "checkout", "-B", "develop")
+			createLocal.Dir = dm.destPath
+			if out3, err3 := createLocal.CombinedOutput(); err3 != nil {
+				return fmt.Errorf("切换到 develop 分支失败: %s / %s / %s",
+					strings.TrimSpace(string(out)),
+					strings.TrimSpace(string(out2)),
+					strings.TrimSpace(string(out3)))
+			}
+		}
+	}
+
+	// 2. 拉取远程 develop
+	fmt.Printf("🔄 正在拉取 dest Git 仓库 (origin develop): %s\n", dm.destPath)
+	cmd := exec.Command("git", "pull", "origin", "develop")
 	cmd.Dir = dm.destPath
 
 	output, err := cmd.CombinedOutput()
@@ -2979,7 +3002,7 @@ func (dm *DeployManager) updateDestGit() error {
 	return nil
 }
 
-// commitAndPushDest 提交 dest git 仓库的所有变更并推送远程 master。
+// commitAndPushDest 提交 dest git 仓库的所有变更并推送远程 develop。
 // git add -A 自动暂存新增/修改/删除；push 失败时按约定尝试本机 7890 代理重试
 func (dm *DeployManager) commitAndPushDest(message string) error {
 	fmt.Printf("📤 正在提交 dest Git 更改...\n")
@@ -3014,14 +3037,14 @@ func (dm *DeployManager) commitAndPushDest(message string) error {
 	}
 	fmt.Printf("✅ git commit 成功\n")
 
-	pushCmd := exec.Command("git", "push", "origin", "master")
+	pushCmd := exec.Command("git", "push", "origin", "develop")
 	pushCmd.Dir = dm.destPath
 	pushCmd.Stdout = os.Stdout
 	pushCmd.Stderr = os.Stderr
 	if err := pushCmd.Run(); err != nil {
 		// 按约定：push 失败时尝试走本机 7890 代理重试
 		fmt.Println("⚠️  push 失败，尝试使用本机代理 http://127.0.0.1:7890 重试...")
-		retryCmd := exec.Command("git", "push", "origin", "master")
+		retryCmd := exec.Command("git", "push", "origin", "develop")
 		retryCmd.Dir = dm.destPath
 		retryCmd.Env = append(os.Environ(),
 			"HTTPS_PROXY=http://127.0.0.1:7890",

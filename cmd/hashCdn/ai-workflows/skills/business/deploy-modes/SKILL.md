@@ -39,7 +39,7 @@
 
 部署目标运行时探测（优先 Git，其次 SVN），两版行为一致：
 
-- **Git**：部署前 `git pull origin master`；提交时 `git add -A` → `git commit` → `git push origin master`（push 失败自动走本机 7890 代理重试）
+- **Git**：部署前 `git pull origin develop`；提交时 `git add -A` → `git commit` → `git push origin develop`（push 失败自动走本机 7890 代理重试）
 - **SVN**：部署前 `svn update`；提交时 `svn add` + `svn commit`（原有流程保留）
 - **回退（mode 12）**：Git 用 `reset --hard` + `clean -fd`，SVN 用递归 revert + 清理未版本化文件
 - **历史保护查询**：Git 用 `git log` / `git show` / `git log --format=%ct`，SVN 用 `svn log --xml` / `svn cat` / `svn info --xml`；任何查询失败跳过清理（宁可多留不可误删）
