@@ -24,6 +24,7 @@ fn main() {
     let mut deploy_only = false;
     let mut deploy_commit = false;
     let mut deploy_mode: i32 = 6;
+    let mut mode_given = false;
     let mut commit_message = String::new();
     let mut dry_run = false;
     let mut revert_svn = false;
@@ -74,6 +75,7 @@ fn main() {
             "-deploy" => deploy_only = true,
             "-deploy-commit" => deploy_commit = true,
             "-mode" => {
+                mode_given = true;
                 if let Some(v) = take_val(&mut i, inline_val) {
                     deploy_mode = v.parse().unwrap_or(6);
                 }
@@ -118,7 +120,9 @@ fn main() {
     }
 
     apply_deploy_mode(&mut config, deploy_mode);
-    println!("📋 部署模式: {}", deploy_mode);
+    if mode_given {
+        println!("📋 部署模式: {}", deploy_mode);
+    }
 
     // Revert local changes: dest repo (-revert-svn, auto-detects Git/SVN) and/or src git (-revert-git).
     if revert_svn || revert_git {

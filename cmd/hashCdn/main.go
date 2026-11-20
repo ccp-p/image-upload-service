@@ -3767,6 +3767,13 @@ func main() {
 
 	flag.Parse()
 
+	modeGiven := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "mode" {
+			modeGiven = true
+		}
+	})
+
 	config, err := loadConfig(*configPath)
 	fmt.Printf("📂 加载配置文件: %s\n", *configPath)
 	// configlog
@@ -3851,7 +3858,9 @@ func main() {
 		}
 	}
 	// deployMode
-	fmt.Printf("📋 部署模式: %d\n", *deployMode)
+	if modeGiven {
+		fmt.Printf("📋 部署模式: %d\n", *deployMode)
+	}
 
 	// 预览模式：显示配置后直接退出
 	if *dryRun {

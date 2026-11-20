@@ -1053,6 +1053,7 @@ impl DeployManager {
         F: Fn(&str, i64, usize) -> Result<Vec<String>, String>,
         G: Fn(&str, &str) -> Result<Vec<u8>, String>,
     {
+        let started = std::time::Instant::now();
         let html_files = self.deployed_html_files();
         if html_files.is_empty() {
             return None;
@@ -1073,6 +1074,12 @@ impl DeployManager {
                     return None;
                 }
             };
+            println!(
+                "🛡️  {} 历史版本 {} 个，查询耗时 {:.1}s",
+                path_base(html_path),
+                revs.len(),
+                started.elapsed().as_secs_f32()
+            );
             for commit in revs {
                 let content = match cat(html_path, &commit) {
                     Ok(c) => c,
@@ -1111,7 +1118,16 @@ impl DeployManager {
                     }
                 }
             }
+            println!(
+                "🛡️  {} 内容扫描完成，累计耗时 {:.1}s",
+                path_base(html_path),
+                started.elapsed().as_secs_f32()
+            );
         }
+        println!(
+            "🛡️  HTML历史保护名单构建总耗时 {:.1}s",
+            started.elapsed().as_secs_f32()
+        );
         Some(protected)
     }
 
@@ -1687,7 +1703,29 @@ impl DeployManager {
         println!();
         println!("💾 已加载文件缓存: {} 个条目", self.cache.files.len());
         println!();
-        println!("📦 开始复制文件...");
+        // 先更新目标仓库（Git pull / SVN update）：保护名单会读取刚提交的
+        // hash 文件，本地必须已同步，否则 svn cat/git 回退会命中旧版本而失败。
+        match dest_kind {
+            DestRepoKind::Git => {
+                if let Err(e) = self.update_dest_git() {
+                    println!("⚠️  dest Git 拉取失败: {}，继续部署...", e);
+                    log_line(&format!("dest Git 拉取失败: {}", e));
+                } else {
+                    log_line("dest Git 拉取成功");
+                }
+            }
+            DestRepoKind::Svn => {
+                if let Err(e) = self.update_svn_repo() {
+                    println!("⚠️  SVN更新失败: {}，继续部署...", e);
+                    log_line(&format!("SVN更新失败: {}", e));
+                } else {
+                    log_line("SVN更新成功");
+                }
+            }
+            DestRepoKind::Unknown => {
+                println!("⚠️  目标目录未识别为 Git/SVN 仓库，跳过远程更新: {}", self.dest_path);
+            }
+        }
 
         let live = self.fetch_live_hashes();
         if let Some(set) = &live {
@@ -1718,28 +1756,7 @@ impl DeployManager {
             }
         }
 
-        // 按目标仓库类型更新（Git pull / SVN update）
-        match dest_kind {
-            DestRepoKind::Git => {
-                if let Err(e) = self.update_dest_git() {
-                    println!("⚠️  dest Git 拉取失败: {}，继续部署...", e);
-                    log_line(&format!("dest Git 拉取失败: {}", e));
-                } else {
-                    log_line("dest Git 拉取成功");
-                }
-            }
-            DestRepoKind::Svn => {
-                if let Err(e) = self.update_svn_repo() {
-                    println!("⚠️  SVN更新失败: {}，继续部署...", e);
-                    log_line(&format!("SVN更新失败: {}", e));
-                } else {
-                    log_line("SVN更新成功");
-                }
-            }
-            DestRepoKind::Unknown => {
-                println!("⚠️  目标目录未识别为 Git/SVN 仓库，跳过远程更新: {}", self.dest_path);
-            }
-        }
+        println!("📦 开始复制文件...");
 
         let file_paths = self.config.file_paths.clone();
         let mut total_copied = 0;
