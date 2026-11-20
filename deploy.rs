@@ -1229,6 +1229,8 @@ impl DeployManager {
                 Some(set) => set,
                 None => {
                     println!("⚠️  无法获取现网版本，本次部署跳过旧hash清理");
+                    // 置位阻塞标记：同一次部署中后续文件不再重复抓取现网
+                    self.cache.cleanup_blocked = true;
                     return 0;
                 }
             },
@@ -1731,9 +1733,13 @@ impl DeployManager {
         if let Some(set) = &live {
             if self.prepare_session(set) {
                 println!("ℹ️  首次记录现网快照，本次部署不清理旧hash");
+                self.cache.cleanup_blocked = true;
             }
         } else {
             println!("⚠️  无法获取现网版本，本次部署跳过旧hash清理");
+            // 置位阻塞标记：后续每个文件的清理不再重复抓取现网
+            // （对齐 Go 版 prepareDeploySession 的 skipCleanup 一次性语义）
+            self.cache.cleanup_blocked = true;
         }
 
         // 以 dest 里线上 HTML 的提交历史构建保护名单：
@@ -1745,10 +1751,6 @@ impl DeployManager {
                     println!("🛡️  HTML历史保护名单: {} 个资源", set.len());
                 }
                 self.cache.protected_hashes = set;
-                // 构建成功必须复位阻塞标记：cleanup_blocked 持久化在缓存里，
-                // 若只在失败时置位从不清除，一次失败会永久禁用之后的清理
-                self.cache.cleanup_blocked = false;
-                self.cache.dirty = true;
             }
             None => {
                 println!("⚠️  无法构建HTML历史保护名单，本次部署跳过旧hash清理");
